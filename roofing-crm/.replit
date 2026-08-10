@@ -1,0 +1,72 @@
+modules = ["nodejs-20"]
+run = "npm run dev"
+entrypoint = "src/app/page.tsx"
+
+hidden = [".next", "node_modules", ".config"]
+
+[nix]
+channel = "stable-24_05"
+
+[env]
+NEXT_TELEMETRY_DISABLED = "1"
+PORT = "3000"
+
+[gitHubImport]
+requiredFiles = [".replit", "replit.nix"]
+
+[packager]
+language = "nodejs"
+
+[packager.features]
+packageSearch = true
+guessImports = true
+enabledForHosting = false
+
+[languages.typescript]
+pattern = "**/{*.ts,*.tsx,*.js,*.jsx}"
+
+[languages.typescript.languageServer]
+start = "typescript-language-server --stdio"
+
+[deployment]
+build = ["npm", "run", "build"]
+run = ["npm", "run", "start"]
+deploymentTarget = "autoscale"
+ignorePorts = false
+
+[[ports]]
+localPort = 3000
+externalPort = 80
+
+[workflows]
+runButton = "Dev Server"
+
+[[workflows.workflow]]
+name = "Dev Server"
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm install"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 3000
+
+[[workflows.workflow]]
+name = "Production Build"
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm install"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run build"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run start"
+waitForPort = 3000
