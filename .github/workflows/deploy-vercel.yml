@@ -1,0 +1,76 @@
+name: Deploy to Vercel
+
+# Deploys roofing-crm (which includes the /visualizer tool) to its own Vercel
+# project — separate from the main website, which this workflow never touches.
+#
+# Requires three repository secrets. Until they are set the workflow exits
+# cleanly without deploying:
+#   VERCEL_TOKEN       — https://vercel.com/account/tokens
+#   VERCEL_ORG_ID      — from .vercel/project.json after `vercel link`,
+#                        or Vercel → Settings → General → Team ID
+#   VERCEL_PROJECT_ID  — from .vercel/project.json, or the project's
+#                        Settings → General → Project ID
+#
+# Run it from the Actions tab: "Deploy to Vercel" → Run workflow. Choose
+# "preview" for a throwaway URL or "production" to publish to the domain.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        type: choice
+        options:
+          - preview
+          - production
+        default: preview
+
+jobs:
+  deploy:
+    name: Deploy roofing-crm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: roofing-crm
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Vercel credentials
+        id: creds
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "::warning::VERCEL_TOKEN is not set — skipping deploy. See roofing-crm/DEPLOY.md."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.ready == 'true'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: roofing-crm/package-lock.json
+
+      - name: Install Vercel CLI
+        if: steps.creds.outputs.ready == 'true'
+        run: npm install --global vercel@latest
+
+      - name: Pull Vercel environment
+        if: steps.creds.outputs.ready == 'true'
+        run: vercel pull --yes --environment=${{ inputs.target }} --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        if: steps.creds.outputs.ready == 'true'
+        run: vercel build ${{ inputs.target == 'production' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        if: steps.creds.outputs.ready == 'true'
+        run: |
+          url=$(vercel deploy --prebuilt ${{ inputs.target == 'production' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }})
+          echo "Deployed to $url"
+          echo "### Deployed to [$url]($url)" >> "$GITHUB_STEP_SUMMARY"
