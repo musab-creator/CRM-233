@@ -1,0 +1,22 @@
+# Binary assets are intentionally not tracked here.
+#
+# Everything in this folder is either (a) regenerable from the committed
+# source, or (b) sourced from the company Google Drive, which is the system
+# of record for brand assets. See OG_IMAGE.md for exact provenance and
+# regeneration steps.
+
+# --- brand source files (from Drive > "Logo Files") ---
+# logo-color-roofing.png is "NoBg Color Roofing Logo.png"
+# logo-white-contracting.png is "NoBg White Contracting Logo.png"
+logo-*.png
+
+# --- generated render output ---
+# Recreate with: npm install playwright --no-save && node render.js
+og-diversity-roofing.png
+og-diversity-roofing@2x.png
+og-diversity-roofing.jpg
+
+# --- local tooling leftovers ---
+node_modules/
+package.json
+package-lock.json
