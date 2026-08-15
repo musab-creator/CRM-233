@@ -1,0 +1,143 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:1200px; height:630px; overflow:hidden; }
+  body {
+    background:#1c2530;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+
+  .card { position:relative; width:1200px; height:630px; overflow:hidden; }
+
+  /* ---- shingle roof ----
+     isolation:isolate keeps the per-course z-indexes contained, otherwise
+     the lower courses paint on top of the logo and text. */
+  #roof { position:absolute; inset:0; z-index:0; isolation:isolate; }
+  .course { position:absolute; left:0; width:1200px; display:flex; }
+  .tab {
+    height:100%;
+    border-right:2px solid rgba(0,0,0,.55);
+    box-shadow: inset 0 -6px 12px -4px rgba(0,0,0,.55),
+                inset 0 2px 0 rgba(255,255,255,.035);
+    position:relative;
+  }
+  /* keyway notches — the vertical cut every architectural shingle has */
+  .tab::after{
+    content:""; position:absolute; right:-2px; top:38%; bottom:0; width:4px;
+    background:rgba(0,0,0,.6);
+  }
+  /* soft granule speckle */
+  .grain { position:absolute; inset:0; z-index:1; opacity:.30; mix-blend-mode:overlay; }
+
+  /* depth: darken edges, lift the middle where the logo sits */
+  .vignette{
+    position:absolute; inset:0; z-index:2;
+    background:
+      radial-gradient(120% 85% at 50% 44%, rgba(120,150,190,.20) 0%, rgba(0,0,0,0) 52%),
+      linear-gradient(180deg, rgba(0,0,0,.42) 0%, rgba(0,0,0,0) 26%, rgba(0,0,0,.20) 62%, rgba(0,0,0,.66) 100%);
+  }
+  /* scrim directly behind the mark so white type never fights the texture */
+  .scrim{
+    position:absolute; z-index:3; left:50%; top:47%; transform:translate(-50%,-50%);
+    width:1020px; height:400px;
+    background:radial-gradient(ellipse at center, rgba(14,20,28,.80) 0%, rgba(14,20,28,.55) 45%, rgba(14,20,28,0) 72%);
+  }
+
+  /* ---- content ---- */
+  .content{
+    position:absolute; inset:0; z-index:10;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:0 90px;
+  }
+  .logo{ width:760px; display:block; filter:drop-shadow(0 6px 22px rgba(0,0,0,.65)); }
+
+  .rule{
+    width:200px; height:3px; margin:34px 0 26px;
+    background:linear-gradient(90deg, rgba(181,196,219,0) 0%, #b5c4db 50%, rgba(181,196,219,0) 100%);
+  }
+  .meta{
+    display:flex; align-items:center; gap:26px;
+    color:#dbe4f0; font-size:27px; font-weight:600; letter-spacing:.02em;
+    text-shadow:0 2px 10px rgba(0,0,0,.8);
+  }
+  .dot{ width:6px; height:6px; border-radius:50%; background:#b5c4db; opacity:.85; }
+
+  /* accent bar along the bottom edge — reads as a deliberate brand rule
+     rather than the stray line a top-edge bar looked like */
+  .ridge{
+    position:absolute; bottom:0; left:0; right:0; height:7px; z-index:11;
+    background:linear-gradient(90deg,#8fa6c4 0%, #b5c4db 50%, #8fa6c4 100%);
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div id="roof"></div>
+  <canvas class="grain" id="grain" width="1200" height="630"></canvas>
+  <div class="vignette"></div>
+  <div class="scrim"></div>
+  <div class="ridge"></div>
+
+  <div class="content">
+    <img class="logo" src="logo-color-roofing.png" alt="Diversity Roofing">
+    <div class="rule"></div>
+    <div class="meta">
+      <span>Jacksonville &middot; Orange Park &middot; St. Augustine</span>
+      <span class="dot"></span>
+      <span>(904)&nbsp;979-0556</span>
+    </div>
+  </div>
+</div>
+
+<script>
+// deterministic pseudo-random so the render is reproducible
+let s = 20260815;
+function rnd(){ s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; }
+
+// --- build shingle courses ---
+const roof = document.getElementById('roof');
+const COURSE_H = 74;      // exposure per course
+const TAB_W    = 132;     // tab width
+const rows = Math.ceil(630 / COURSE_H) + 1;
+
+for (let r = 0; r < rows; r++){
+  const course = document.createElement('div');
+  course.className = 'course';
+  course.style.top    = (r * COURSE_H) + 'px';
+  course.style.height = (COURSE_H + 10) + 'px';
+  course.style.zIndex = r;               // lower courses overlap those above
+  // stagger every other course by half a tab, like a real roof
+  const offset = (r % 2 === 0) ? 0 : -TAB_W / 2;
+  course.style.marginLeft = offset + 'px';
+  course.style.width = (1200 + TAB_W) + 'px';
+
+  const tabs = Math.ceil((1200 + TAB_W) / TAB_W);
+  for (let t = 0; t < tabs; t++){
+    const tab = document.createElement('div');
+    tab.className = 'tab';
+    tab.style.width = TAB_W + 'px';
+    // weathered slate: vary lightness + a touch of hue per tab
+    const l  = 16 + rnd() * 11;            // 16%–27% lightness
+    const h  = 205 + rnd() * 18;           // blue-slate hue
+    const sat = 10 + rnd() * 9;
+    tab.style.background =
+      `linear-gradient(180deg, hsl(${h} ${sat}% ${l + 4}%) 0%, hsl(${h} ${sat}% ${l}%) 55%, hsl(${h} ${sat}% ${l - 5}%) 100%)`;
+    course.appendChild(tab);
+  }
+  roof.appendChild(course);
+}
+
+// --- granule speckle ---
+const g = document.getElementById('grain').getContext('2d');
+for (let i = 0; i < 34000; i++){
+  const x = rnd() * 1200, y = rnd() * 630;
+  const v = rnd();
+  g.fillStyle = v > .5 ? 'rgba(255,255,255,.20)' : 'rgba(0,0,0,.28)';
+  g.fillRect(x, y, 1.6, 1.6);
+}
+</script>
+</body>
+</html>
