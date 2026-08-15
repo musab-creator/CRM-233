@@ -9,6 +9,29 @@ the Next.js app lives in a subfolder of this repo.
 
 ---
 
+## Quickstart — get it live in about 5 minutes
+
+1. <https://vercel.com/new> → import `musab-creator/CRM-233`.
+2. **Root Directory** → *Edit* → `roofing-crm`. (Framework auto-detects as
+   Next.js. Leave the build settings alone.)
+3. Name it something clearly separate from the main site, e.g.
+   `diversity-roofing-crm`.
+4. Expand **Environment Variables** and add, before the first deploy:
+   - Name `SITE_PASSWORD`, Value = whatever password the crew should type.
+5. **Deploy.** You get a `*.vercel.app` URL.
+6. **Settings → Git → Production Branch** →
+   `claude/roof-color-visualizer-tool-ho37jc`, then **Deployments → Redeploy**.
+
+   Step 6 is only needed while PR #2 is open: Vercel publishes `main` by
+   default, and the visualizer is not on `main` yet. Once the PR merges, set
+   Production Branch back to `main`.
+7. Open the URL. The browser asks for a login — any username, the password from
+   step 4. Then go to **Color Visualizer** in the sidebar.
+
+Everything below is reference detail.
+
+---
+
 ## Option A — Import the repo in the Vercel dashboard (recommended)
 
 Two minutes, no secrets to manage, and you get automatic preview URLs for every
@@ -66,7 +89,7 @@ Set these in **Project → Settings → Environment Variables**.
 
 | Variable | Needed? | What it does |
 | --- | --- | --- |
-| `SITE_PASSWORD` | Strongly recommended | Puts the whole site behind a browser password prompt (any username + this password). The CRM has no login of its own, so without this anyone with the URL can read it. Unset = wide open. See `src/proxy.ts`. |
+| `SITE_PASSWORD` | Yes — set it | Puts the whole site behind a browser password prompt (any username + this password). The CRM has no login of its own, so without this anyone with the URL can read it. Unset = wide open. See `src/proxy.ts`. Changing it takes effect on the next deploy, so redeploy after editing. |
 | `ANTHROPIC_API_KEY` | Only for `/api/policy-analyze` | Policy document analysis. |
 | Twilio / SendGrid / DocuSign / CompanyCam keys | Only for those integrations | See the API routes under `src/app/api/`. Each route no-ops or errors without its keys — nothing sends by accident. |
 
