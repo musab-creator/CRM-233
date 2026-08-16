@@ -39,6 +39,8 @@ export default function RoofScene({
   const capMaterialRef = useRef<THREE.MeshStandardMaterial | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const viewRef = useRef<CameraView>('street');
+  const applyViewRef = useRef<(() => void) | null>(null);
   // Kept in a ref so the scene is built once and never torn down on re-render.
   const paletteRef = useRef(palette);
   paletteRef.current = palette;
@@ -49,13 +51,8 @@ export default function RoofScene({
       if (capMaterialRef.current) applyShingleColor(capMaterialRef.current, next);
     },
     setView(view: CameraView) {
-      const camera = cameraRef.current;
-      const controls = controlsRef.current;
-      if (!camera || !controls) return;
-      const { position, target } = VIEWS[view];
-      camera.position.set(...position);
-      controls.target.set(...target);
-      controls.update();
+      viewRef.current = view;
+      applyViewRef.current?.();
     },
   }));
 
@@ -143,6 +140,21 @@ export default function RoofScene({
     const house = buildHouse(roofMaterial, capMaterial);
     scene.add(house.group);
 
+    // Re-frame the current preset for the current aspect ratio. Narrow frames
+    // crop the house at the wide-screen distances, so the camera widens its
+    // FOV slightly and backs away from the target as the viewport narrows.
+    function applyView() {
+      const { position, target } = VIEWS[viewRef.current];
+      const factor = camera.aspect >= 1.4 ? 1 : 1 + (1.4 - camera.aspect) * 0.7;
+      const t = new THREE.Vector3(...target);
+      camera.position.copy(
+        new THREE.Vector3(...position).sub(t).multiplyScalar(factor).add(t),
+      );
+      controls.target.copy(t);
+      controls.update();
+    }
+    applyViewRef.current = applyView;
+
     // ---- Resize ----
     function resize() {
       if (!mount) return;
@@ -150,10 +162,16 @@ export default function RoofScene({
       const height = mount.clientHeight;
       if (width === 0 || height === 0) return;
       renderer.setSize(width, height, false);
+      const previousAspect = camera.aspect;
       camera.aspect = width / height;
+      camera.fov = camera.aspect >= 1.4 ? 42 : Math.min(56, 42 + (1.4 - camera.aspect) * 14);
       camera.updateProjectionMatrix();
+      // Only re-frame when the shape of the frame actually changes, so window
+      // nudges don't stomp a camera the user has orbited by hand.
+      if (Math.abs(camera.aspect - previousAspect) > 0.1) applyView();
     }
     resize();
+    applyView();
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
 
