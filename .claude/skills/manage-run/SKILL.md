@@ -1,17 +1,15 @@
 ---
 name: manage-run
 description: |
-  Use when: User wants to INSPECT, MONITOR, START, APPROVE, or CONTROL Archon
-  workflow RUNS in the current project — driven through the `archon` CLI over bash.
-  Triggers (inspect): "what's running", "list runs", "show recent runs", "run status",
-            "did the review pass", "check run <id>", "show me run <id>", "what happened in that run".
-  Triggers (control): "approve the plan", "approve run <id>", "reject that run", "cancel that run",
-            "abandon run <id>", "resume run <id>", "continue that run".
-  Triggers (start): "start <workflow> in the background", "kick off <workflow> detached".
-  Capability: Drives `archon workflow runs/get/status/run --detach/approve/reject/abandon/resume`
-            with machine-readable `--json` output, scoped to the current project by cwd.
-  NOT for: Authoring workflows/commands, or Archon setup/config — use the broader `archon` skill.
-argument-hint: "[run-id or workflow] [comment]"
+  Use when the user wants to inspect, monitor, start, approve, or control Archon
+  workflow runs in the current project, driven through the archon CLI over bash.
+  Triggers include "what's running", "list runs", "show recent runs", "run status",
+  "did the review pass", "check that run", "approve the plan", "approve the run",
+  "reject that run", "cancel that run", "abandon the run", "resume the run",
+  "start a workflow in the background", and "kick off a workflow detached".
+  Drives archon workflow runs, get, status, detached run, approve, reject,
+  abandon, and resume with machine-readable JSON output, scoped to the current
+  project. Not for authoring workflows or Archon setup — use the archon skill.
 ---
 
 # Manage Archon Runs

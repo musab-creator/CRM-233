@@ -1,6 +1,6 @@
 ---
 name: n8n-automation
-description: Run and build automations with n8n (n8n-io/n8n) — self-hosted workflow automation with 400+ integrations. Use when the user wants to automate a business process (leads, invoices, email, CRM sync, webhooks, scheduled jobs), run n8n locally or on a server, or import/export n8n workflow JSON. Fits Diversity Roofing workflows: lead intake → CRM, invoice reminders, photo uploads → job folders.
+description: Run and build automations with n8n (n8n-io/n8n) — self-hosted workflow automation with 400+ integrations. Use when the user wants to automate a business process (leads, invoices, email, CRM sync, webhooks, scheduled jobs), run n8n locally or on a server, or import/export n8n workflow JSON. Fits Diversity Roofing workflows like lead intake → CRM, invoice reminders, and photo uploads → job folders.
 ---
 
 # n8n (workflow automation)
