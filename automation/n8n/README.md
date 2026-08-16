@@ -211,6 +211,19 @@ curl -X POST "$N8N_URL/webhook/dr-job-completed" \
 `customerConsented: true` is mandatory. No homeowner's roof goes on social
 without it, and the workflow rejects the payload outright if it is missing.
 
+**Branch on `accepted` in the body, not on the HTTP status.** Every reply comes
+back `200` on n8n 2.x whatever the Respond node's configured code — verified
+against 2.34.6 with `responseCode` in both documented positions, and the
+correct branch demonstrably runs. A rejection is
+`{"accepted": false, "error": "..."}` and always names its reason:
+
+| Reason | Meaning |
+|---|---|
+| `Signature mismatch.` | `CRM_AUTOMATION_KEY` and the key you signed with differ |
+| `customerConsented must be true …` | Consent flag missing or false |
+| `Photo URLs must be public HTTPS …` | Instagram fetches these server-side |
+| `Body is not valid JSON.` | Malformed payload |
+
 ---
 
 ## How it fits together

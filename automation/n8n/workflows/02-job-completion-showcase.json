@@ -3,8 +3,8 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Job closeout \u2192 social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only \u2014 this one produces content, that one ships it.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of body, key = CRM_AUTOMATION_KEY>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true \u2014 no homeowner's roof goes on social without it.",
-        "height": 700,
+        "content": "## Job closeout \u2192 social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only \u2014 this one produces content, that one ships it.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of body, key = CRM_AUTOMATION_KEY>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true \u2014 no homeowner's roof goes on social without it.\n\n### Reading the response\n\n**Branch on `accepted` in the body, not on the HTTP status.** Every reply comes back `200` on n8n 2.x regardless of the Respond node's configured code \u2014 verified against 2.34.6 with the code in both documented positions. A rejection is `{\"accepted\": false, \"error\": \"...\"}` and always names its reason.",
+        "height": 860,
         "width": 480,
         "color": 4
       },
@@ -174,9 +174,10 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseCode": 400,
         "responseBody": "={{ JSON.stringify({ accepted: false, error: $json.reason }) }}",
-        "options": {}
+        "options": {
+          "responseCode": 400
+        }
       },
       "id": "respond-bad",
       "name": "Respond 400",
