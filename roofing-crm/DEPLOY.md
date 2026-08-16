@@ -111,6 +111,38 @@ That downloads and downscales all 21 renders into `public/roof-colors/`, repoint
 `src/lib/roof-colors.ts` at the local files, and then the `remotePatterns` entry
 in `next.config.ts` can be removed.
 
+## Troubleshooting
+
+### The whole site 404s, homepage included
+
+The build did not produce a Next.js app. Usually Root Directory was left at the
+repo root, so Vercel looked at `CRM-233/` — which has no app in it — instead of
+`CRM-233/roofing-crm/`.
+
+There is now a `vercel.json` at the repo root that handles this case: it builds
+the subfolder app from the root (`npm --prefix roofing-crm run build`, output at
+`roofing-crm/.next`). So either configuration works —
+
+- Root Directory = `roofing-crm` → Vercel reads `roofing-crm/vercel.json`
+- Root Directory = repo root → Vercel reads the root `vercel.json`
+
+— but the deploy that already failed will not fix itself. **Redeploy** after
+pulling this commit.
+
+If it still 404s, check **Deployments → the latest one → Building** log:
+
+| What the log shows | What it means |
+| --- | --- |
+| "No Next.js version detected" | Root Directory is wrong and the root `vercel.json` was not picked up. Set Root Directory to `roofing-crm`. |
+| Build succeeded, site still 404s | The domain is attached to a different project, or you are on a deleted deployment URL. Check **Settings → Domains**. |
+| `404: NOT_FOUND / DEPLOYMENT_NOT_FOUND` in the browser | That is Vercel's own page, not the app's — nothing is deployed at that URL. |
+| A styled 404 inside the CRM layout | The app *is* running; only the route is missing. See the branch note above. |
+
+### /visualizer 404s but the rest of the CRM works
+
+Production Branch is still `main`, which does not have the visualizer yet. See
+step 6 of the quickstart.
+
 ## Checks before deploying
 
 ```bash
