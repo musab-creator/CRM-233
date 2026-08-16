@@ -31,9 +31,9 @@ per violation** under Fla. Stat. 489.147.
 
 What the gate enforces, from `roofing-crm/BUSINESS_FACTS.md`:
 
-- **License number in all advertising** (FL Admin Code 61G4-12.011). Appended
-  automatically. If `DR_LICENSE_NUMBER` is unset, *every post is blocked* — this
-  is the biggest single blocker to going live.
+- **License number in all advertising** (FL Admin Code 61G4-12.011). If
+  `DR_LICENSE_NUMBER` is unset, *every post is blocked*. Where it appears is
+  configurable — see [Where the license number goes](#where-the-license-number-goes).
 - **The three Fla. Stat. 489.147 disclosures** on anything mentioning insurance
   claims, appended verbatim, and the post is then held for a human by default.
 - **No deductible language** — waive, cover, absorb, handle, rebate, "zero out
@@ -48,6 +48,35 @@ The rules have an executable spec. Run it after any edit:
 ```bash
 cd roofing-crm && npm run check:compliance
 ```
+
+### Where the license number goes
+
+Florida requires the contractor license number in advertising, but it does not
+have to be stapled to the end of every caption. Two settings:
+
+| `DR_LICENSE_PLACEMENT` | Effect |
+|---|---|
+| `caption` (default) | Appended to every post. The unambiguous reading of the rule. |
+| `profile` | Carried in the Facebook **About** section, the Instagram **bio** and the Google Business Profile **description** instead. Routine captions stay clean. |
+
+`profile` has two guards, both deliberate:
+
+1. **It requires `DR_LICENSE_IN_PROFILES=true`** — your attestation that the
+   number is genuinely in all three bios. Without it the gate falls back to
+   appending, because a typo in a config value must not quietly turn a year of
+   posts into unlicensed advertising.
+2. **Claim-topic posts carry the number inline anyway.** Those are the posts a
+   regulator reads first, and they already carry the 489.147 block, so one more
+   line costs nothing.
+
+Under `profile`, every post carries a `LICENSE_IN_PROFILE` advisory in its
+findings. That is the audit trail: if someone later edits a bio and drops the
+number, the posts published in between are the exposure. **Turn the attestation
+off before editing a profile bio, not after.**
+
+This is a judgement call about what counts as compliant advertising, and it is
+the licence holder's to make — the code just makes both options explicit and
+refuses to guess.
 
 ### A limit worth knowing
 
@@ -264,9 +293,10 @@ Both run in CI on every push.
 
 ## Known gaps
 
-- **`DR_LICENSE_NUMBER` is not known yet.** It is marked `[MISSING]` in
-  `BUSINESS_FACTS.md`. Until it is filled in, the gate blocks every post — by
-  design, since Florida requires it in all advertising.
+- **`DR_LICENSE_NUMBER` must be set locally on every host that runs this** — the
+  CRM and n8n each read it from their own gitignored `.env`. It is deliberately
+  not in any tracked file, and `BUSINESS_FACTS.md` still lists it as `[MISSING]`
+  rather than recording the value.
 - **Social leads do not reach the main lead pipeline.** They land in a separate
   inbox at `/api/social/leads`. The CRM's lead list is client-side Zustand state
   with no database behind it, so there is nowhere for a server route to write.

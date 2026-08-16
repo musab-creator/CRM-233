@@ -29,6 +29,18 @@ export interface ComplianceFinding {
   excerpt?: string;
 }
 
+/**
+ * Where the license number is carried.
+ *
+ * `caption`  — appended to every post. Unambiguously satisfies the rule.
+ * `profile`  — carried in the Facebook About section, the Instagram bio and the
+ *              Google Business Profile description instead, so routine captions
+ *              stay clean. Requires `licenseInProfiles` as an explicit
+ *              attestation that the number is actually in all three, and claim-
+ *              topic posts still carry it inline (see below).
+ */
+export type LicensePlacement = 'caption' | 'profile';
+
 export interface ComplianceConfig {
   /** FL contractor license number. Required — posts are blocked without it. */
   licenseNumber: string | null;
@@ -40,6 +52,15 @@ export interface ComplianceConfig {
    * after the 489.147 disclosures are appended. Recommended: true.
    */
   requireHumanReviewForClaimTopics: boolean;
+  /** See LicensePlacement. Defaults to `caption`. */
+  licensePlacement: LicensePlacement;
+  /**
+   * Attestation that the license number is present in the Facebook About
+   * section, the Instagram bio and the Google Business Profile description.
+   * `profile` placement falls back to `caption` without it — a config typo must
+   * not silently strip the number from every post.
+   */
+  licenseInProfiles: boolean;
 }
 
 export interface ComplianceResult {
@@ -52,6 +73,8 @@ export interface ComplianceResult {
   characterLimit: number;
   mentionsInsuranceClaim: boolean;
   disclosuresApplied: boolean;
+  /** Whether the license number ended up in this caption, and why. */
+  licenseInCaption: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +197,8 @@ export function complianceConfigFromEnv(): ComplianceConfig {
       ? raw.split('|').map((p) => p.trim()).filter(Boolean)
       : ["We Fight for Your Home So You Don't Have To"],
     requireHumanReviewForClaimTopics: process.env.SOCIAL_REVIEW_CLAIM_POSTS !== 'false',
+    licensePlacement: process.env.DR_LICENSE_PLACEMENT === 'profile' ? 'profile' : 'caption',
+    licenseInProfiles: process.env.DR_LICENSE_IN_PROFILES === 'true',
   };
 }
 
@@ -228,13 +253,41 @@ export function checkCompliance(input: ComplianceInput, config: ComplianceConfig
     });
   }
 
-  // --- Insurance-claim topic: attach the three 489.147 disclosures
   const mentionsInsuranceClaim = INSURANCE_TOPIC_PATTERN.test(scanText);
+
+  // --- Where the license number goes.
+  //
+  // Default is every caption, which is the unambiguous reading of the rule.
+  // `profile` placement moves it to the three account bios so routine posts are
+  // not cluttered — but only with an explicit attestation that it is actually
+  // there, and never for a post that talks about insurance claims. Those are
+  // the posts a regulator would look at first, and they already carry the
+  // 489.147 block, so the extra line costs nothing.
+  const attestedProfilePlacement = config.licensePlacement === 'profile' && config.licenseInProfiles;
+  const licenseInCaption = !attestedProfilePlacement || mentionsInsuranceClaim;
+
+  if (config.licensePlacement === 'profile' && !config.licenseInProfiles) {
+    findings.push({
+      code: 'LICENSE_PLACEMENT_UNVERIFIED',
+      severity: 'warning',
+      message:
+        'DR_LICENSE_PLACEMENT is "profile" but DR_LICENSE_IN_PROFILES is not "true". Falling back to appending the number to the caption. Set the attestation once the number is in the Facebook About section, the Instagram bio and the Google Business Profile description.',
+    });
+  } else if (attestedProfilePlacement && !mentionsInsuranceClaim) {
+    findings.push({
+      code: 'LICENSE_IN_PROFILE',
+      severity: 'warning',
+      message:
+        'License number left out of the caption and carried in the account profiles instead. If it is ever removed from a profile bio, every post published under this setting is unlicensed advertising — turn the attestation off before editing a bio.',
+    });
+  }
+
+  // --- Insurance-claim topic: attach the three 489.147 disclosures
   let caption = original;
   let disclosuresApplied = false;
 
   if (!input.raw) {
-    if (licenseLine && !original.includes(licenseLine) && !new RegExp(`lic\\w*\\.?\\s*#?\\s*${escapeRegex(config.licenseNumber ?? '')}`, 'i').test(original)) {
+    if (licenseLine && licenseInCaption && !original.includes(licenseLine) && !new RegExp(`lic\\w*\\.?\\s*#?\\s*${escapeRegex(config.licenseNumber ?? '')}`, 'i').test(original)) {
       caption = `${caption}\n\n${licenseLine}`;
     }
 
@@ -314,6 +367,7 @@ export function checkCompliance(input: ComplianceInput, config: ComplianceConfig
     characterLimit: limits.characters,
     mentionsInsuranceClaim,
     disclosuresApplied,
+    licenseInCaption,
   };
 }
 

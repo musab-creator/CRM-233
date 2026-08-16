@@ -15,11 +15,21 @@ import {
   type SocialPlatform,
 } from '../src/lib/social/compliance.ts';
 
+// A placeholder number — the real one lives only in gitignored .env files.
 const config: ComplianceConfig = {
   licenseNumber: 'CCC1234567',
   companyPhone: '(904) 979-0556',
   approvedPhrases: ["We Fight for Your Home So You Don't Have To"],
   requireHumanReviewForClaimTopics: true,
+  licensePlacement: 'caption',
+  licenseInProfiles: false,
+};
+
+/** License carried in the account bios instead of every caption. */
+const profileConfig: ComplianceConfig = {
+  ...config,
+  licensePlacement: 'profile',
+  licenseInProfiles: true,
 };
 
 interface Case {
@@ -185,6 +195,81 @@ for (const testCase of CASES) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// License placement. The number is public record, but it does not have to be
+// stapled to every caption — as long as it is genuinely somewhere.
+// ---------------------------------------------------------------------------
+
+const routinePost = {
+  caption: 'Tear-off day in Middleburg. The crew was done and the drive swept by dark. (904) 979-0556',
+  platform: 'facebook' as const,
+  hasImage: true,
+};
+
+const inCaption = checkCompliance(routinePost, config);
+if (!inCaption.licenseInCaption || !inCaption.caption.includes('FL Lic. #CCC1234567')) {
+  failures += 1;
+  console.error('  FAIL  caption placement should append the license to a routine post');
+} else {
+  console.log('  ok    caption placement appends the license');
+}
+
+const inProfile = checkCompliance(routinePost, profileConfig);
+if (inProfile.licenseInCaption || inProfile.caption.includes('CCC1234567')) {
+  failures += 1;
+  console.error('  FAIL  profile placement should keep the license out of a routine caption');
+} else if (inProfile.status !== 'pass') {
+  failures += 1;
+  console.error(`  FAIL  profile placement should still pass, got "${inProfile.status}"`);
+} else {
+  console.log('  ok    profile placement keeps routine captions clean');
+}
+
+// A claim-topic post carries the number inline regardless of placement — those
+// are the posts a regulator reads first.
+const claimUnderProfilePlacement = checkCompliance(
+  {
+    caption:
+      'We document hail damage and meet your adjuster on the roof in Jacksonville. (904) 979-0556',
+    platform: 'facebook',
+    hasImage: true,
+  },
+  profileConfig,
+);
+if (!claimUnderProfilePlacement.licenseInCaption || !claimUnderProfilePlacement.caption.includes('FL Lic. #CCC1234567')) {
+  failures += 1;
+  console.error('  FAIL  a claim-topic post must carry the license inline even under profile placement');
+} else {
+  console.log('  ok    claim-topic posts carry the license inline under either placement');
+}
+
+// A typo in the attestation must not silently strip the number.
+const unattested = checkCompliance(routinePost, {
+  ...profileConfig,
+  licenseInProfiles: false,
+});
+if (!unattested.licenseInCaption || !unattested.caption.includes('FL Lic. #CCC1234567')) {
+  failures += 1;
+  console.error('  FAIL  profile placement without the attestation must fall back to appending');
+} else if (!unattested.findings.some((f) => f.code === 'LICENSE_PLACEMENT_UNVERIFIED')) {
+  failures += 1;
+  console.error('  FAIL  unattested profile placement should say so in the findings');
+} else {
+  console.log('  ok    unattested profile placement falls back to appending');
+}
+
+// Placement never rescues a missing number.
+const profileNoNumber = checkCompliance(routinePost, {
+  ...profileConfig,
+  licenseNumber: null,
+});
+if (profileNoNumber.status !== 'blocked') {
+  failures += 1;
+  console.error('  FAIL  profile placement must not bypass the missing-license block');
+} else {
+  console.log('  ok    profile placement does not bypass the missing-license block');
+}
+
 // --- The disclosures must actually be appended, verbatim.
 const claimPost = checkCompliance(
   {
@@ -225,4 +310,4 @@ if (failures > 0) {
   console.error(`${failures} compliance check(s) failed.`);
   process.exit(1);
 }
-console.log(`All ${CASES.length + 2} compliance checks passed.`);
+console.log(`All ${CASES.length + 7} compliance checks passed.`);
