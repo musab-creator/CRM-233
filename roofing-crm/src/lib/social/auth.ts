@@ -3,14 +3,29 @@ import { NextResponse, type NextRequest } from 'next/server';
 /**
  * Shared-secret check for the automation endpoints.
  *
- * n8n sends `x-automation-key`. If SOCIAL_AUTOMATION_KEY is unset the routes
- * stay open so the app runs out of the box like the rest of the CRM — but the
- * response carries a warning so it is obvious in dev, and the README calls out
- * that the key is mandatory before pointing a real n8n instance at this.
+ * n8n sends `x-automation-key`.
+ *
+ * With SOCIAL_AUTOMATION_KEY unset the routes stay open in development, so the
+ * app runs out of the box like the rest of the CRM. In production they close
+ * instead: this repo deploys automatically, and an unset variable there means
+ * an anonymous caller could read the content calendar or push a post into the
+ * publishing queue. Convenient defaults are for localhost only.
  */
 export function authorizeAutomation(request: NextRequest): NextResponse | null {
   const expected = process.env.SOCIAL_AUTOMATION_KEY;
-  if (!expected) return null;
+
+  if (!expected) {
+    if (process.env.NODE_ENV === 'production') {
+      return NextResponse.json(
+        {
+          error:
+            'Automation endpoints are disabled: SOCIAL_AUTOMATION_KEY is not configured on this deployment.',
+        },
+        { status: 503 },
+      );
+    }
+    return null;
+  }
 
   const provided = request.headers.get('x-automation-key');
   if (provided !== expected) {

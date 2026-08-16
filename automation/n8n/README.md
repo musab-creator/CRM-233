@@ -301,9 +301,20 @@ Both run in CI on every push.
   inbox at `/api/social/leads`. The CRM's lead list is client-side Zustand state
   with no database behind it, so there is nowhere for a server route to write.
   This resolves itself when the CRM gets persistence.
-- **The queue is in-memory**, like the rest of the CRM's data layer. Restarting
-  the Next.js server resets it to the seed calendar in
-  `src/lib/social/queue.ts`.
+- **Point n8n at a CRM you run as one long-lived process — not at the Vercel
+  deployment.** The queue is in-memory, like the rest of the CRM's data layer.
+  On a single `npm start` that just means a restart resets it to the seed
+  calendar in `src/lib/social/queue.ts`, which is survivable. On Vercel it is
+  worse than that: serverless invocations do not share memory, so a post
+  enqueued on one instance is invisible to the next request, and `claim=true`
+  cannot stop a double-publish because the two polls may not be talking to the
+  same process. The compliance gate is unaffected — it is a pure function of
+  its input and works correctly anywhere — but the queue needs real storage
+  before anything but a single persistent process can serve it.
+
+- **Set `SOCIAL_AUTOMATION_KEY` on every deployment**, not just locally. Without
+  it the automation routes return `503` in production rather than running
+  unauthenticated; that is a safe failure, not a working one.
 - **No UI yet.** Queued posts, held posts and reviews are readable over the API
   but do not appear on the Marketing page. That is the obvious next piece.
 - **Statutes change.** The deadlines and disclosure text encoded here were taken
