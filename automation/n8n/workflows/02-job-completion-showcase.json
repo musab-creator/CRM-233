@@ -1,9 +1,9 @@
 {
-  "name": "DR — 02 Job Completion Showcase",
+  "name": "DR \u2014 02 Job Completion Showcase",
   "nodes": [
     {
       "parameters": {
-        "content": "## Job closeout → social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only — this one produces content, that one ships it.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of body, key = CRM_AUTOMATION_KEY>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true — no homeowner's roof goes on social without it.",
+        "content": "## Job closeout \u2192 social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only \u2014 this one produces content, that one ships it.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of body, key = CRM_AUTOMATION_KEY>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true \u2014 no homeowner's roof goes on social without it.",
         "height": 700,
         "width": 480,
         "color": 4
@@ -12,7 +12,10 @@
       "name": "About this workflow",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-520, -80]
+      "position": [
+        -520,
+        -80
+      ]
     },
     {
       "parameters": {
@@ -27,19 +30,25 @@
       "name": "Job Completed Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [40, 220],
+      "position": [
+        40,
+        220
+      ],
       "webhookId": "dr-job-completed"
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Verify the shared-secret signature before trusting anything in the body.\n// The webhook is public; the signature is what makes it ours.\nconst crypto = require('crypto');\n\nconst secret = $env.CRM_AUTOMATION_KEY;\nconst raw = $json.body ? (typeof $json.body === 'string' ? $json.body : JSON.stringify($json.body)) : '';\nconst provided = ($json.headers?.['x-dr-signature'] ?? '').trim();\n\nlet body;\ntry {\n  body = typeof $json.body === 'string' ? JSON.parse($json.body) : $json.body;\n} catch {\n  return { json: { ok: false, reason: 'Body is not valid JSON.' } };\n}\n\nif (secret) {\n  const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(provided, 'utf8');\n  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n  if (!valid) {\n    return { json: { ok: false, reason: 'Signature mismatch.' } };\n  }\n} else {\n  console.warn('CRM_AUTOMATION_KEY unset — accepting the webhook unverified. Do not run this way in production.');\n}\n\n// --- Payload rules\nconst problems = [];\nif (!body?.jobId) problems.push('jobId is required.');\nif (!body?.city) problems.push('city is required.');\nif (body?.customerConsented !== true) problems.push('customerConsented must be true — no post without written homeowner consent.');\n\nconst before = body?.photos?.before ?? [];\nconst after = body?.photos?.after ?? [];\nif (after.length === 0) problems.push('At least one \"after\" photo is required.');\n\nconst httpsOnly = [...before, ...after].every((u) => typeof u === 'string' && u.startsWith('https://'));\nif (!httpsOnly) problems.push('Photo URLs must be public HTTPS — Instagram fetches them server-side.');\n\nif (problems.length) {\n  return { json: { ok: false, reason: problems.join(' ') } };\n}\n\nreturn { json: { ok: true, ...body, before, after } };"
+        "jsCode": "// Verify the shared-secret signature before trusting anything in the body.\n// The webhook is public; the signature is what makes it ours.\nconst crypto = require('crypto');\n\nconst secret = $env.CRM_AUTOMATION_KEY;\nconst raw = $json.body ? (typeof $json.body === 'string' ? $json.body : JSON.stringify($json.body)) : '';\nconst provided = ($json.headers?.['x-dr-signature'] ?? '').trim();\n\nlet body;\ntry {\n  body = typeof $json.body === 'string' ? JSON.parse($json.body) : $json.body;\n} catch {\n  return { json: { ok: false, reason: 'Body is not valid JSON.' } };\n}\n\nif (secret) {\n  const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(provided, 'utf8');\n  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n  if (!valid) {\n    return { json: { ok: false, reason: 'Signature mismatch.' } };\n  }\n} else {\n  console.warn('CRM_AUTOMATION_KEY unset \u2014 accepting the webhook unverified. Do not run this way in production.');\n}\n\n// --- Payload rules\nconst problems = [];\nif (!body?.jobId) problems.push('jobId is required.');\nif (!body?.city) problems.push('city is required.');\nif (body?.customerConsented !== true) problems.push('customerConsented must be true \u2014 no post without written homeowner consent.');\n\nconst before = body?.photos?.before ?? [];\nconst after = body?.photos?.after ?? [];\nif (after.length === 0) problems.push('At least one \"after\" photo is required.');\n\nconst httpsOnly = [...before, ...after].every((u) => typeof u === 'string' && u.startsWith('https://'));\nif (!httpsOnly) problems.push('Photo URLs must be public HTTPS \u2014 Instagram fetches them server-side.');\n\nif (problems.length) {\n  return { json: { ok: false, reason: problems.join(' ') } };\n}\n\nreturn { json: { ok: true, ...body, before, after } };"
       },
       "id": "code-validate",
       "name": "Verify Signature & Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [260, 220]
+      "position": [
+        260,
+        220
+      ]
     },
     {
       "parameters": {
@@ -55,7 +64,11 @@
               "id": "cond-valid",
               "leftValue": "={{ $json.ok }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -66,18 +79,24 @@
       "name": "Payload Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [480, 220]
+      "position": [
+        480,
+        220
+      ]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Turn the closeout record into a brief the caption model can work from.\n// Deliberately spare: the model is told elsewhere not to invent detail, so\n// anything not in the payload must not appear here either.\nconst j = $json;\n\nconst cause = j.damageCause ? `${j.damageCause} damage` : 'storm damage';\nconst roof = j.roofType ? ` a ${j.roofType} roof` : ' a roof';\nconst duration = j.crewDays ? ` The crew finished in ${j.crewDays === 1 ? 'a single day' : `${j.crewDays} days`}.` : '';\n\nconst brief = [\n  `A completed ${cause} replacement in ${j.city}.`,\n  `The crew replaced${roof}.${duration}`,\n  j.before.length\n    ? 'The post shows before and after photos side by side — write copy that points at what changed without narrating the images shot by shot.'\n    : 'The post shows the finished roof.',\n  'Close by inviting anyone in the area who took damage in the same weather to have their roof looked at.',\n].join(' ');\n\n// Before photos first so the carousel reads left to right as a story.\nconst media = [...j.before.slice(0, 4), ...j.after.slice(0, 6)].map((url) => ({ url, type: 'image' }));\n\nreturn {\n  json: {\n    jobId: j.jobId,\n    theme: 'job_showcase',\n    platforms: ['facebook', 'instagram'],\n    scheduledFor: new Date().toISOString(),\n    brief,\n    targetCity: j.city,\n    media,\n  },\n};"
+        "jsCode": "// Turn the closeout record into a brief the caption model can work from.\n// Deliberately spare: the model is told elsewhere not to invent detail, so\n// anything not in the payload must not appear here either.\nconst j = $json;\n\nconst cause = j.damageCause ? `${j.damageCause} damage` : 'storm damage';\nconst roof = j.roofType ? ` a ${j.roofType} roof` : ' a roof';\nconst duration = j.crewDays ? ` The crew finished in ${j.crewDays === 1 ? 'a single day' : `${j.crewDays} days`}.` : '';\n\nconst brief = [\n  `A completed ${cause} replacement in ${j.city}.`,\n  `The crew replaced${roof}.${duration}`,\n  j.before.length\n    ? 'The post shows before and after photos side by side \u2014 write copy that points at what changed without narrating the images shot by shot.'\n    : 'The post shows the finished roof.',\n  'Close by inviting anyone in the area who took damage in the same weather to have their roof looked at.',\n].join(' ');\n\n// Before photos first so the carousel reads left to right as a story.\nconst media = [...j.before.slice(0, 4), ...j.after.slice(0, 6)].map((url) => ({ url, type: 'image' }));\n\nreturn {\n  json: {\n    jobId: j.jobId,\n    theme: 'job_showcase',\n    platforms: ['facebook', 'instagram'],\n    scheduledFor: new Date().toISOString(),\n    brief,\n    targetCity: j.city,\n    media,\n  },\n};"
       },
       "id": "code-build-brief",
       "name": "Build Brief",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [700, 120]
+      "position": [
+        700,
+        120
+      ]
     },
     {
       "parameters": {
@@ -86,7 +105,10 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "x-automation-key", "value": "={{ $env.CRM_AUTOMATION_KEY }}" }
+            {
+              "name": "x-automation-key",
+              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
+            }
           ]
         },
         "sendBody": true,
@@ -100,7 +122,10 @@
       "name": "Enqueue in CRM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [920, 120],
+      "position": [
+        920,
+        120
+      ],
       "onError": "continueRegularOutput"
     },
     {
@@ -109,7 +134,7 @@
           "__rl": true,
           "value": "REPLACE_WITH_WORKFLOW_01_ID",
           "mode": "list",
-          "cachedResultName": "DR — 01 Content Calendar Publisher"
+          "cachedResultName": "DR \u2014 01 Content Calendar Publisher"
         },
         "workflowInputs": {
           "mappingMode": "defineBelow",
@@ -125,7 +150,10 @@
       "name": "Run Publisher Now",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [1140, 120],
+      "position": [
+        1140,
+        120
+      ],
       "onError": "continueRegularOutput"
     },
     {
@@ -138,7 +166,10 @@
       "name": "Respond 200",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1360, 120]
+      "position": [
+        1360,
+        120
+      ]
     },
     {
       "parameters": {
@@ -151,30 +182,85 @@
       "name": "Respond 400",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [700, 340]
+      "position": [
+        700,
+        340
+      ]
     }
   ],
   "connections": {
     "Job Completed Webhook": {
-      "main": [[{ "node": "Verify Signature & Payload", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Verify Signature & Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Verify Signature & Payload": {
-      "main": [[{ "node": "Payload Valid?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Payload Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Payload Valid?": {
       "main": [
-        [{ "node": "Build Brief", "type": "main", "index": 0 }],
-        [{ "node": "Respond 400", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Build Brief",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Build Brief": {
-      "main": [[{ "node": "Enqueue in CRM", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Enqueue in CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Enqueue in CRM": {
-      "main": [[{ "node": "Run Publisher Now", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Run Publisher Now",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Run Publisher Now": {
-      "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -182,7 +268,6 @@
     "saveManualExecutions": true
   },
   "pinData": {},
-  "tags": [{ "name": "diversity-roofing" }, { "name": "social" }],
   "meta": {
     "templateCredsSetupCompleted": false
   }

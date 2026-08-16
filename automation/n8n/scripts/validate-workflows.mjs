@@ -44,6 +44,14 @@ for (const file of files) {
   }
 
   if (!wf.name) fail(file, 'workflow has no name');
+
+  // A `tags` array with bare {name} entries makes `n8n import:workflow` create
+  // the tag afresh for each file, and the second one dies on a UNIQUE
+  // constraint — taking the whole batch with it, having imported nothing.
+  // Verified against n8n 2.34.6. Apply tags in the UI after importing.
+  if (wf.tags) {
+    fail(file, 'declares a `tags` array — batch import fails on a UNIQUE constraint. Remove it and tag in the UI.');
+  }
   if (!Array.isArray(wf.nodes)) {
     fail(file, 'workflow has no nodes array');
     continue;
