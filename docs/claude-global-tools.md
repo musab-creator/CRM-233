@@ -1,10 +1,15 @@
 # Global Claude tooling (works in every session, not just CRM)
 
-Set up 2026-08-16. Four GitHub projects installed, verified, and wired for
+Set up 2026-08-16. Nine GitHub projects installed, verified, and wired for
 cross-session use: [claude-code-best-practice](https://github.com/shanraisshan/claude-code-best-practice),
 [blender-mcp](https://github.com/ahujasid/blender-mcp),
 [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund),
-[Archon](https://github.com/coleam00/Archon).
+[Archon](https://github.com/coleam00/Archon),
+[yt-dlp](https://github.com/yt-dlp/yt-dlp),
+[Fooocus](https://github.com/lllyasviel/Fooocus),
+[whisper](https://github.com/openai/whisper),
+[penpot](https://github.com/penpot/penpot),
+[n8n](https://github.com/n8n-io/n8n).
 
 ## How availability actually works
 
@@ -79,3 +84,29 @@ Any Claude Code session on this repo picks these up automatically.
   are account-scoped and load in every conversation automatically. Skills are
   *invoked* per-conversation when relevant (by description triggers or
   `/name`), which is by design, not a per-conversation enablement limit.
+
+## Verification record — wave 2 (yt-dlp, Fooocus, whisper, penpot, n8n)
+
+- **yt-dlp**: `uv tool install yt-dlp` → v2026.07.04 runs. ffmpeg 6.1.1
+  installed via apt for merging. Actual media downloads need open egress
+  (media hosts are outside the sandbox proxy's allowlist).
+- **whisper**: `uv tool install openai-whisper` → v20250625. Full pipeline
+  verified up to inference: espeak-ng-generated speech WAV → ffmpeg decode →
+  `whisper.load_audio` → torch log-mel spectrogram, all OK. Model weight
+  download is proxy-blocked in the sandbox (`openaipublic.azureedge.net` and
+  `huggingface.co` both 403/unreachable); on a normal machine `--model tiny`
+  downloads and transcribes.
+- **Fooocus**: deps install cleanly into a venv (torch CPU); `launch.py`
+  boots (v2.5.5), performs cleanup, and reaches the model-download step —
+  which fails only because Hugging Face is blocked. Needs a GPU machine with
+  open egress for real generation; ~25 GB disk for SDXL weights.
+- **penpot**: docker daemon starts in the container, compose config valid,
+  but registry blob CDN (`production.cloudfront.docker.com`) is
+  proxy-blocked, so images can't pull in the sandbox. Quickstart verified as
+  correct against repo compose file (frontend :9001, mailcatcher :1080).
+- **n8n**: `npm install -g n8n` → v2.34.6. Server boots with
+  `N8N_LISTEN_ADDRESS=127.0.0.1` (container has no IPv6 — documented in the
+  skill), `/healthz` → `{"status":"ok"}`, UI HTTP 200.
+- Five new skills committed: `yt-dlp-media`, `whisper-transcribe`,
+  `fooocus-imagen`, `penpot-selfhost`, `n8n-automation`. Zips sent in chat
+  for account-level upload alongside the wave-1 four.
