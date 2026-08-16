@@ -6,7 +6,9 @@
     "dev": "next dev -H 0.0.0.0 -p ${PORT:-3000}",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p ${PORT:-3000}",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check:compliance": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --disable-warning=ExperimentalWarning scripts/check-compliance.mts",
+    "check:workflows": "node ../automation/n8n/scripts/validate-workflows.mjs"
   },
   "dependencies": {
     "date-fns": "^4.1.0",

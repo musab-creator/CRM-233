@@ -1,0 +1,4 @@
+# Real credentials never get committed. .env.example is the template.
+.env
+.env.*
+!.env.example
