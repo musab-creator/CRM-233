@@ -105,15 +105,42 @@ SOCIAL_AUTOMATION_KEY=<openssl rand -hex 32>
 DR_LICENSE_NUMBER=<the FL contractor licence number>
 ```
 
-Then `npm run dev`. Sanity-check the gate before wiring anything up:
+Note that `.env.local` is a dotenv file, not a shell script — `$(openssl rand
+-hex 32)` written *inside* it is stored literally. Run the command in a
+terminal and paste the result.
+
+Then `npm run dev`, and check the whole thing in one command:
 
 ```bash
-curl -s localhost:3000/api/social/compliance-check \
-  -H 'content-type: application/json' \
-  -H "x-automation-key: $SOCIAL_AUTOMATION_KEY" \
-  -d '{"platform":"facebook","caption":"We waive your deductible!","hasImage":true}' | jq .status
-# "blocked"
+npm run check:setup                        # against localhost:3000
+npm run check:setup -- https://your-host   # against a deployment
 ```
+
+It verifies the CRM answers, the licence number and automation key are set,
+a wrong key gets 401, the deductible-waiver caption is blocked and an ordinary
+caption passes — and names the specific thing to fix when one fails.
+
+#### Hosting it where n8n Cloud can reach it
+
+n8n Cloud calls the CRM over the internet, so `localhost` will not do, and
+**Vercel will not either**: the post queue is in memory, so on serverless each
+invocation gets its own copy — an enqueued post is invisible to the next
+request and `claim=true` cannot prevent a double publish. It needs to run as
+one long-lived process.
+
+`railway.json` in `roofing-crm/` configures that. On [railway.app](https://railway.app):
+
+1. **New Project → Deploy from GitHub repo** → pick this repo.
+2. **Settings → Root Directory** → `roofing-crm`. This is a monorepo; without
+   it the build has nothing to build.
+3. **Variables** → add `SOCIAL_AUTOMATION_KEY`, `DR_LICENSE_NUMBER`,
+   `DR_PUBLIC_PHONE`, and the two placement variables if you want them.
+4. **Settings → Networking → Generate Domain** for a public HTTPS URL.
+
+Railway health-checks `/api/health`, which needs no key and reports whether
+the deployment is configured — booleans only, never the licence number itself.
+Then run `npm run check:setup -- https://<your-railway-url>` and put that URL
+in each workflow's `Config` node.
 
 ### 2. n8n
 
