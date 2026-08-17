@@ -30,3 +30,27 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  checks:
+    name: Compliance rules & n8n workflows
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: roofing-crm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22 for `--experimental-strip-types`, which lets the compliance
+      # spec import the TypeScript rules directly with no test framework and
+      # no extra dependency.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The Florida advertising rules decide whether a post reaches a
+      # homeowner's feed, and a violation runs to $10,000. They get a gate.
+      - name: Compliance rules
+        run: npm run check:compliance
+
+      - name: n8n workflow JSON
+        run: npm run check:workflows

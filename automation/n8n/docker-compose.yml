@@ -1,0 +1,68 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: dr-n8n
+    restart: unless-stopped
+    ports:
+      - '${N8N_PORT:-5678}:5678'
+    environment:
+      # --- n8n runtime
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-America/New_York}
+      TZ: ${TZ:-America/New_York}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-true}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+
+      # The webhook workflows verify HMAC signatures, which needs Node's
+      # crypto module inside Code nodes. Without this the signature checks
+      # throw and every inbound webhook is rejected.
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+
+      # Workflows read configuration through $env. Off by default in recent
+      # n8n versions.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: 'false'
+
+      # Keep 30 days of executions so a "why didn't that post go out" question
+      # is answerable without guessing.
+      EXECUTIONS_DATA_PRUNE: 'true'
+      EXECUTIONS_DATA_MAX_AGE: 720
+
+      # --- Passed through to the workflows
+      CRM_BASE_URL: ${CRM_BASE_URL}
+      CRM_AUTOMATION_KEY: ${CRM_AUTOMATION_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-5}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v23.0}
+      META_APP_ID: ${META_APP_ID}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_VERIFY_TOKEN: ${META_VERIFY_TOKEN}
+      FB_PAGE_ID: ${FB_PAGE_ID}
+      FB_PAGE_ACCESS_TOKEN: ${FB_PAGE_ACCESS_TOKEN}
+      IG_USER_ID: ${IG_USER_ID}
+      IG_ACCESS_TOKEN: ${IG_ACCESS_TOKEN}
+      OWN_ACTOR_IDS: ${OWN_ACTOR_IDS}
+      GBP_CLIENT_ID: ${GBP_CLIENT_ID}
+      GBP_CLIENT_SECRET: ${GBP_CLIENT_SECRET}
+      GBP_REFRESH_TOKEN: ${GBP_REFRESH_TOKEN}
+      GBP_ACCOUNT_ID: ${GBP_ACCOUNT_ID}
+      GBP_LOCATION_ID: ${GBP_LOCATION_ID}
+      REVIEW_LOOKBACK_DAYS: ${REVIEW_LOOKBACK_DAYS:-30}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL}
+      ALERT_EMAIL: ${ALERT_EMAIL}
+      REPORT_EMAIL: ${REPORT_EMAIL}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Mounted read-only so the workflow JSON can be imported from inside
+      # the container without copying it in first.
+      - ./workflows:/workflows:ro
+    extra_hosts:
+      # Lets CRM_BASE_URL point at a Next.js dev server on the host.
+      - 'host.docker.internal:host-gateway'
+
+volumes:
+  n8n_data:
