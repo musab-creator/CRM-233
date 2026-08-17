@@ -117,24 +117,72 @@ curl -s localhost:3000/api/social/compliance-check \
 
 ### 2. n8n
 
+**Nothing in these workflows reads `$env`, and no Code node requires `crypto`.**
+Both are unavailable on n8n Cloud, and were verified as such against 2.34.6
+rather than assumed:
+
+```
+require('crypto')   ->  "Module 'crypto' is disallowed"
+globalThis.crypto   ->  not defined (no Web Crypto fallback either)
+$env.CRM_BASE_URL   ->  "access to env vars denied"
+```
+
+Configuration therefore lives in two places, both of which work identically on
+Cloud and self-hosted:
+
+- **The `Config` node** at the head of each workflow — non-secret values only
+  (CRM URL, page and location IDs, model name, notification addresses). Edit it
+  on the canvas; everything downstream reads it as
+  `{{ $('Config').first().json.crmBaseUrl }}`.
+- **Credentials** — every secret, so none of it is ever in the workflow JSON.
+
+#### On n8n Cloud
+
+Import each file in `workflows/` one at a time: **Create Workflow** → the **⋯**
+menu → **Import from File…** → **Save**. Do not look for a bulk import; n8n's
+batch importer creates tags per file and aborts the whole batch on the first
+name collision.
+
+#### Self-hosted
+
 ```bash
 cd automation/n8n
-cp .env.example .env      # then fill it in
+cp .env.example .env      # n8n's own settings; the workflows no longer read it
 docker compose up -d
 ```
 
-Open `http://localhost:5678` and import each file in `workflows/`
-(**Workflows → Import from File**). They are also mounted read-only inside the
-container at `/workflows`.
+Then import as above at `http://localhost:5678`. The files are also mounted
+read-only in the container at `/workflows`.
 
-Three things are deliberately *not* in the exported JSON and must be set after
+#### Credentials to create
+
+| Credential | Type | Holds | Used by |
+|---|---|---|---|
+| `DR CRM Automation Key` | Header Auth | name `x-automation-key`, value = the CRM's `SOCIAL_AUTOMATION_KEY` | every CRM call |
+| `DR Anthropic` | Anthropic | the API key | every Claude call |
+| `DR Meta Page Token` | Facebook Graph API | the System User page token | Facebook + Instagram calls |
+| `DR Google Business Profile` | Google OAuth2 API | client ID/secret, scope `business.manage` | Google posts, reviews, performance |
+| `DR Webhook Secret` | Crypto | **Hmac Secret** = the CRM's `SOCIAL_AUTOMATION_KEY` | workflow 02 signature check |
+| `DR Meta App Secret` | Crypto | **Hmac Secret** = the Meta app secret | workflow 04 signature check |
+| `DR Meta Token Debug` | Custom Auth | `{"qs":{"input_token":"<page token>","access_token":"<app id>\|<app secret>"}}` | workflow 05 token expiry check |
+| `Diversity Roofing SMTP` | SMTP | mail server | every `Send Email` node |
+
+The Google OAuth2 credential replaces the old manual refresh-token exchange —
+n8n refreshes the access token itself, so there is no `Refresh Google Token`
+node any more.
+
+Four things are deliberately *not* in the exported JSON and must be set after
 import — `npm run check:workflows` lists them:
 
-1. **SMTP credential.** Create one n8n SMTP credential named
-   `Diversity Roofing SMTP`, then re-select it on every `Send Email` node
-   (they carry the placeholder `REPLACE_WITH_SMTP_CREDENTIAL_ID`).
-2. **Workflow 01's ID** in workflow 02's `Run Publisher Now` node.
-3. **Activate** each workflow. Imported workflows arrive inactive.
+1. **Credentials**, re-selected on each node that carries a
+   `REPLACE_WITH_..._CREDENTIAL_ID` placeholder.
+2. **The `Config` node values** in each workflow.
+3. **Workflow 01's ID** in workflow 02's `Run Publisher Now` node.
+4. **Activate** each workflow. Imported workflows arrive inactive.
+
+> On Cloud, the CRM must be reachable from the public internet — n8n Cloud
+> cannot call `localhost`. And because the queue is in-memory, point it at a
+> CRM running as one long-lived process, not at a serverless deployment.
 
 ### 3. Facebook and Instagram
 

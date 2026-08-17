@@ -1,9 +1,9 @@
 {
-  "name": "DR \u2014 05 Weekly Report & Token Health",
+  "name": "DR — 05 Weekly Report & Token Health",
   "nodes": [
     {
       "parameters": {
-        "content": "## Monday morning report\n\nPulls last week's numbers from all three networks plus the CRM, has Claude write a short readout, and emails it.\n\n### The part that is not cosmetic\n\nThe **token health check** runs in the same pass. Facebook page tokens expire, and the failure mode is silent \u2014 posts stop going out and nobody notices for a fortnight. If the token has under 14 days left, the report says so in the subject line.\n\nUse a Business Manager **System User** token to avoid the 60-day expiry entirely; this check is the backstop either way.",
+        "content": "## Monday morning report\n\nPulls last week's numbers from all three networks plus the CRM, has Claude write a short readout, and emails it.\n\n### The part that is not cosmetic\n\nThe **token health check** runs in the same pass. Facebook page tokens expire, and the failure mode is silent — posts stop going out and nobody notices for a fortnight. If the token has under 14 days left, the report says so in the subject line.\n\nUse a Business Manager **System User** token to avoid the 60-day expiry entirely; this check is the backstop either way.",
         "height": 400,
         "width": 420,
         "color": 4
@@ -15,6 +15,84 @@
       "position": [
         -480,
         -20
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crmBaseUrl",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            },
+            {
+              "id": "cfg-metaGraphVersion",
+              "name": "metaGraphVersion",
+              "value": "v23.0",
+              "type": "string"
+            },
+            {
+              "id": "cfg-fbPageId",
+              "name": "fbPageId",
+              "value": "REPLACE_WITH_FACEBOOK_PAGE_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-igUserId",
+              "name": "igUserId",
+              "value": "REPLACE_WITH_INSTAGRAM_BUSINESS_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpLocationId",
+              "name": "gbpLocationId",
+              "value": "REPLACE_WITH_GBP_LOCATION_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-metaAppId",
+              "name": "metaAppId",
+              "value": "REPLACE_WITH_META_APP_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-anthropicModel",
+              "name": "anthropicModel",
+              "value": "claude-opus-5",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertEmail",
+              "name": "alertEmail",
+              "value": "REPLACE_WITH_ALERT_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertFromEmail",
+              "name": "alertFromEmail",
+              "value": "REPLACE_WITH_FROM_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-reportEmail",
+              "name": "reportEmail",
+              "value": "REPLACE_WITH_REPORT_EMAIL",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        460
       ]
     },
     {
@@ -39,7 +117,7 @@
     },
     {
       "parameters": {
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $env.FB_PAGE_ID }}/insights",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.fbPageId }}/insights",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -50,30 +128,34 @@
             {
               "name": "period",
               "value": "week"
-            },
-            {
-              "name": "access_token",
-              "value": "={{ $env.FB_PAGE_ACCESS_TOKEN }}"
             }
           ]
         },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-fb-insights",
       "name": "Facebook Insights",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        300,
+        480,
         100
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
     },
     {
       "parameters": {
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $env.IG_USER_ID }}/insights",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.igUserId }}/insights",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -88,70 +170,34 @@
             {
               "name": "period",
               "value": "week"
-            },
-            {
-              "name": "access_token",
-              "value": "={{ $env.IG_ACCESS_TOKEN || $env.FB_PAGE_ACCESS_TOKEN }}"
             }
           ]
         },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-ig-insights",
       "name": "Instagram Insights",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        300,
+        480,
         280
       ],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://oauth2.googleapis.com/token",
-        "sendBody": true,
-        "contentType": "form-urlencoded",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "client_id",
-              "value": "={{ $env.GBP_CLIENT_ID }}"
-            },
-            {
-              "name": "client_secret",
-              "value": "={{ $env.GBP_CLIENT_SECRET }}"
-            },
-            {
-              "name": "refresh_token",
-              "value": "={{ $env.GBP_REFRESH_TOKEN }}"
-            },
-            {
-              "name": "grant_type",
-              "value": "refresh_token"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 30000
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
         }
-      },
-      "id": "http-google-token",
-      "name": "Refresh Google Token",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        300,
-        460
-      ],
-      "onError": "continueRegularOutput"
+      }
     },
     {
       "parameters": {
-        "url": "=https://businessprofileperformance.googleapis.com/v1/locations/{{ $env.GBP_LOCATION_ID }}:fetchMultiDailyMetricsTimeSeries",
+        "url": "=https://businessprofileperformance.googleapis.com/v1/locations/{{ $('Config').first().json.gbpLocationId }}:fetchMultiDailyMetricsTimeSeries",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -197,62 +243,56 @@
             }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $json.access_token }}"
-            }
-          ]
-        },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api"
       },
       "id": "http-gbp-performance",
       "name": "Google Business Performance",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        560,
+        740,
         460
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CREDENTIAL_ID",
+          "name": "DR Google Business Profile"
+        }
+      }
     },
     {
       "parameters": {
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/debug_token",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "input_token",
-              "value": "={{ $env.FB_PAGE_ACCESS_TOKEN }}"
-            },
-            {
-              "name": "access_token",
-              "value": "={{ $env.META_APP_ID }}|{{ $env.META_APP_SECRET }}"
-            }
-          ]
-        },
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/debug_token",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth"
       },
       "id": "http-token-health",
       "name": "Meta Token Health",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        300,
+        480,
         640
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "REPLACE_WITH_META_TOKEN_DEBUG_CREDENTIAL_ID",
+          "name": "DR Meta Token Debug"
+        }
+      }
     },
     {
       "parameters": {
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/queue",
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/queue",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -262,28 +302,27 @@
             }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-crm-posts",
       "name": "CRM Post History",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        300,
+        480,
         820
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
@@ -295,20 +334,20 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
       "position": [
-        820,
+        1000,
         460
       ]
     },
     {
       "parameters": {
-        "jsCode": "// Pull the five sources into one flat object. Every source is optional \u2014 a\n// broken Google token should still produce a Facebook report, not an error.\nfunction safe(nodeName) {\n  try {\n    const data = $(nodeName).all();\n    return data.length ? data[0].json : null;\n  } catch {\n    return null;\n  }\n}\n\nconst fb = safe('Facebook Insights');\nconst ig = safe('Instagram Insights');\nconst gbp = safe('Google Business Performance');\nconst token = safe('Meta Token Health');\nconst crm = safe('CRM Post History');\n\nfunction metaMetrics(payload) {\n  const out = {};\n  for (const m of payload?.data ?? []) {\n    // Page insights return a values[] series; IG total_value returns a scalar.\n    if (Array.isArray(m.values) && m.values.length) {\n      out[m.name] = m.values.reduce((sum, v) => sum + (typeof v.value === 'number' ? v.value : 0), 0);\n    } else if (m.total_value && typeof m.total_value.value === 'number') {\n      out[m.name] = m.total_value.value;\n    }\n  }\n  return out;\n}\n\nfunction gbpTotals(payload) {\n  const out = {};\n  for (const series of payload?.multiDailyMetricTimeSeries ?? []) {\n    for (const entry of series.dailyMetricTimeSeries ?? []) {\n      const total = (entry.timeSeries?.datedValues ?? []).reduce(\n        (sum, d) => sum + Number(d.value ?? 0),\n        0,\n      );\n      out[entry.dailyMetric] = total;\n    }\n  }\n  return out;\n}\n\n// --- Token expiry\nlet tokenDaysLeft = null;\nlet tokenValid = null;\nconst tokenData = token?.data;\nif (tokenData) {\n  tokenValid = tokenData.is_valid === true;\n  if (tokenData.expires_at === 0) {\n    tokenDaysLeft = Infinity; // System User token \u2014 never expires\n  } else if (typeof tokenData.expires_at === 'number') {\n    tokenDaysLeft = Math.floor((tokenData.expires_at * 1000 - Date.now()) / 86400000);\n  }\n}\n\n// --- CRM publishing outcomes over the last 7 days\nconst weekAgo = Date.now() - 7 * 86400000;\nconst history = (crm && Array.isArray(crm.jobs)) ? crm.jobs : [];\n\n// The queue endpoint returns jobs (post x platform). Count distinct posts by id.\nconst byPost = new Map();\nfor (const job of history) {\n  if (!byPost.has(job.postId)) byPost.set(job.postId, job);\n}\n\nconst sources = { facebook: Boolean(fb && !fb.error), instagram: Boolean(ig && !ig.error), google: Boolean(gbp && !gbp.error), crm: Boolean(crm && !crm.error) };\n\nreturn [{\n  json: {\n    weekEnding: new Date().toISOString().slice(0, 10),\n    sources,\n    facebook: metaMetrics(fb),\n    instagram: metaMetrics(ig),\n    googleBusiness: gbpTotals(gbp),\n    token: {\n      valid: tokenValid,\n      daysLeft: tokenDaysLeft === Infinity ? 'never expires' : tokenDaysLeft,\n      needsAttention: tokenValid === false || (typeof tokenDaysLeft === 'number' && tokenDaysLeft < 14),\n    },\n    scheduled: byPost.size,\n    errors: [\n      fb?.error && `Facebook: ${fb.error.message}`,\n      ig?.error && `Instagram: ${ig.error.message}`,\n      gbp?.error && `Google: ${gbp.error.message}`,\n      crm?.error && `CRM: ${crm.error}`,\n    ].filter(Boolean),\n  },\n}];"
+        "jsCode": "// Pull the five sources into one flat object. Every source is optional — a\n// broken Google token should still produce a Facebook report, not an error.\nfunction safe(nodeName) {\n  try {\n    const data = $(nodeName).all();\n    return data.length ? data[0].json : null;\n  } catch {\n    return null;\n  }\n}\n\nconst fb = safe('Facebook Insights');\nconst ig = safe('Instagram Insights');\nconst gbp = safe('Google Business Performance');\nconst token = safe('Meta Token Health');\nconst crm = safe('CRM Post History');\n\nfunction metaMetrics(payload) {\n  const out = {};\n  for (const m of payload?.data ?? []) {\n    // Page insights return a values[] series; IG total_value returns a scalar.\n    if (Array.isArray(m.values) && m.values.length) {\n      out[m.name] = m.values.reduce((sum, v) => sum + (typeof v.value === 'number' ? v.value : 0), 0);\n    } else if (m.total_value && typeof m.total_value.value === 'number') {\n      out[m.name] = m.total_value.value;\n    }\n  }\n  return out;\n}\n\nfunction gbpTotals(payload) {\n  const out = {};\n  for (const series of payload?.multiDailyMetricTimeSeries ?? []) {\n    for (const entry of series.dailyMetricTimeSeries ?? []) {\n      const total = (entry.timeSeries?.datedValues ?? []).reduce(\n        (sum, d) => sum + Number(d.value ?? 0),\n        0,\n      );\n      out[entry.dailyMetric] = total;\n    }\n  }\n  return out;\n}\n\n// --- Token expiry\nlet tokenDaysLeft = null;\nlet tokenValid = null;\nconst tokenData = token?.data;\nif (tokenData) {\n  tokenValid = tokenData.is_valid === true;\n  if (tokenData.expires_at === 0) {\n    tokenDaysLeft = Infinity; // System User token — never expires\n  } else if (typeof tokenData.expires_at === 'number') {\n    tokenDaysLeft = Math.floor((tokenData.expires_at * 1000 - Date.now()) / 86400000);\n  }\n}\n\n// --- CRM publishing outcomes over the last 7 days\nconst weekAgo = Date.now() - 7 * 86400000;\nconst history = (crm && Array.isArray(crm.jobs)) ? crm.jobs : [];\n\n// The queue endpoint returns jobs (post x platform). Count distinct posts by id.\nconst byPost = new Map();\nfor (const job of history) {\n  if (!byPost.has(job.postId)) byPost.set(job.postId, job);\n}\n\nconst sources = { facebook: Boolean(fb && !fb.error), instagram: Boolean(ig && !ig.error), google: Boolean(gbp && !gbp.error), crm: Boolean(crm && !crm.error) };\n\nreturn [{\n  json: {\n    weekEnding: new Date().toISOString().slice(0, 10),\n    sources,\n    facebook: metaMetrics(fb),\n    instagram: metaMetrics(ig),\n    googleBusiness: gbpTotals(gbp),\n    token: {\n      valid: tokenValid,\n      daysLeft: tokenDaysLeft === Infinity ? 'never expires' : tokenDaysLeft,\n      needsAttention: tokenValid === false || (typeof tokenDaysLeft === 'number' && tokenDaysLeft < 14),\n    },\n    scheduled: byPost.size,\n    errors: [\n      fb?.error && `Facebook: ${fb.error.message}`,\n      ig?.error && `Instagram: ${ig.error.message}`,\n      gbp?.error && `Google: ${gbp.error.message}`,\n      crm?.error && `CRM: ${crm.error}`,\n    ].filter(Boolean),\n  },\n}];"
       },
       "id": "code-assemble",
       "name": "Assemble Numbers",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1040,
+        1220,
         460
       ]
     },
@@ -319,10 +358,6 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "x-api-key",
-              "value": "={{ $env.ANTHROPIC_API_KEY }}"
-            },
             {
               "name": "anthropic-version",
               "value": "2023-06-01"
@@ -335,39 +370,47 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.ANTHROPIC_MODEL || 'claude-opus-5', max_tokens: 3000, system: [ 'You write the Monday social readout for the owner of a roofing company. He reads it on his phone before the first job of the week.', '', 'Lead with what changed and what he should do about it. Then the numbers. Keep the whole thing under 250 words.', 'Write plainly and in full sentences. No headers, no bullet-point soup, no marketing vocabulary, no emoji.', 'Only describe numbers that are actually present in the data. If a source failed, say which one failed in one clause and move on \u2014 do not estimate around the gap and do not invent a trend from a single week.', 'If the Meta access token needs attention, that is the first sentence of the email regardless of how the numbers look.' ].join('\\n'), messages: [{ role: 'user', content: `Week ending ${$json.weekEnding}. Here is the raw data:\\n\\n${JSON.stringify($json, null, 2)}` }], output_config: { effort: 'low' } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.anthropicModel || 'claude-opus-5', max_tokens: 3000, system: [ 'You write the Monday social readout for the owner of a roofing company. He reads it on his phone before the first job of the week.', '', 'Lead with what changed and what he should do about it. Then the numbers. Keep the whole thing under 250 words.', 'Write plainly and in full sentences. No headers, no bullet-point soup, no marketing vocabulary, no emoji.', 'Only describe numbers that are actually present in the data. If a source failed, say which one failed in one clause and move on — do not estimate around the gap and do not invent a trend from a single week.', 'If the Meta access token needs attention, that is the first sentence of the email regardless of how the numbers look.' ].join('\\n'), messages: [{ role: 'user', content: `Week ending ${$json.weekEnding}. Here is the raw data:\\n\\n${JSON.stringify($json, null, 2)}` }], output_config: { effort: 'low' } }) }}",
         "options": {
           "timeout": 180000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
       },
       "id": "http-summary",
       "name": "Write the Readout (Claude)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1260,
+        1440,
         460
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_WITH_ANTHROPIC_CREDENTIAL_ID",
+          "name": "DR Anthropic"
+        }
+      }
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Prose from the model, raw numbers appended underneath. If the model call\n// failed the email still goes out with the numbers \u2014 the report is the data,\n// the summary is a convenience.\nconst data = $('Assemble Numbers').item.json;\nconst res = $json;\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nconst summary = textBlock?.text ?? `(Summary unavailable: ${res.error?.message ?? res.stop_reason ?? 'unknown'}.)`;\n\nfunction table(title, obj) {\n  const rows = Object.entries(obj ?? {});\n  if (!rows.length) return `${title}: no data returned.`;\n  return `${title}\\n` + rows.map(([k, v]) => `  ${k}: ${v}`).join('\\n');\n}\n\nconst body = [\n  summary.trim(),\n  '',\n  '---',\n  '',\n  table('Facebook', data.facebook),\n  '',\n  table('Instagram', data.instagram),\n  '',\n  table('Google Business Profile', data.googleBusiness),\n  '',\n  `Posts tracked in the CRM: ${data.scheduled}`,\n  `Meta token: ${data.token.valid === false ? 'INVALID' : 'valid'}, ${data.token.daysLeft} days left`,\n  data.errors.length ? `\\nSources that failed this run:\\n${data.errors.map((e) => `  - ${e}`).join('\\n')}` : '',\n].join('\\n');\n\nreturn {\n  json: {\n    subject: `${data.token.needsAttention ? '[ACTION NEEDED] ' : ''}Diversity Roofing \u2014 social week ending ${data.weekEnding}`,\n    body,\n  },\n};"
+        "jsCode": "// Prose from the model, raw numbers appended underneath. If the model call\n// failed the email still goes out with the numbers — the report is the data,\n// the summary is a convenience.\nconst data = $('Assemble Numbers').item.json;\nconst res = $json;\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nconst summary = textBlock?.text ?? `(Summary unavailable: ${res.error?.message ?? res.stop_reason ?? 'unknown'}.)`;\n\nfunction table(title, obj) {\n  const rows = Object.entries(obj ?? {});\n  if (!rows.length) return `${title}: no data returned.`;\n  return `${title}\\n` + rows.map(([k, v]) => `  ${k}: ${v}`).join('\\n');\n}\n\nconst body = [\n  summary.trim(),\n  '',\n  '---',\n  '',\n  table('Facebook', data.facebook),\n  '',\n  table('Instagram', data.instagram),\n  '',\n  table('Google Business Profile', data.googleBusiness),\n  '',\n  `Posts tracked in the CRM: ${data.scheduled}`,\n  `Meta token: ${data.token.valid === false ? 'INVALID' : 'valid'}, ${data.token.daysLeft} days left`,\n  data.errors.length ? `\\nSources that failed this run:\\n${data.errors.map((e) => `  - ${e}`).join('\\n')}` : '',\n].join('\\n');\n\nreturn {\n  json: {\n    subject: `${data.token.needsAttention ? '[ACTION NEEDED] ' : ''}Diversity Roofing — social week ending ${data.weekEnding}`,\n    body,\n  },\n};"
       },
       "id": "code-format-email",
       "name": "Format Email",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1480,
+        1660,
         460
       ]
     },
     {
       "parameters": {
-        "fromEmail": "={{ $env.ALERT_FROM_EMAIL }}",
-        "toEmail": "={{ $env.REPORT_EMAIL || $env.ALERT_EMAIL }}",
+        "fromEmail": "={{ $('Config').first().json.alertFromEmail }}",
+        "toEmail": "={{ $('Config').first().json.reportEmail || $('Config').first().json.alertEmail }}",
         "subject": "={{ $json.subject }}",
         "emailFormat": "text",
         "text": "={{ $json.body }}",
@@ -378,7 +421,7 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        1700,
+        1880,
         460
       ],
       "credentials": {
@@ -394,27 +437,7 @@
       "main": [
         [
           {
-            "node": "Facebook Insights",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Instagram Insights",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Refresh Google Token",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Meta Token Health",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "CRM Post History",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
@@ -439,17 +462,6 @@
             "node": "Collect Everything",
             "type": "main",
             "index": 1
-          }
-        ]
-      ]
-    },
-    "Refresh Google Token": {
-      "main": [
-        [
-          {
-            "node": "Google Business Performance",
-            "type": "main",
-            "index": 0
           }
         ]
       ]
@@ -525,6 +537,37 @@
         [
           {
             "node": "Send the Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Facebook Insights",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Instagram Insights",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Meta Token Health",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CRM Post History",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Google Business Performance",
             "type": "main",
             "index": 0
           }

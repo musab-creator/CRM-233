@@ -1,5 +1,5 @@
 {
-  "name": "DR \u2014 01 Content Calendar Publisher",
+  "name": "DR — 01 Content Calendar Publisher",
   "nodes": [
     {
       "parameters": {
@@ -15,6 +15,78 @@
       "position": [
         -460,
         -140
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crmBaseUrl",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            },
+            {
+              "id": "cfg-metaGraphVersion",
+              "name": "metaGraphVersion",
+              "value": "v23.0",
+              "type": "string"
+            },
+            {
+              "id": "cfg-fbPageId",
+              "name": "fbPageId",
+              "value": "REPLACE_WITH_FACEBOOK_PAGE_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-igUserId",
+              "name": "igUserId",
+              "value": "REPLACE_WITH_INSTAGRAM_BUSINESS_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpAccountId",
+              "name": "gbpAccountId",
+              "value": "REPLACE_WITH_GBP_ACCOUNT_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpLocationId",
+              "name": "gbpLocationId",
+              "value": "REPLACE_WITH_GBP_LOCATION_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-anthropicModel",
+              "name": "anthropicModel",
+              "value": "claude-opus-5",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertEmail",
+              "name": "alertEmail",
+              "value": "REPLACE_WITH_ALERT_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertFromEmail",
+              "name": "alertFromEmail",
+              "value": "REPLACE_WITH_FROM_EMAIL",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
       ]
     },
     {
@@ -39,7 +111,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/queue",
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/queue",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -53,38 +125,37 @@
             }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-get-queue",
       "name": "Get Due Posts",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        280,
+        460,
         100
-      ]
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// One item per (post, platform) pair. If the CRM returns nothing, this node\n// emits zero items and the rest of the workflow is skipped \u2014 that is the\n// normal \"no posts due\" path, not an error.\nconst jobs = [];\n\nfor (const item of $input.all()) {\n  for (const job of item.json.jobs ?? []) {\n    jobs.push({\n      json: {\n        postId: job.postId,\n        platform: job.platform,\n        theme: job.theme,\n        targetCity: job.targetCity,\n        media: job.media ?? [],\n        googleCta: job.googleCta ?? null,\n        existingCaption: job.existingCaption,\n        prompt: job.prompt,\n        hasImage: (job.media ?? []).length > 0,\n      },\n    });\n  }\n\n  for (const warning of item.json.warnings ?? []) {\n    console.warn('CRM warning:', warning);\n  }\n}\n\nreturn jobs;"
+        "jsCode": "// One item per (post, platform) pair. If the CRM returns nothing, this node\n// emits zero items and the rest of the workflow is skipped — that is the\n// normal \"no posts due\" path, not an error.\nconst jobs = [];\n\nfor (const item of $input.all()) {\n  for (const job of item.json.jobs ?? []) {\n    jobs.push({\n      json: {\n        postId: job.postId,\n        platform: job.platform,\n        theme: job.theme,\n        targetCity: job.targetCity,\n        media: job.media ?? [],\n        googleCta: job.googleCta ?? null,\n        existingCaption: job.existingCaption,\n        prompt: job.prompt,\n        hasImage: (job.media ?? []).length > 0,\n      },\n    });\n  }\n\n  for (const warning of item.json.warnings ?? []) {\n    console.warn('CRM warning:', warning);\n  }\n}\n\nreturn jobs;"
       },
       "id": "code-expand-jobs",
       "name": "Expand Into Platform Jobs",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        500,
+        680,
         100
       ]
     },
@@ -118,7 +189,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        720,
+        900,
         100
       ]
     },
@@ -129,10 +200,6 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "x-api-key",
-              "value": "={{ $env.ANTHROPIC_API_KEY }}"
-            },
             {
               "name": "anthropic-version",
               "value": "2023-06-01"
@@ -145,46 +212,54 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.ANTHROPIC_MODEL || 'claude-opus-5', max_tokens: 4000, system: $json.prompt.system, messages: [{ role: 'user', content: $json.prompt.user }], output_config: { effort: 'low', format: { type: 'json_schema', schema: $json.prompt.schema } } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.anthropicModel || 'claude-opus-5', max_tokens: 4000, system: $json.prompt.system, messages: [{ role: 'user', content: $json.prompt.user }], output_config: { effort: 'low', format: { type: 'json_schema', schema: $json.prompt.schema } } }) }}",
         "options": {
           "timeout": 180000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
       },
       "id": "http-claude-caption",
       "name": "Write Caption (Claude)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        960,
+        1140,
         0
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_WITH_ANTHROPIC_CREDENTIAL_ID",
+          "name": "DR Anthropic"
+        }
+      }
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Structured outputs mean the text block is already valid JSON matching the\n// schema in src/lib/social/prompt.ts \u2014 no prose to strip. Two failure modes\n// still need handling: a safety refusal (HTTP 200, stop_reason 'refusal') and\n// a truncated response (stop_reason 'max_tokens').\nconst job = $('Expand Into Platform Jobs').item.json;\nconst res = $json;\n\nfunction fail(reason) {\n  return { json: { ...job, caption: '', captionError: reason } };\n}\n\nif (res.error) {\n  return fail(`Anthropic API error: ${res.error.type ?? 'unknown'} \u2014 ${res.error.message ?? ''}`);\n}\n\nif (res.stop_reason === 'refusal') {\n  return fail(`Model declined the request (${res.stop_details?.category ?? 'no category'}).`);\n}\n\nif (res.stop_reason === 'max_tokens') {\n  return fail('Response hit max_tokens and is truncated \u2014 raise max_tokens or shorten the brief.');\n}\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!textBlock) {\n  return fail('No text block in the model response.');\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(textBlock.text);\n} catch (e) {\n  return fail(`Model output was not valid JSON: ${e.message}`);\n}\n\nreturn {\n  json: {\n    ...job,\n    caption: parsed.caption,\n    hook: parsed.hook,\n    modelSaysInsuranceTopic: parsed.mentions_insurance_claim === true,\n    captionError: null,\n    usage: res.usage ?? null,\n  },\n};"
+        "jsCode": "// Structured outputs mean the text block is already valid JSON matching the\n// schema in src/lib/social/prompt.ts — no prose to strip. Two failure modes\n// still need handling: a safety refusal (HTTP 200, stop_reason 'refusal') and\n// a truncated response (stop_reason 'max_tokens').\nconst job = $('Expand Into Platform Jobs').item.json;\nconst res = $json;\n\nfunction fail(reason) {\n  return { json: { ...job, caption: '', captionError: reason } };\n}\n\nif (res.error) {\n  return fail(`Anthropic API error: ${res.error.type ?? 'unknown'} — ${res.error.message ?? ''}`);\n}\n\nif (res.stop_reason === 'refusal') {\n  return fail(`Model declined the request (${res.stop_details?.category ?? 'no category'}).`);\n}\n\nif (res.stop_reason === 'max_tokens') {\n  return fail('Response hit max_tokens and is truncated — raise max_tokens or shorten the brief.');\n}\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!textBlock) {\n  return fail('No text block in the model response.');\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(textBlock.text);\n} catch (e) {\n  return fail(`Model output was not valid JSON: ${e.message}`);\n}\n\nreturn {\n  json: {\n    ...job,\n    caption: parsed.caption,\n    hook: parsed.hook,\n    modelSaysInsuranceTopic: parsed.mentions_insurance_claim === true,\n    captionError: null,\n    usage: res.usage ?? null,\n  },\n};"
       },
       "id": "code-parse-caption",
       "name": "Parse Caption",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1180,
+        1360,
         0
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// A human already wrote this caption in the CRM \u2014 skip generation entirely.\nreturn {\n  json: {\n    ...$json,\n    caption: $json.existingCaption,\n    hook: String($json.existingCaption).split('\\n')[0],\n    modelSaysInsuranceTopic: false,\n    captionError: null,\n  },\n};"
+        "jsCode": "// A human already wrote this caption in the CRM — skip generation entirely.\nreturn {\n  json: {\n    ...$json,\n    caption: $json.existingCaption,\n    hook: String($json.existingCaption).split('\\n')[0],\n    modelSaysInsuranceTopic: false,\n    captionError: null,\n  },\n};"
       },
       "id": "code-use-existing",
       "name": "Use Human-Written Caption",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        960,
+        1140,
         220
       ]
     },
@@ -198,51 +273,50 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
       "position": [
-        1400,
+        1580,
         100
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/compliance-check",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/compliance-check",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ postId: $json.postId, platform: $json.platform, caption: $json.caption, hasImage: $json.hasImage }) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-compliance",
       "name": "Florida Compliance Gate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1620,
+        1800,
         100
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Fail closed. Anything that is not an explicit `pass` \u2014 a blocked caption, a\n// needs_review caption, a 500 from the CRM, a network timeout \u2014 stops here.\n// The cost of a wrong publish is up to $10,000 per violation under\n// Fla. Stat. 489.147; the cost of a missed post is one late post.\nconst job = $('All Captions').item.json;\nconst gate = $json;\n\nconst reachedGate = typeof gate.status === 'string';\nconst status = reachedGate ? gate.status : 'blocked';\n\nconst findings = reachedGate\n  ? (gate.findings ?? [])\n  : [{ code: 'GATE_UNREACHABLE', severity: 'blocker', message: `Compliance endpoint did not answer: ${gate.error?.message ?? gate.message ?? 'unknown error'}` }];\n\nif (job.captionError) {\n  findings.unshift({ code: 'CAPTION_FAILED', severity: 'blocker', message: job.captionError });\n}\n\nconst blockers = findings.filter((f) => f.severity === 'blocker');\nconst reviews = findings.filter((f) => f.severity === 'review');\n\nreturn {\n  json: {\n    ...job,\n    complianceStatus: job.captionError ? 'blocked' : status,\n    finalCaption: gate.caption ?? job.caption,\n    findings,\n    blockerSummary: blockers.map((f) => `${f.code}: ${f.message}`).join(' | '),\n    reviewSummary: reviews.map((f) => `${f.code}: ${f.message}`).join(' | '),\n  },\n};"
+        "jsCode": "// Fail closed. Anything that is not an explicit `pass` — a blocked caption, a\n// needs_review caption, a 500 from the CRM, a network timeout — stops here.\n// The cost of a wrong publish is up to $10,000 per violation under\n// Fla. Stat. 489.147; the cost of a missed post is one late post.\nconst job = $('All Captions').item.json;\nconst gate = $json;\n\nconst reachedGate = typeof gate.status === 'string';\nconst status = reachedGate ? gate.status : 'blocked';\n\nconst findings = reachedGate\n  ? (gate.findings ?? [])\n  : [{ code: 'GATE_UNREACHABLE', severity: 'blocker', message: `Compliance endpoint did not answer: ${gate.error?.message ?? gate.message ?? 'unknown error'}` }];\n\nif (job.captionError) {\n  findings.unshift({ code: 'CAPTION_FAILED', severity: 'blocker', message: job.captionError });\n}\n\nconst blockers = findings.filter((f) => f.severity === 'blocker');\nconst reviews = findings.filter((f) => f.severity === 'review');\n\nreturn {\n  json: {\n    ...job,\n    complianceStatus: job.captionError ? 'blocked' : status,\n    finalCaption: gate.caption ?? job.caption,\n    findings,\n    blockerSummary: blockers.map((f) => `${f.code}: ${f.message}`).join(' | '),\n    reviewSummary: reviews.map((f) => `${f.code}: ${f.message}`).join(' | '),\n  },\n};"
       },
       "id": "code-evaluate-gate",
       "name": "Evaluate Gate",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1840,
+        2020,
         100
       ]
     },
@@ -275,7 +349,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        2060,
+        2240,
         100
       ]
     },
@@ -364,7 +438,7 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3,
       "position": [
-        2280,
+        2460,
         0
       ]
     },
@@ -387,27 +461,35 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $env.FB_PAGE_ID }}/{{ $json.hasImage ? 'photos' : 'feed' }}",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.fbPageId }}/{{ $json.hasImage ? 'photos' : 'feed' }}",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.hasImage ? { url: $json.media[0].url, caption: $json.finalCaption, published: true, access_token: $env.FB_PAGE_ACCESS_TOKEN } : { message: $json.finalCaption, access_token: $env.FB_PAGE_ACCESS_TOKEN }) }}",
+        "jsonBody": "={{ JSON.stringify($json.hasImage ? { url: $json.media[0].url, caption: $json.finalCaption, published: true } : { message: $json.finalCaption }) }}",
         "options": {
           "timeout": 60000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-fb-publish",
       "name": "Publish to Facebook",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2520,
+        2700,
         -60
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
     },
     {
       "parameters": {
-        "content": "### Instagram\n\nPublishing is always two calls: create a media container, then publish it by `creation_id`. The container is not ready immediately, so the workflow waits and checks `status_code` before publishing.\n\n`image_url` must be a **publicly reachable HTTPS JPEG** \u2014 Instagram fetches it server-side. A signed URL that expires, or anything behind auth, fails here.",
+        "content": "### Instagram\n\nPublishing is always two calls: create a media container, then publish it by `creation_id`. The container is not ready immediately, so the workflow waits and checks `status_code` before publishing.\n\n`image_url` must be a **publicly reachable HTTPS JPEG** — Instagram fetches it server-side. A signed URL that expires, or anything behind auth, fails here.",
         "height": 300,
         "width": 340,
         "color": 6
@@ -424,23 +506,31 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $env.IG_USER_ID }}/media",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.igUserId }}/media",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ image_url: $json.media[0].url, caption: $json.finalCaption, access_token: $env.IG_ACCESS_TOKEN || $env.FB_PAGE_ACCESS_TOKEN }) }}",
+        "jsonBody": "={{ JSON.stringify({ image_url: $json.media[0].url, caption: $json.finalCaption }) }}",
         "options": {
           "timeout": 60000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-ig-container",
       "name": "Create IG Container",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2520,
+        2700,
         440
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
     },
     {
       "parameters": {
@@ -451,40 +541,44 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2740,
+        2920,
         440
       ],
       "webhookId": "dr-ig-container-wait"
     },
     {
       "parameters": {
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $json.id }}",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $json.id }}",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
             {
               "name": "fields",
               "value": "status_code,status"
-            },
-            {
-              "name": "access_token",
-              "value": "={{ $env.IG_ACCESS_TOKEN || $env.FB_PAGE_ACCESS_TOKEN }}"
             }
           ]
         },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-ig-status",
       "name": "Check Container Status",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2960,
+        3140,
         440
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
     },
     {
       "parameters": {
@@ -515,7 +609,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        3180,
+        3360,
         440
       ]
     },
@@ -528,7 +622,7 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        3180,
+        3360,
         620
       ],
       "webhookId": "dr-ig-container-wait-2"
@@ -536,27 +630,35 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "=https://graph.facebook.com/{{ $env.META_GRAPH_VERSION || 'v23.0' }}/{{ $env.IG_USER_ID }}/media_publish",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.igUserId }}/media_publish",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ creation_id: $('Create IG Container').item.json.id, access_token: $env.IG_ACCESS_TOKEN || $env.FB_PAGE_ACCESS_TOKEN }) }}",
+        "jsonBody": "={{ JSON.stringify({ creation_id: $('Create IG Container').item.json.id }) }}",
         "options": {
           "timeout": 60000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
       },
       "id": "http-ig-publish",
       "name": "Publish IG Media",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3400,
+        3580,
         520
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
     },
     {
       "parameters": {
-        "content": "### Google Business Profile\n\nLocal posts still live on the v4 API (`mybusiness.googleapis.com/v4/.../localPosts`) \u2014 the newer split APIs do not cover them.\n\nAccess tokens last an hour, so the workflow exchanges the stored refresh token on every run rather than caching one.",
+        "content": "### Google Business Profile\n\nLocal posts still live on the v4 API (`mybusiness.googleapis.com/v4/.../localPosts`) — the newer split APIs do not cover them.\n\nAccess tokens last an hour, so the workflow exchanges the stored refresh token on every run rather than caching one.",
         "height": 260,
         "width": 340,
         "color": 3
@@ -573,54 +675,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://oauth2.googleapis.com/token",
-        "sendBody": true,
-        "contentType": "form-urlencoded",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "client_id",
-              "value": "={{ $env.GBP_CLIENT_ID }}"
-            },
-            {
-              "name": "client_secret",
-              "value": "={{ $env.GBP_CLIENT_SECRET }}"
-            },
-            {
-              "name": "refresh_token",
-              "value": "={{ $env.GBP_REFRESH_TOKEN }}"
-            },
-            {
-              "name": "grant_type",
-              "value": "refresh_token"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 30000
-        }
-      },
-      "id": "http-google-token",
-      "name": "Refresh Google Token",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        2520,
-        1060
-      ],
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=https://mybusiness.googleapis.com/v4/accounts/{{ $env.GBP_ACCOUNT_ID }}/locations/{{ $env.GBP_LOCATION_ID }}/localPosts",
+        "url": "=https://mybusiness.googleapis.com/v4/accounts/{{ $('Config').first().json.gbpAccountId }}/locations/{{ $('Config').first().json.gbpLocationId }}/localPosts",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $json.access_token }}"
-            },
             {
               "name": "content-type",
               "value": "application/json"
@@ -632,17 +690,25 @@
         "jsonBody": "={{ JSON.stringify(Object.assign({ languageCode: 'en-US', summary: $('Route by Platform').item.json.finalCaption, topicType: 'STANDARD' }, ($('Route by Platform').item.json.media || []).length ? { media: [{ mediaFormat: 'PHOTO', sourceUrl: $('Route by Platform').item.json.media[0].url }] } : {}, $('Route by Platform').item.json.googleCta ? { callToAction: Object.assign({ actionType: $('Route by Platform').item.json.googleCta.actionType }, $('Route by Platform').item.json.googleCta.url ? { url: $('Route by Platform').item.json.googleCta.url } : {}) } : {})) }}",
         "options": {
           "timeout": 60000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api"
       },
       "id": "http-gbp-publish",
       "name": "Publish Google Business Post",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2740,
+        2920,
         1060
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CREDENTIAL_ID",
+          "name": "DR Google Business Profile"
+        }
+      }
     },
     {
       "parameters": {
@@ -654,39 +720,38 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3640,
+        3820,
         300
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/publish-result",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/publish-result",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-report-result",
       "name": "Report Result to CRM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        3860,
+        4040,
         300
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
@@ -698,45 +763,44 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2280,
+        2460,
         260
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/publish-result",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/publish-result",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ postId: $json.postId, platform: $json.platform, status: 'blocked', error: $json.error, caption: $json.caption }) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-report-hold",
       "name": "Report Hold to CRM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2520,
+        2700,
         260
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
-        "fromEmail": "={{ $env.ALERT_FROM_EMAIL }}",
-        "toEmail": "={{ $env.ALERT_EMAIL }}",
-        "subject": "=[Diversity Roofing] Social post held \u2014 {{ $('Build Hold Notice').item.json.platform }} / {{ $('Build Hold Notice').item.json.postId }}",
+        "fromEmail": "={{ $('Config').first().json.alertFromEmail }}",
+        "toEmail": "={{ $('Config').first().json.alertEmail }}",
+        "subject": "=[Diversity Roofing] Social post held — {{ $('Build Hold Notice').item.json.platform }} / {{ $('Build Hold Notice').item.json.postId }}",
         "emailFormat": "text",
         "text": "=A scheduled social post did not publish.\n\nPost:      {{ $('Build Hold Notice').item.json.postId }}\nPlatform:  {{ $('Build Hold Notice').item.json.platform }}\nCity:      {{ $('Build Hold Notice').item.json.targetCity }}\nStatus:    {{ $('Build Hold Notice').item.json.complianceStatus }}\n\nWhy it was held:\n{{ ($('Build Hold Notice').item.json.findings || []).map(f => '- [' + f.severity + '] ' + f.code + ': ' + f.message).join('\\n') }}\n\nCaption as written:\n---\n{{ $('Build Hold Notice').item.json.caption }}\n---\n\nEdit and approve it in the CRM under Marketing, or fix the brief and let the\nnext scheduled run pick it up.",
         "options": {}
@@ -746,7 +810,7 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        2740,
+        2920,
         260
       ],
       "credentials": {
@@ -772,7 +836,7 @@
     },
     {
       "parameters": {
-        "content": "### Two ways in\n\n**Schedule** \u2014 the normal Mon/Wed/Fri run.\n\n**Called by another workflow** \u2014 workflow 02 enqueues a job-completion post with `scheduledFor: now`, then calls this workflow so it goes out immediately. One publisher, many producers: the Meta and Google API mechanics live here and nowhere else.",
+        "content": "### Two ways in\n\n**Schedule** — the normal Mon/Wed/Fri run.\n\n**Called by another workflow** — workflow 02 enqueues a job-completion post with `scheduledFor: now`, then calls this workflow so it goes out immediately. One publisher, many producers: the Meta and Google API mechanics live here and nowhere else.",
         "height": 240,
         "width": 340,
         "color": 7
@@ -792,7 +856,7 @@
       "main": [
         [
           {
-            "node": "Get Due Posts",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
@@ -963,7 +1027,7 @@
         ],
         [
           {
-            "node": "Refresh Google Token",
+            "node": "Publish Google Business Post",
             "type": "main",
             "index": 0
           }
@@ -1054,17 +1118,6 @@
         ]
       ]
     },
-    "Refresh Google Token": {
-      "main": [
-        [
-          {
-            "node": "Publish Google Business Post",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Publish Google Business Post": {
       "main": [
         [
@@ -1088,6 +1141,17 @@
       ]
     },
     "Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
       "main": [
         [
           {

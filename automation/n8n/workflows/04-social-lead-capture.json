@@ -1,9 +1,9 @@
 {
-  "name": "DR \u2014 04 Social Lead Capture",
+  "name": "DR — 04 Social Lead Capture",
   "nodes": [
     {
       "parameters": {
-        "content": "## Inbound comments and DMs \u2192 CRM leads\n\nSubscribed to the Meta webhook for the Facebook page (`feed`, `messages`) and the Instagram account (`comments`, `messages`). Every inbound message is classified; the ones that look like real enquiries become leads in the CRM and email the team.\n\n### Why nothing auto-replies publicly\n\nA public comment thread under a roofing post is where a homeowner asks about their claim, and where a wrong sentence about deductibles becomes a Fla. Stat. 489.147 problem in front of an audience. Classification is automated; the reply is a person. That is the deliberate line.\n\n### Setup\n\n1. Meta App \u2192 Webhooks \u2192 subscribe the page and IG account.\n2. Callback URL: `{N8N_URL}/webhook/dr-meta-events`\n3. Verify token: whatever you set as `META_VERIFY_TOKEN`.\n4. Set `META_APP_SECRET` so signatures are checked \u2014 without it this endpoint accepts anything on the internet.",
+        "content": "## Inbound comments and DMs → CRM leads\n\nSubscribed to the Meta webhook for the Facebook page (`feed`, `messages`) and the Instagram account (`comments`, `messages`). Every inbound message is classified; the ones that look like real enquiries become leads in the CRM and email the team.\n\n### Why nothing auto-replies publicly\n\nA public comment thread under a roofing post is where a homeowner asks about their claim, and where a wrong sentence about deductibles becomes a Fla. Stat. 489.147 problem in front of an audience. Classification is automated; the reply is a person. That is the deliberate line.\n\n### Setup\n\n1. Meta App → Webhooks → subscribe the page and IG account.\n2. Callback URL: `{N8N_URL}/webhook/dr-meta-events`\n3. Verify token: whatever you set as `META_VERIFY_TOKEN`.\n4. Set `META_APP_SECRET` so signatures are checked — without it this endpoint accepts anything on the internet.",
         "height": 620,
         "width": 460,
         "color": 4
@@ -37,14 +37,14 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Meta's one-time subscription handshake: echo hub.challenge back verbatim,\n// but only when the token matches.\nconst q = $json.query ?? {};\nconst ok = q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === $env.META_VERIFY_TOKEN;\nreturn { json: { ok, challenge: ok ? q['hub.challenge'] : 'verification failed' } };"
+        "jsCode": "// Meta's one-time subscription handshake: echo hub.challenge back verbatim,\n// but only when the token matches.\nconst q = $json.query ?? {};\nconst ok = q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === $('Config (Verification)').first().json.metaVerifyToken;\nreturn { json: { ok, challenge: ok ? q['hub.challenge'] : 'verification failed' } };"
       },
       "id": "code-verify",
       "name": "Check Verify Token",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        260,
+        820,
         60
       ]
     },
@@ -61,7 +61,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        480,
+        1040,
         60
       ]
     },
@@ -87,14 +87,14 @@
     },
     {
       "parameters": {
-        "jsCode": "// Meta signs the raw body with the app secret. Verify before parsing, and\n// flatten the page/IG event shapes into one message record per comment or DM.\nconst crypto = require('crypto');\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\n\n// With rawBody enabled the body arrives as base64 binary; fall back to the\n// parsed object if the option is ever turned off.\nlet raw;\nif (item.binary?.data?.data) {\n  raw = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\n} else {\n  raw = typeof item.json.body === 'string' ? item.json.body : JSON.stringify(item.json.body ?? {});\n}\n\nconst secret = $env.META_APP_SECRET;\nif (secret) {\n  const provided = String(headers['x-hub-signature-256'] ?? '');\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex');\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(provided, 'utf8');\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n    throw new Error('Meta webhook signature mismatch \u2014 request rejected.');\n  }\n} else {\n  console.warn('META_APP_SECRET unset \u2014 webhook signature NOT verified. Anyone can post to this URL.');\n}\n\nconst payload = JSON.parse(raw);\nconst platform = payload.object === 'instagram' ? 'instagram' : 'facebook';\nconst out = [];\n\nfor (const entry of payload.entry ?? []) {\n  // Comments on posts (both networks use `changes`, with different field names)\n  for (const change of entry.changes ?? []) {\n    const v = change.value ?? {};\n\n    if (change.field === 'feed' && v.item === 'comment' && v.verb === 'add') {\n      out.push({\n        json: {\n          platform: 'facebook',\n          kind: 'comment',\n          externalId: v.comment_id,\n          authorName: v.from?.name ?? 'Facebook user',\n          authorHandle: v.from?.id,\n          message: v.message ?? '',\n          permalink: v.post_id ? `https://www.facebook.com/${v.post_id}` : undefined,\n        },\n      });\n    }\n\n    if (change.field === 'comments') {\n      out.push({\n        json: {\n          platform: 'instagram',\n          kind: 'comment',\n          externalId: v.id,\n          authorName: v.from?.username ?? 'Instagram user',\n          authorHandle: v.from?.username,\n          message: v.text ?? '',\n          permalink: v.media?.id ? `https://www.instagram.com/p/${v.media.id}` : undefined,\n        },\n      });\n    }\n  }\n\n  // Direct messages\n  for (const m of entry.messaging ?? []) {\n    if (!m.message?.text) continue;\n    if (m.message.is_echo) continue; // our own outbound message coming back\n    out.push({\n      json: {\n        platform,\n        kind: 'direct_message',\n        externalId: m.message.mid,\n        authorName: 'Unknown',\n        authorHandle: m.sender?.id,\n        message: m.message.text,\n      },\n    });\n  }\n}\n\n// Ignore our own comments and anything with no text to judge.\nconst pageIds = String($env.OWN_ACTOR_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);\nreturn out.filter((o) => o.json.message.trim() && !pageIds.includes(String(o.json.authorHandle)));"
+        "jsCode": "// The Crypto node already hashed the raw body with the app secret — it runs\n// outside the Code sandbox, which on n8n Cloud has no crypto module at all.\n// All that is left here is a length-checked constant-time comparison.\nfunction safeEqual(a, b) {\n  if (typeof a !== 'string' || typeof b !== 'string') return false;\n  if (a.length !== b.length) return false;\n  let diff = 0;\n  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);\n  return diff === 0;\n}\n\nconst item = $input.first();\nif (item.json.rawMissing) {\n  throw new Error('Could not read the raw request body — enable \"Raw Body\" on the webhook node.');\n}\n\nconst raw = item.json.raw;\nconst expected = 'sha256=' + String(item.json.expectedSignature ?? '').toLowerCase();\nconst provided = String(item.json.providedSignature ?? '').toLowerCase();\n\nif (!safeEqual(expected, provided)) {\n  throw new Error('Meta webhook signature mismatch — request rejected.');\n}\n\nconst payload = JSON.parse(raw);\nconst platform = payload.object === 'instagram' ? 'instagram' : 'facebook';\nconst out = [];\n\nfor (const entry of payload.entry ?? []) {\n  // Comments on posts (both networks use `changes`, with different field names)\n  for (const change of entry.changes ?? []) {\n    const v = change.value ?? {};\n\n    if (change.field === 'feed' && v.item === 'comment' && v.verb === 'add') {\n      out.push({\n        json: {\n          platform: 'facebook',\n          kind: 'comment',\n          externalId: v.comment_id,\n          authorName: v.from?.name ?? 'Facebook user',\n          authorHandle: v.from?.id,\n          message: v.message ?? '',\n          permalink: v.post_id ? `https://www.facebook.com/${v.post_id}` : undefined,\n        },\n      });\n    }\n\n    if (change.field === 'comments') {\n      out.push({\n        json: {\n          platform: 'instagram',\n          kind: 'comment',\n          externalId: v.id,\n          authorName: v.from?.username ?? 'Instagram user',\n          authorHandle: v.from?.username,\n          message: v.text ?? '',\n          permalink: v.media?.id ? `https://www.instagram.com/p/${v.media.id}` : undefined,\n        },\n      });\n    }\n  }\n\n  // Direct messages\n  for (const m of entry.messaging ?? []) {\n    if (!m.message?.text) continue;\n    if (m.message.is_echo) continue; // our own outbound message coming back\n    out.push({\n      json: {\n        platform,\n        kind: 'direct_message',\n        externalId: m.message.mid,\n        authorName: 'Unknown',\n        authorHandle: m.sender?.id,\n        message: m.message.text,\n      },\n    });\n  }\n}\n\n// Ignore our own comments and anything with no text to judge.\nconst pageIds = String($('Config').first().json.ownActorIds ?? '').split(',').map((s) => s.trim()).filter(Boolean);\nreturn out.filter((o) => o.json.message.trim() && !pageIds.includes(String(o.json.authorHandle)));"
       },
       "id": "code-parse-events",
       "name": "Verify Signature & Flatten",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        260,
+        820,
         320
       ]
     },
@@ -105,10 +105,6 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "x-api-key",
-              "value": "={{ $env.ANTHROPIC_API_KEY }}"
-            },
             {
               "name": "anthropic-version",
               "value": "2023-06-01"
@@ -121,32 +117,40 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.ANTHROPIC_MODEL || 'claude-opus-5', max_tokens: 1500, system: [ 'You triage inbound social messages for Diversity Roofing, a roofing contractor serving Jacksonville, Orange Park, Middleburg, St. Augustine and the surrounding Duval, Clay and St. Johns County area.', '', 'Classify the message into exactly one intent:', '- lead: someone with a roof problem, asking for an inspection, a quote, or availability', '- question: a general question that is not yet a job (materials, process, timelines, service area)', '- complaint: an unhappy customer or a public criticism', '- praise: a compliment with nothing to action', '- spam: promotion, bot text, unrelated', '', 'Set urgent to true only for active water intrusion, an exposed or open roof, or a customer saying a scheduled crew did not turn up.', 'Set mentions_claim to true if the message references insurance, a claim, an adjuster, a carrier, a policy, or a deductible.', 'Write suggested_reply as what a person at the company should say back. Two sentences at most. Never mention waiving or covering a deductible, never promise a claim outcome, and never imply the company negotiates or handles claims. Leave it empty for spam.' ].join('\\n'), messages: [{ role: 'user', content: `Platform: ${$json.platform}\\nType: ${$json.kind}\\nFrom: ${$json.authorName}\\n\\nMessage:\\n${$json.message}` }], output_config: { effort: 'low', format: { type: 'json_schema', schema: { type: 'object', properties: { intent: { type: 'string', enum: ['lead', 'question', 'complaint', 'praise', 'spam'] }, urgent: { type: 'boolean' }, mentions_claim: { type: 'boolean' }, summary: { type: 'string' }, suggested_reply: { type: 'string' } }, required: ['intent', 'urgent', 'mentions_claim', 'summary', 'suggested_reply'], additionalProperties: false } } } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.anthropicModel || 'claude-opus-5', max_tokens: 1500, system: [ 'You triage inbound social messages for Diversity Roofing, a roofing contractor serving Jacksonville, Orange Park, Middleburg, St. Augustine and the surrounding Duval, Clay and St. Johns County area.', '', 'Classify the message into exactly one intent:', '- lead: someone with a roof problem, asking for an inspection, a quote, or availability', '- question: a general question that is not yet a job (materials, process, timelines, service area)', '- complaint: an unhappy customer or a public criticism', '- praise: a compliment with nothing to action', '- spam: promotion, bot text, unrelated', '', 'Set urgent to true only for active water intrusion, an exposed or open roof, or a customer saying a scheduled crew did not turn up.', 'Set mentions_claim to true if the message references insurance, a claim, an adjuster, a carrier, a policy, or a deductible.', 'Write suggested_reply as what a person at the company should say back. Two sentences at most. Never mention waiving or covering a deductible, never promise a claim outcome, and never imply the company negotiates or handles claims. Leave it empty for spam.' ].join('\\n'), messages: [{ role: 'user', content: `Platform: ${$json.platform}\\nType: ${$json.kind}\\nFrom: ${$json.authorName}\\n\\nMessage:\\n${$json.message}` }], output_config: { effort: 'low', format: { type: 'json_schema', schema: { type: 'object', properties: { intent: { type: 'string', enum: ['lead', 'question', 'complaint', 'praise', 'spam'] }, urgent: { type: 'boolean' }, mentions_claim: { type: 'boolean' }, summary: { type: 'string' }, suggested_reply: { type: 'string' } }, required: ['intent', 'urgent', 'mentions_claim', 'summary', 'suggested_reply'], additionalProperties: false } } } }) }}",
         "options": {
           "timeout": 120000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
       },
       "id": "http-classify",
       "name": "Classify Intent (Claude)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        480,
+        1040,
         320
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_WITH_ANTHROPIC_CREDENTIAL_ID",
+          "name": "DR Anthropic"
+        }
+      }
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// If classification fails for any reason, treat the message as a lead rather\n// than dropping it. A false positive costs someone thirty seconds; a missed\n// enquiry costs a job.\nconst msg = $('Verify Signature & Flatten').item.json;\nconst res = $json;\n\nlet parsed = null;\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!res.error && res.stop_reason !== 'refusal' && textBlock) {\n  try {\n    parsed = JSON.parse(textBlock.text);\n  } catch {\n    parsed = null;\n  }\n}\n\nif (!parsed) {\n  return {\n    json: {\n      ...msg,\n      intent: 'lead',\n      urgent: false,\n      mentionsClaim: false,\n      summary: 'Classification failed \u2014 routed to a human by default.',\n      suggestedReply: '',\n      actionable: true,\n    },\n  };\n}\n\nreturn {\n  json: {\n    ...msg,\n    intent: parsed.intent,\n    urgent: parsed.urgent === true,\n    mentionsClaim: parsed.mentions_claim === true,\n    summary: parsed.summary,\n    suggestedReply: parsed.suggested_reply,\n    actionable: ['lead', 'question', 'complaint'].includes(parsed.intent),\n  },\n};"
+        "jsCode": "// If classification fails for any reason, treat the message as a lead rather\n// than dropping it. A false positive costs someone thirty seconds; a missed\n// enquiry costs a job.\nconst msg = $('Verify Signature & Flatten').item.json;\nconst res = $json;\n\nlet parsed = null;\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!res.error && res.stop_reason !== 'refusal' && textBlock) {\n  try {\n    parsed = JSON.parse(textBlock.text);\n  } catch {\n    parsed = null;\n  }\n}\n\nif (!parsed) {\n  return {\n    json: {\n      ...msg,\n      intent: 'lead',\n      urgent: false,\n      mentionsClaim: false,\n      summary: 'Classification failed — routed to a human by default.',\n      suggestedReply: '',\n      actionable: true,\n    },\n  };\n}\n\nreturn {\n  json: {\n    ...msg,\n    intent: parsed.intent,\n    urgent: parsed.urgent === true,\n    mentionsClaim: parsed.mentions_claim === true,\n    summary: parsed.summary,\n    suggestedReply: parsed.suggested_reply,\n    actionable: ['lead', 'question', 'complaint'].includes(parsed.intent),\n  },\n};"
       },
       "id": "code-triage",
       "name": "Triage",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        700,
+        1260,
         320
       ]
     },
@@ -180,47 +184,46 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        920,
+        1480,
         320
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/leads",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/leads",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ platform: $json.platform, kind: $json.kind, authorName: $json.authorName, authorHandle: $json.authorHandle, message: $json.message, permalink: $json.permalink }) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-create-lead",
       "name": "Create Social Lead",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1140,
+        1700,
         240
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
-        "fromEmail": "={{ $env.ALERT_FROM_EMAIL }}",
-        "toEmail": "={{ $env.ALERT_EMAIL }}",
+        "fromEmail": "={{ $('Config').first().json.alertFromEmail }}",
+        "toEmail": "={{ $('Config').first().json.alertEmail }}",
         "subject": "={{ $('Triage').item.json.urgent ? '[URGENT] ' : '' }}[Diversity Roofing] {{ $('Triage').item.json.intent }} on {{ $('Triage').item.json.platform }}",
         "emailFormat": "text",
-        "text": "={{ $('Triage').item.json.urgent ? '*** URGENT \u2014 active damage or a missed appointment. Call today. ***\\n\\n' : '' }}From:     {{ $('Triage').item.json.authorName }} ({{ $('Triage').item.json.authorHandle }})\nPlatform: {{ $('Triage').item.json.platform }} {{ $('Triage').item.json.kind }}\nIntent:   {{ $('Triage').item.json.intent }}\nClaim-related: {{ $('Triage').item.json.mentionsClaim ? 'yes' : 'no' }}\n\nWhat they said:\n---\n{{ $('Triage').item.json.message }}\n---\n\nRead as: {{ $('Triage').item.json.summary }}\n\nDraft reply (a person must send this \u2014 nothing is posted automatically):\n{{ $('Triage').item.json.suggestedReply }}\n\n{{ $('Triage').item.json.permalink ? 'Thread: ' + $('Triage').item.json.permalink : '' }}\n\n{{ $('Triage').item.json.mentionsClaim ? 'This message touches insurance. Keep the reply to documenting damage and meeting the adjuster on the roof \u2014 do not discuss deductibles, coverage, or claim outcomes.' : '' }}",
+        "text": "={{ $('Triage').item.json.urgent ? '*** URGENT — active damage or a missed appointment. Call today. ***\\n\\n' : '' }}From:     {{ $('Triage').item.json.authorName }} ({{ $('Triage').item.json.authorHandle }})\nPlatform: {{ $('Triage').item.json.platform }} {{ $('Triage').item.json.kind }}\nIntent:   {{ $('Triage').item.json.intent }}\nClaim-related: {{ $('Triage').item.json.mentionsClaim ? 'yes' : 'no' }}\n\nWhat they said:\n---\n{{ $('Triage').item.json.message }}\n---\n\nRead as: {{ $('Triage').item.json.summary }}\n\nDraft reply (a person must send this — nothing is posted automatically):\n{{ $('Triage').item.json.suggestedReply }}\n\n{{ $('Triage').item.json.permalink ? 'Thread: ' + $('Triage').item.json.permalink : '' }}\n\n{{ $('Triage').item.json.mentionsClaim ? 'This message touches insurance. Keep the reply to documenting damage and meeting the adjuster on the roof — do not discuss deductibles, coverage, or claim outcomes.' : '' }}",
         "options": {}
       },
       "id": "email-lead",
@@ -228,7 +231,7 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        1360,
+        1920,
         240
       ],
       "credentials": {
@@ -249,9 +252,118 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1140,
+        1700,
         440
       ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-metaVerifyToken",
+              "name": "metaVerifyToken",
+              "value": "REPLACE_WITH_META_VERIFY_TOKEN",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config-verify",
+      "name": "Config (Verification)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crmBaseUrl",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            },
+            {
+              "id": "cfg-anthropicModel",
+              "name": "anthropicModel",
+              "value": "claude-opus-5",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertEmail",
+              "name": "alertEmail",
+              "value": "REPLACE_WITH_ALERT_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertFromEmail",
+              "name": "alertFromEmail",
+              "value": "REPLACE_WITH_FROM_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-ownActorIds",
+              "name": "ownActorIds",
+              "value": "REPLACE_WITH_PAGE_AND_IG_ACTOR_IDS",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Meta signs the raw bytes of the body with the app secret, so hash exactly\n// what arrived. With rawBody enabled the parsed object is in $json.body and\n// the original bytes are in binary `data`; they are not interchangeable.\n// Buffer is available in the Code sandbox even on Cloud, where crypto is not.\nconst bin = $input.item.binary?.data ?? null;\n\nlet raw = null;\nif (bin?.data) {\n  raw = Buffer.from(bin.data, 'base64').toString('utf8');\n} else if (typeof $json.body === 'string') {\n  raw = $json.body;\n}\n\nreturn {\n  json: {\n    raw: raw ?? '',\n    rawMissing: raw === null,\n    providedSignature: String($json.headers?.['x-hub-signature-256'] ?? ''),\n  },\n};"
+      },
+      "id": "code-extract-raw",
+      "name": "Extract Raw Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.raw }}",
+        "dataPropertyName": "expectedSignature",
+        "encoding": "hex"
+      },
+      "id": "crypto-sign",
+      "name": "Sign Raw Body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        620,
+        320
+      ],
+      "credentials": {
+        "crypto": {
+          "id": "REPLACE_WITH_META_APP_SECRET_CREDENTIAL_ID",
+          "name": "DR Meta App Secret"
+        }
+      }
     }
   ],
   "connections": {
@@ -259,7 +371,7 @@
       "main": [
         [
           {
-            "node": "Check Verify Token",
+            "node": "Config (Verification)",
             "type": "main",
             "index": 0
           }
@@ -281,7 +393,7 @@
       "main": [
         [
           {
-            "node": "Verify Signature & Flatten",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
@@ -344,6 +456,50 @@
         [
           {
             "node": "Email the Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config (Verification)": {
+      "main": [
+        [
+          {
+            "node": "Check Verify Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Extract Raw Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Raw Body": {
+      "main": [
+        [
+          {
+            "node": "Sign Raw Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Raw Body": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature & Flatten",
             "type": "main",
             "index": 0
           }

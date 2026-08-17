@@ -1,9 +1,9 @@
 {
-  "name": "DR \u2014 03 Google Review Manager",
+  "name": "DR — 03 Google Review Manager",
   "nodes": [
     {
       "parameters": {
-        "content": "## Google Business Profile reviews\n\nEvery two hours: pull reviews, reply to the good ones, escalate the rest.\n\n### The rule that matters\n\n**4 and 5 stars** get an automatic thank-you.\n**3 stars and below never get an automated reply.** They are emailed to the team and logged in the CRM as escalated. An unhappy customer is a phone call, not a template.\n\nA drafted reply that mentions insurance, claims, adjusters or deductibles is also escalated rather than posted \u2014 a review reply is public advertising, and the Fla. Stat. 489.147 disclosures do not belong in a two-sentence thank-you.\n\nDedup is free: Google returns `reviewReply` on anything already answered, and this workflow skips those.",
+        "content": "## Google Business Profile reviews\n\nEvery two hours: pull reviews, reply to the good ones, escalate the rest.\n\n### The rule that matters\n\n**4 and 5 stars** get an automatic thank-you.\n**3 stars and below never get an automated reply.** They are emailed to the team and logged in the CRM as escalated. An unhappy customer is a phone call, not a template.\n\nA drafted reply that mentions insurance, claims, adjusters or deductibles is also escalated rather than posted — a review reply is public advertising, and the Fla. Stat. 489.147 disclosures do not belong in a two-sentence thank-you.\n\nDedup is free: Google returns `reviewReply` on anything already answered, and this workflow skips those.",
         "height": 520,
         "width": 440,
         "color": 4
@@ -15,6 +15,66 @@
       "position": [
         -500,
         -60
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crmBaseUrl",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpAccountId",
+              "name": "gbpAccountId",
+              "value": "REPLACE_WITH_GBP_ACCOUNT_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpLocationId",
+              "name": "gbpLocationId",
+              "value": "REPLACE_WITH_GBP_LOCATION_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-reviewLookbackDays",
+              "name": "reviewLookbackDays",
+              "value": "30",
+              "type": "string"
+            },
+            {
+              "id": "cfg-anthropicModel",
+              "name": "anthropicModel",
+              "value": "claude-opus-5",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertEmail",
+              "name": "alertEmail",
+              "value": "REPLACE_WITH_ALERT_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertFromEmail",
+              "name": "alertFromEmail",
+              "value": "REPLACE_WITH_FROM_EMAIL",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        240
       ]
     },
     {
@@ -39,46 +99,7 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://oauth2.googleapis.com/token",
-        "sendBody": true,
-        "contentType": "form-urlencoded",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "client_id",
-              "value": "={{ $env.GBP_CLIENT_ID }}"
-            },
-            {
-              "name": "client_secret",
-              "value": "={{ $env.GBP_CLIENT_SECRET }}"
-            },
-            {
-              "name": "refresh_token",
-              "value": "={{ $env.GBP_REFRESH_TOKEN }}"
-            },
-            {
-              "name": "grant_type",
-              "value": "refresh_token"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 30000
-        }
-      },
-      "id": "http-token",
-      "name": "Refresh Google Token",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        260,
-        240
-      ]
-    },
-    {
-      "parameters": {
-        "url": "=https://mybusiness.googleapis.com/v4/accounts/{{ $env.GBP_ACCOUNT_ID }}/locations/{{ $env.GBP_LOCATION_ID }}/reviews",
+        "url": "=https://mybusiness.googleapis.com/v4/accounts/{{ $('Config').first().json.gbpAccountId }}/locations/{{ $('Config').first().json.gbpLocationId }}/reviews",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
@@ -92,38 +113,37 @@
             }
           ]
         },
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $json.access_token }}"
-            }
-          ]
-        },
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api"
       },
       "id": "http-list-reviews",
       "name": "List Reviews",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        480,
+        660,
         240
-      ]
+      ],
+      "credentials": {
+        "googleOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CREDENTIAL_ID",
+          "name": "DR Google Business Profile"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Google returns the star rating as a word. Normalise it, drop anything that\n// already has a reply, and drop anything older than the lookback window so a\n// first run against a long review history does not blast out 200 replies.\nconst WORD_TO_NUMBER = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };\nconst lookbackDays = Number($env.REVIEW_LOOKBACK_DAYS ?? 30);\nconst cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  for (const review of item.json.reviews ?? []) {\n    if (review.reviewReply) continue;\n\n    const createdAt = review.createTime ?? review.updateTime;\n    if (createdAt && new Date(createdAt).getTime() < cutoff) continue;\n\n    const rating = WORD_TO_NUMBER[review.starRating] ?? 0;\n\n    out.push({\n      json: {\n        reviewId: review.reviewId,\n        resourceName: review.name,\n        reviewerName: review.reviewer?.displayName ?? 'Google user',\n        starRating: rating,\n        comment: review.comment ?? '',\n        createdAt,\n        // A bare star rating with no text still deserves a thank-you, but there\n        // is nothing to respond to specifically.\n        hasText: Boolean(review.comment && review.comment.trim()),\n      },\n    });\n  }\n}\n\nreturn out;"
+        "jsCode": "// Google returns the star rating as a word. Normalise it, drop anything that\n// already has a reply, and drop anything older than the lookback window so a\n// first run against a long review history does not blast out 200 replies.\nconst WORD_TO_NUMBER = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };\nconst lookbackDays = Number($('Config').first().json.reviewLookbackDays ?? 30);\nconst cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  for (const review of item.json.reviews ?? []) {\n    if (review.reviewReply) continue;\n\n    const createdAt = review.createTime ?? review.updateTime;\n    if (createdAt && new Date(createdAt).getTime() < cutoff) continue;\n\n    const rating = WORD_TO_NUMBER[review.starRating] ?? 0;\n\n    out.push({\n      json: {\n        reviewId: review.reviewId,\n        resourceName: review.name,\n        reviewerName: review.reviewer?.displayName ?? 'Google user',\n        starRating: rating,\n        comment: review.comment ?? '',\n        createdAt,\n        // A bare star rating with no text still deserves a thank-you, but there\n        // is nothing to respond to specifically.\n        hasText: Boolean(review.comment && review.comment.trim()),\n      },\n    });\n  }\n}\n\nreturn out;"
       },
       "id": "code-normalize-reviews",
       "name": "Find Unanswered Reviews",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        700,
+        880,
         240
       ]
     },
@@ -156,7 +176,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        920,
+        1100,
         240
       ]
     },
@@ -167,10 +187,6 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "x-api-key",
-              "value": "={{ $env.ANTHROPIC_API_KEY }}"
-            },
             {
               "name": "anthropic-version",
               "value": "2023-06-01"
@@ -183,32 +199,40 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: $env.ANTHROPIC_MODEL || 'claude-opus-5', max_tokens: 2000, system: [ 'You write short public replies to Google reviews for Diversity Roofing, a roofing contractor in Jacksonville, Florida.', '', 'Two or three sentences, maximum 60 words. Warm and specific. Thank them by first name only if the review gives one.', 'If the review names something concrete \u2014 the crew, the cleanup, the timeline, a person \u2014 mention that thing back. Otherwise keep it general rather than inventing a detail.', '', 'Never mention insurance, claims, adjusters, carriers, policies, coverage or deductibles. Not once, in any phrasing. A review reply that touches those subjects triggers Florida disclosure requirements that do not fit in a thank-you note, and it will be discarded.', 'Never promise future work, discounts, warranty terms, or anything of value.', 'No emoji. No hashtags. Do not sign off with a name.' ].join('\\n'), messages: [{ role: 'user', content: `A ${$json.starRating}-star review from ${$json.reviewerName}:\\n\\n${$json.hasText ? $json.comment : '(no written comment \u2014 star rating only)'}\\n\\nWrite the reply.` }], output_config: { effort: 'low', format: { type: 'json_schema', schema: { type: 'object', properties: { reply: { type: 'string' }, mentions_insurance: { type: 'boolean' } }, required: ['reply', 'mentions_insurance'], additionalProperties: false } } } }) }}",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.anthropicModel || 'claude-opus-5', max_tokens: 2000, system: [ 'You write short public replies to Google reviews for Diversity Roofing, a roofing contractor in Jacksonville, Florida.', '', 'Two or three sentences, maximum 60 words. Warm and specific. Thank them by first name only if the review gives one.', 'If the review names something concrete — the crew, the cleanup, the timeline, a person — mention that thing back. Otherwise keep it general rather than inventing a detail.', '', 'Never mention insurance, claims, adjusters, carriers, policies, coverage or deductibles. Not once, in any phrasing. A review reply that touches those subjects triggers Florida disclosure requirements that do not fit in a thank-you note, and it will be discarded.', 'Never promise future work, discounts, warranty terms, or anything of value.', 'No emoji. No hashtags. Do not sign off with a name.' ].join('\\n'), messages: [{ role: 'user', content: `A ${$json.starRating}-star review from ${$json.reviewerName}:\\n\\n${$json.hasText ? $json.comment : '(no written comment — star rating only)'}\\n\\nWrite the reply.` }], output_config: { effort: 'low', format: { type: 'json_schema', schema: { type: 'object', properties: { reply: { type: 'string' }, mentions_insurance: { type: 'boolean' } }, required: ['reply', 'mentions_insurance'], additionalProperties: false } } } }) }}",
         "options": {
           "timeout": 120000
-        }
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
       },
       "id": "http-draft-reply",
       "name": "Draft Reply (Claude)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1140,
+        1320,
         140
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_WITH_ANTHROPIC_CREDENTIAL_ID",
+          "name": "DR Anthropic"
+        }
+      }
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const review = $('Find Unanswered Reviews').item.json;\nconst res = $json;\n\nfunction escalate(reason) {\n  return { json: { ...review, reply: null, autoReply: false, escalationReason: reason } };\n}\n\nif (res.error) return escalate(`Anthropic API error: ${res.error.message ?? res.error.type}`);\nif (res.stop_reason === 'refusal') return escalate('Model declined to draft a reply.');\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!textBlock) return escalate('No text block in the model response.');\n\nlet parsed;\ntry {\n  parsed = JSON.parse(textBlock.text);\n} catch (e) {\n  return escalate(`Model output was not valid JSON: ${e.message}`);\n}\n\n// Belt and braces: the model self-reports, and we scan independently. Either\n// signal sends the reply to a human instead of to Google.\nconst INSURANCE = /\\b(insurance|insurer|claim|claims|adjuster|carrier|deductible|policy|coverage)\\b/i;\nif (parsed.mentions_insurance === true || INSURANCE.test(parsed.reply)) {\n  return escalate('Drafted reply referenced insurance or claims \u2014 needs a human.');\n}\n\nif (parsed.reply.length > 400) {\n  return escalate(`Drafted reply is ${parsed.reply.length} characters \u2014 too long for a review reply.`);\n}\n\nreturn { json: { ...review, reply: parsed.reply, autoReply: true, escalationReason: null } };"
+        "jsCode": "const review = $('Find Unanswered Reviews').item.json;\nconst res = $json;\n\nfunction escalate(reason) {\n  return { json: { ...review, reply: null, autoReply: false, escalationReason: reason } };\n}\n\nif (res.error) return escalate(`Anthropic API error: ${res.error.message ?? res.error.type}`);\nif (res.stop_reason === 'refusal') return escalate('Model declined to draft a reply.');\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!textBlock) return escalate('No text block in the model response.');\n\nlet parsed;\ntry {\n  parsed = JSON.parse(textBlock.text);\n} catch (e) {\n  return escalate(`Model output was not valid JSON: ${e.message}`);\n}\n\n// Belt and braces: the model self-reports, and we scan independently. Either\n// signal sends the reply to a human instead of to Google.\nconst INSURANCE = /\\b(insurance|insurer|claim|claims|adjuster|carrier|deductible|policy|coverage)\\b/i;\nif (parsed.mentions_insurance === true || INSURANCE.test(parsed.reply)) {\n  return escalate('Drafted reply referenced insurance or claims — needs a human.');\n}\n\nif (parsed.reply.length > 400) {\n  return escalate(`Drafted reply is ${parsed.reply.length} characters — too long for a review reply.`);\n}\n\nreturn { json: { ...review, reply: parsed.reply, autoReply: true, escalationReason: null } };"
       },
       "id": "code-check-reply",
       "name": "Vet the Draft",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1360,
+        1540,
         140
       ]
     },
@@ -242,7 +266,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1580,
+        1760,
         140
       ]
     },
@@ -275,7 +299,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1800,
+        1980,
         40
       ],
       "onError": "continueRegularOutput"
@@ -283,65 +307,64 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Everything replied to is written to the CRM so the review history lives next\n// to the job history rather than only in Google.\nconst draft = $('Vet the Draft').item.json;\nconst postResult = $json;\n\nconst posted = Boolean(postResult?.comment || postResult?.updateTime);\n\nreturn {\n  json: {\n    id: draft.reviewId,\n    reviewerName: draft.reviewerName,\n    starRating: draft.starRating,\n    comment: draft.comment,\n    createdAt: draft.createdAt,\n    replyText: posted ? draft.reply : undefined,\n    authoredBy: 'automation',\n    // A failed PUT is not a silent success \u2014 it lands in the CRM as escalated\n    // so someone answers the review by hand.\n    escalated: !posted,\n    escalationReason: posted ? undefined : `Google rejected the reply: ${postResult?.error?.message ?? 'unknown error'}`,\n  },\n};"
+        "jsCode": "// Everything replied to is written to the CRM so the review history lives next\n// to the job history rather than only in Google.\nconst draft = $('Vet the Draft').item.json;\nconst postResult = $json;\n\nconst posted = Boolean(postResult?.comment || postResult?.updateTime);\n\nreturn {\n  json: {\n    id: draft.reviewId,\n    reviewerName: draft.reviewerName,\n    starRating: draft.starRating,\n    comment: draft.comment,\n    createdAt: draft.createdAt,\n    replyText: posted ? draft.reply : undefined,\n    authoredBy: 'automation',\n    // A failed PUT is not a silent success — it lands in the CRM as escalated\n    // so someone answers the review by hand.\n    escalated: !posted,\n    escalationReason: posted ? undefined : `Google rejected the reply: ${postResult?.error?.message ?? 'unknown error'}`,\n  },\n};"
       },
       "id": "code-log-replied",
       "name": "Build CRM Record",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2020,
+        2200,
         40
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Low-rated review, or a draft that failed vetting. No automated reply.\nconst review = $json;\nreturn {\n  json: {\n    id: review.reviewId,\n    reviewerName: review.reviewerName,\n    starRating: review.starRating,\n    comment: review.comment,\n    createdAt: review.createdAt,\n    escalated: true,\n    escalationReason: review.escalationReason ?? `${review.starRating}-star review \u2014 a person should call this customer.`,\n  },\n};"
+        "jsCode": "// Low-rated review, or a draft that failed vetting. No automated reply.\nconst review = $json;\nreturn {\n  json: {\n    id: review.reviewId,\n    reviewerName: review.reviewerName,\n    starRating: review.starRating,\n    comment: review.comment,\n    createdAt: review.createdAt,\n    escalated: true,\n    escalationReason: review.escalationReason ?? `${review.starRating}-star review — a person should call this customer.`,\n  },\n};"
       },
       "id": "code-escalate",
       "name": "Build Escalation",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1360,
+        1540,
         400
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/reviews",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/reviews",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-log-crm",
       "name": "Log Escalation in CRM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1800,
+        1980,
         400
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
-        "fromEmail": "={{ $env.ALERT_FROM_EMAIL }}",
-        "toEmail": "={{ $env.ALERT_EMAIL }}",
+        "fromEmail": "={{ $('Config').first().json.alertFromEmail }}",
+        "toEmail": "={{ $('Config').first().json.alertEmail }}",
         "subject": "=[Diversity Roofing] {{ $('Build Escalation').item.json.starRating }}-star Google review needs a human",
         "emailFormat": "text",
         "text": "=A Google review was left unanswered by the automation on purpose.\n\nReviewer: {{ $('Build Escalation').item.json.reviewerName }}\nRating:   {{ $('Build Escalation').item.json.starRating }} stars\nPosted:   {{ $('Build Escalation').item.json.createdAt }}\n\nWhy it was escalated:\n{{ $('Build Escalation').item.json.escalationReason }}\n\nWhat they wrote:\n---\n{{ $('Build Escalation').item.json.comment || '(no written comment)' }}\n---\n\nReply from the Google Business Profile app or the business dashboard. Call\nfirst if the review describes a real problem on a job.",
@@ -352,7 +375,7 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        2020,
+        2200,
         400
       ],
       "credentials": {
@@ -366,32 +389,31 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/reviews",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/reviews",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {
           "timeout": 30000
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "id": "http-log-reply",
       "name": "Log Reply in CRM",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2240,
+        2420,
         40
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     }
   ],
   "connections": {
@@ -399,18 +421,7 @@
       "main": [
         [
           {
-            "node": "Refresh Google Token",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Refresh Google Token": {
-      "main": [
-        [
-          {
-            "node": "List Reviews",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
@@ -535,6 +546,17 @@
         [
           {
             "node": "Email the Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "List Reviews",
             "type": "main",
             "index": 0
           }
