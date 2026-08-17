@@ -1,10 +1,10 @@
 {
-  "name": "DR \u2014 02 Job Completion Showcase",
+  "name": "DR — 02 Job Completion Showcase",
   "nodes": [
     {
       "parameters": {
-        "content": "## Job closeout \u2192 social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only \u2014 this one produces content, that one ships it.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of body, key = CRM_AUTOMATION_KEY>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true \u2014 no homeowner's roof goes on social without it.\n\n### Reading the response\n\n**Branch on `accepted` in the body, not on the HTTP status.** Every reply comes back `200` on n8n 2.x regardless of the Respond node's configured code \u2014 verified against 2.34.6 with the code in both documented positions. A rejection is `{\"accepted\": false, \"error\": \"...\"}` and always names its reason.",
-        "height": 860,
+        "content": "## Job closeout → social post\n\nFires when a job is marked complete in the CRM. Turns the CompanyCam before/after photos into a queued post and hands it to workflow 01 to publish.\n\nThis workflow deliberately contains **no platform API calls**. Facebook, Instagram and Google mechanics live in workflow 01 only — this one produces content, that one ships it.\n\n### Setup (n8n Cloud and self-hosted alike)\n\nNothing here reads `$env` — Cloud denies that. Configuration lives in two places instead:\n\n1. **`Config` node** — non-secret values, edit them in the canvas. Only `crmBaseUrl` for this workflow.\n2. **Credentials** — every secret:\n   - `DR Webhook Secret` (type *Crypto*, field **Hmac Secret**) — the shared secret the CRM signs with. Must equal `SOCIAL_AUTOMATION_KEY` in the CRM.\n   - `DR CRM Automation Key` (type *Header Auth*) — name `x-automation-key`, value the same secret.\n\n### Calling it\n\n```\nPOST {N8N_URL}/webhook/dr-job-completed\nX-DR-Signature: <hex hmac-sha256 of the raw body, key = the shared secret>\n\n{\n  \"jobId\": \"job-1042\",\n  \"city\": \"Orange Park\",\n  \"roofType\": \"architectural shingle\",\n  \"damageCause\": \"wind\",\n  \"crewDays\": 1,\n  \"photos\": {\n    \"before\": [\"https://.../before-1.jpg\"],\n    \"after\":  [\"https://.../after-1.jpg\"]\n  },\n  \"customerConsented\": true\n}\n```\n\n`customerConsented` is required and must be true — no homeowner's roof goes on social without it.\n\n**Sign the exact bytes you send.** The signature is computed over the raw request body, not over a re-serialized copy of it, so whitespace and key order matter. Signing a pretty-printed body and sending it compacted (or the reverse) fails verification — correctly.\n\n### Reading the response\n\n**Branch on `accepted` in the body, not on the HTTP status.** Every reply comes back `200` on n8n 2.x regardless of the Respond node's configured code — verified against 2.34.6 with the code in both documented positions. A rejection is `{\"accepted\": false, \"error\": \"...\"}` and always names its reason.",
+        "height": 1080,
         "width": 480,
         "color": 4
       },
@@ -13,8 +13,8 @@
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        -520,
-        -80
+        -560,
+        -180
       ]
     },
     {
@@ -38,15 +38,76 @@
     },
     {
       "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crm-base-url",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        220
+      ]
+    },
+    {
+      "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Verify the shared-secret signature before trusting anything in the body.\n// The webhook is public; the signature is what makes it ours.\nconst crypto = require('crypto');\n\nconst secret = $env.CRM_AUTOMATION_KEY;\nconst raw = $json.body ? (typeof $json.body === 'string' ? $json.body : JSON.stringify($json.body)) : '';\nconst provided = ($json.headers?.['x-dr-signature'] ?? '').trim();\n\nlet body;\ntry {\n  body = typeof $json.body === 'string' ? JSON.parse($json.body) : $json.body;\n} catch {\n  return { json: { ok: false, reason: 'Body is not valid JSON.' } };\n}\n\nif (secret) {\n  const expected = crypto.createHmac('sha256', secret).update(raw).digest('hex');\n  const a = Buffer.from(expected, 'utf8');\n  const b = Buffer.from(provided, 'utf8');\n  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n  if (!valid) {\n    return { json: { ok: false, reason: 'Signature mismatch.' } };\n  }\n} else {\n  console.warn('CRM_AUTOMATION_KEY unset \u2014 accepting the webhook unverified. Do not run this way in production.');\n}\n\n// --- Payload rules\nconst problems = [];\nif (!body?.jobId) problems.push('jobId is required.');\nif (!body?.city) problems.push('city is required.');\nif (body?.customerConsented !== true) problems.push('customerConsented must be true \u2014 no post without written homeowner consent.');\n\nconst before = body?.photos?.before ?? [];\nconst after = body?.photos?.after ?? [];\nif (after.length === 0) problems.push('At least one \"after\" photo is required.');\n\nconst httpsOnly = [...before, ...after].every((u) => typeof u === 'string' && u.startsWith('https://'));\nif (!httpsOnly) problems.push('Photo URLs must be public HTTPS \u2014 Instagram fetches them server-side.');\n\nif (problems.length) {\n  return { json: { ok: false, reason: problems.join(' ') } };\n}\n\nreturn { json: { ok: true, ...body, before, after } };"
+        "jsCode": "// Recover the EXACT bytes of the request body.\n//\n// With `rawBody: true` the webhook puts the parsed object in $json.body and the\n// original bytes in binary property `data`. Those are not interchangeable:\n// re-serialising the parsed object with JSON.stringify() reorders nothing but\n// drops the sender's whitespace, so a pretty-printed payload hashes to a\n// different digest than the one the sender signed. Verified on 2.34.6 — a body\n// sent as `{ \"city\": \"X\",  \"jobId\": \"Y\" }` (47 bytes) re-serialises to 40.\n//\n// Buffer is available in the Code sandbox even on Cloud, where `crypto` is not.\nconst bin = $input.item.binary?.data ?? null;\n\nlet raw = null;\nif (bin?.data) {\n  raw = Buffer.from(bin.data, 'base64').toString('utf8');\n} else if (typeof $json.body === 'string') {\n  raw = $json.body;\n}\n\nreturn {\n  json: {\n    raw: raw ?? '',\n    rawMissing: raw === null,\n    body: $json.body ?? null,\n    providedSignature: ($json.headers?.['x-dr-signature'] ?? '').trim(),\n  },\n};"
+      },
+      "id": "code-extract-raw",
+      "name": "Extract Raw Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "type": "SHA256",
+        "value": "={{ $json.raw }}",
+        "dataPropertyName": "expectedSignature",
+        "encoding": "hex"
+      },
+      "id": "crypto-sign",
+      "name": "Sign Raw Body",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 2,
+      "position": [
+        640,
+        220
+      ],
+      "credentials": {
+        "crypto": {
+          "id": "REPLACE_WITH_CRYPTO_CREDENTIAL_ID",
+          "name": "DR Webhook Secret"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Compare the signature the Crypto node computed against the one the caller\n// sent, then apply the payload rules. No crypto module is required here — the\n// hashing already happened in the Crypto node, which runs outside the sandbox.\nfunction safeEqual(a, b) {\n  if (typeof a !== 'string' || typeof b !== 'string') return false;\n  if (a.length !== b.length) return false;\n  let diff = 0;\n  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);\n  return diff === 0;\n}\n\nconst expected = ($json.expectedSignature ?? '').toLowerCase();\nconst provided = ($json.providedSignature ?? '').toLowerCase();\n\nif ($json.rawMissing) {\n  return { json: { ok: false, reason: 'Could not read the raw request body — enable \"Raw Body\" on the webhook node.' } };\n}\n\nif (!safeEqual(expected, provided)) {\n  return { json: { ok: false, reason: 'Signature mismatch.' } };\n}\n\nconst body = $json.body;\n\n// --- Payload rules\nconst problems = [];\nif (!body?.jobId) problems.push('jobId is required.');\nif (!body?.city) problems.push('city is required.');\nif (body?.customerConsented !== true) problems.push('customerConsented must be true — no post without written homeowner consent.');\n\nconst before = body?.photos?.before ?? [];\nconst after = body?.photos?.after ?? [];\nif (after.length === 0) problems.push('At least one \"after\" photo is required.');\n\nconst httpsOnly = [...before, ...after].every((u) => typeof u === 'string' && u.startsWith('https://'));\nif (!httpsOnly) problems.push('Photo URLs must be public HTTPS — Instagram fetches them server-side.');\n\nif (problems.length) {\n  return { json: { ok: false, reason: problems.join(' ') } };\n}\n\nreturn { json: { ok: true, ...body, before, after, crmBaseUrl: $json.crmBaseUrl } };"
       },
       "id": "code-validate",
       "name": "Verify Signature & Payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        260,
+        840,
         220
       ]
     },
@@ -80,37 +141,30 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        480,
+        1060,
         220
       ]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Turn the closeout record into a brief the caption model can work from.\n// Deliberately spare: the model is told elsewhere not to invent detail, so\n// anything not in the payload must not appear here either.\nconst j = $json;\n\nconst cause = j.damageCause ? `${j.damageCause} damage` : 'storm damage';\nconst roof = j.roofType ? ` a ${j.roofType} roof` : ' a roof';\nconst duration = j.crewDays ? ` The crew finished in ${j.crewDays === 1 ? 'a single day' : `${j.crewDays} days`}.` : '';\n\nconst brief = [\n  `A completed ${cause} replacement in ${j.city}.`,\n  `The crew replaced${roof}.${duration}`,\n  j.before.length\n    ? 'The post shows before and after photos side by side \u2014 write copy that points at what changed without narrating the images shot by shot.'\n    : 'The post shows the finished roof.',\n  'Close by inviting anyone in the area who took damage in the same weather to have their roof looked at.',\n].join(' ');\n\n// Before photos first so the carousel reads left to right as a story.\nconst media = [...j.before.slice(0, 4), ...j.after.slice(0, 6)].map((url) => ({ url, type: 'image' }));\n\nreturn {\n  json: {\n    jobId: j.jobId,\n    theme: 'job_showcase',\n    platforms: ['facebook', 'instagram'],\n    scheduledFor: new Date().toISOString(),\n    brief,\n    targetCity: j.city,\n    media,\n  },\n};"
+        "jsCode": "// Turn the closeout record into a brief the caption model can work from.\n// Deliberately spare: the model is told elsewhere not to invent detail, so\n// anything not in the payload must not appear here either.\nconst j = $json;\n\nconst cause = j.damageCause ? `${j.damageCause} damage` : 'storm damage';\nconst roof = j.roofType ? ` a ${j.roofType} roof` : ' a roof';\nconst duration = j.crewDays ? ` The crew finished in ${j.crewDays === 1 ? 'a single day' : `${j.crewDays} days`}.` : '';\n\nconst brief = [\n  `A completed ${cause} replacement in ${j.city}.`,\n  `The crew replaced${roof}.${duration}`,\n  j.before.length\n    ? 'The post shows before and after photos side by side — write copy that points at what changed without narrating the images shot by shot.'\n    : 'The post shows the finished roof.',\n  'Close by inviting anyone in the area who took damage in the same weather to have their roof looked at.',\n].join(' ');\n\n// Before photos first so the carousel reads left to right as a story.\nconst media = [...j.before.slice(0, 4), ...j.after.slice(0, 6)].map((url) => ({ url, type: 'image' }));\n\nreturn {\n  json: {\n    jobId: j.jobId,\n    theme: 'job_showcase',\n    platforms: ['facebook', 'instagram'],\n    scheduledFor: new Date().toISOString(),\n    brief,\n    targetCity: j.city,\n    media,\n    crmBaseUrl: j.crmBaseUrl,\n  },\n};"
       },
       "id": "code-build-brief",
       "name": "Build Brief",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        700,
+        1280,
         120
       ]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.CRM_BASE_URL }}/api/social/queue",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "x-automation-key",
-              "value": "={{ $env.CRM_AUTOMATION_KEY }}"
-            }
-          ]
-        },
+        "url": "={{ $json.crmBaseUrl }}/api/social/queue",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
@@ -123,10 +177,16 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        920,
+        1480,
         120
       ],
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
     },
     {
       "parameters": {
@@ -134,7 +194,7 @@
           "__rl": true,
           "value": "REPLACE_WITH_WORKFLOW_01_ID",
           "mode": "list",
-          "cachedResultName": "DR \u2014 01 Content Calendar Publisher"
+          "cachedResultName": "DR — 01 Content Calendar Publisher"
         },
         "workflowInputs": {
           "mappingMode": "defineBelow",
@@ -151,7 +211,7 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
       "position": [
-        1140,
+        1680,
         120
       ],
       "onError": "continueRegularOutput"
@@ -167,7 +227,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        1360,
+        1880,
         120
       ]
     },
@@ -184,13 +244,46 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
       "position": [
-        700,
+        1280,
         340
       ]
     }
   ],
   "connections": {
     "Job Completed Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Extract Raw Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Raw Body": {
+      "main": [
+        [
+          {
+            "node": "Sign Raw Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Raw Body": {
       "main": [
         [
           {
