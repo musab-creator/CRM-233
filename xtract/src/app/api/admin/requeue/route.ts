@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { requeue, runOrder } from "@/lib/pipeline";
+import { appUrl } from "@/lib/config";
 import { safeEqual } from "@/lib/store";
 
 export const maxDuration = 60;
@@ -11,5 +12,5 @@ export async function POST(req: NextRequest) {
   const adminKey = process.env.XTRACT_ADMIN_KEY;
   if (!adminKey || !safeEqual(key, adminKey)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   if (await requeue(id)) after(() => runOrder(id));
-  return NextResponse.redirect(new URL(`/admin?key=${encodeURIComponent(key)}`, req.url), 303);
+  return NextResponse.redirect(new URL(`/admin?key=${encodeURIComponent(key)}`, appUrl()), 303);
 }

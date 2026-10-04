@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { PRODUCTS, formatPrice, integrations } from "@/lib/config";
+import { formatPrice, integrations } from "@/lib/config";
 import { listOrders, safeEqual } from "@/lib/store";
 
 export const metadata: Metadata = { title: "Orders", robots: { index: false } };
@@ -51,9 +51,10 @@ export default async function Admin({ searchParams }: { searchParams: Promise<{ 
               <tr key={o.id} className="align-top">
                 <td className="px-4 py-3 font-mono">
                   <a className="text-brand hover:underline" href={`/order/${o.id}?t=${o.token}`}>{o.id}</a>
+                  <div><a className="text-xs text-muted hover:underline" href={`/api/reports/${o.id}?t=${o.token}`}>PDF</a></div>
                 </td>
                 <td className="whitespace-nowrap px-4 py-3 text-muted">{new Date(o.createdAt).toLocaleString()}</td>
-                <td className="px-4 py-3">{PRODUCTS[o.tier].name}<div className="text-muted">{formatPrice(o.priceCents)}</div></td>
+                <td className="px-4 py-3">{o.kind === "manual" ? "Manual" : o.priceTier}<div className="text-muted">{formatPrice(o.priceCents)}</div></td>
                 <td className="max-w-56 px-4 py-3">{o.location?.formattedAddress ?? o.address}</td>
                 <td className="px-4 py-3">{o.customer.name}<div className="text-muted">{o.customer.email}</div></td>
                 <td className="px-4 py-3">

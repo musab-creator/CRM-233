@@ -1,23 +1,24 @@
-import { NextRequest, NextResponse } from "next/server";
-import { getOrder, safeEqual } from "@/lib/store";
+import { NextRequest } from "next/server";
+import { accessOrder, json } from "@/lib/access";
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const order = await getOrder(id);
-  if (!order || !safeEqual(req.nextUrl.searchParams.get("t"), order.token)) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+  const a = await accessOrder(id, req.nextUrl.searchParams.get("t"));
+  if (!a) return json({ error: "Not found" }, 404);
+  const o = a.order;
   // Customer-safe view: no token echo, no internal error text.
-  return NextResponse.json({
-    id: order.id,
-    tier: order.tier,
-    status: order.status,
-    address: order.location?.formattedAddress ?? order.address,
-    email: order.customer.email,
-    events: order.events,
-    summary: order.summary ?? null,
-    source: order.source ?? null,
-    hasReport: Boolean(order.reportFile),
-    delivery: order.delivery ?? null,
+  return json({
+    id: o.id,
+    kind: o.kind,
+    status: o.status,
+    address: o.location?.formattedAddress ?? o.address,
+    location: o.location ?? null,
+    email: o.customer.email,
+    events: o.events,
+    summary: o.summary ?? null,
+    source: o.source ?? null,
+    hasReport: Boolean(o.files?.pdf),
+    delivery: o.delivery ?? null,
+    owner: a.owner,
   });
 }

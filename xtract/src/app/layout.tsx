@@ -7,7 +7,8 @@ export const metadata: Metadata = {
     template: "%s · Xtract Roof Reports",
   },
   description:
-    "Order an aerial roof measurement report by address. Roof area, pitch, facets, lengths, waste table and materials list — generated and emailed automatically.",
+    "Order an 8-page aerial roof measurement report by address: diagrams, edge lengths, pitch, waste table, brand-by-brand materials and roof age — generated and emailed automatically.",
+  icons: { icon: "/favicon.svg" },
 };
 
 export const viewport: Viewport = {

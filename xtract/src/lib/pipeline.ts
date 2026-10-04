@@ -1,8 +1,7 @@
 import { deliverReport, notifyOperator } from "./email";
-import { measureRoof } from "./measure";
-import { renderReportPdf } from "./pdf";
-import { NeedsReviewError, fetchAerialImage, fetchBuildingInsights, geocode } from "./solar";
-import { getOrder, saveReport, updateOrder, withEvent } from "./store";
+import { measureOrder, renderOrderPdf, storeMeasurements, storePdf } from "./reports";
+import { NeedsReviewError } from "./solar";
+import { getOrder, saveFile, updateOrder, withEvent } from "./store";
 import type { Order, OrderStatus } from "./types";
 
 const step = (id: string, status: OrderStatus, message: string, patch: Partial<Order> = {}) =>
@@ -26,29 +25,25 @@ export async function markPaid(id: string, sessionId?: string): Promise<boolean>
  * triggers (webhook retry + manual rerun) can't double-process it.
  */
 export async function runOrder(id: string): Promise<Order | null> {
-  const claimed = await updateOrder(id, (o) =>
-    o.status === "queued" ? withEvent(o, "locating", "Locating property") : null,
-  );
+  const claimed = await updateOrder(id, (o) => (o.status === "queued" ? withEvent(o, "locating", "Locating property") : null));
   if (!claimed) return getOrder(id);
 
   try {
-    const loc = await geocode(claimed.address);
-    const insights = await fetchBuildingInsights(loc.lat, loc.lng, claimed.address);
-    const live = Boolean(process.env.GOOGLE_MAPS_API_KEY);
-    const d = insights.imageryDate;
-    const source = {
-      provider: live ? ("google-solar" as const) : ("demo" as const),
-      imageryDate: d ? `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}` : undefined,
-      imageryQuality: insights.imageryQuality,
-    };
-    await step(id, "measuring", `Found roof (${insights.solarPotential.roofSegmentStats.length} planes, ${source.imageryQuality ?? "?"} imagery)`, {
-      location: { lat: loc.lat, lng: loc.lng, formattedAddress: loc.formattedAddress },
-      source,
+    const r = await measureOrder(claimed, async (msg) => {
+      await step(id, "locating", msg);
     });
-
-    const m = measureRoof(insights);
+    const m = r.measurements;
+    const files: Order["files"] = { ...claimed.files, data: await storeMeasurements(claimed, m) };
+    if (r.aerial) {
+      files.aerial = await saveFile(`${id}-aerial.${r.aerial.kind}`, r.aerial.bytes);
+      files.aerialKind = r.aerial.kind;
+    }
     const suggested = m.wasteTable.find((w) => w.pct === m.suggestedWastePct)!;
-    await step(id, "rendering", `Measured ${m.totalAreaSqFt.toLocaleString()} sq ft across ${m.facetCount} facets`, {
+    const measured = await step(id, "rendering", `Measured ${m.totalAreaSqFt.toLocaleString()} sq ft across ${m.facetCount} facets`, {
+      location: r.location,
+      source: r.source,
+      property: r.property ?? claimed.property ?? null,
+      files,
       summary: {
         totalAreaSqFt: m.totalAreaSqFt,
         squares: suggested.squares,
@@ -58,45 +53,36 @@ export async function runOrder(id: string): Promise<Order | null> {
       },
     });
 
-    const aerialPng = claimed.tier === "claims" ? await fetchAerialImage(loc.lat, loc.lng) : null;
-    const pdf = await renderReportPdf({
-      orderId: id,
-      tier: claimed.tier,
-      address: loc.formattedAddress,
-      preparedFor: claimed.customer.company || claimed.customer.name,
-      createdAt: new Date(),
-      source,
-      measurements: m,
-      aerialPng,
-    });
-    const reportFile = await saveReport(id, pdf);
-    const withReport = await step(id, "delivering", "Report generated", { reportFile });
+    const pdf = await renderOrderPdf(measured!, m);
+    const withPdf = await step(id, "delivering", "8-page report generated", { files: { ...files, pdf: await storePdf(measured!, pdf) } });
 
-    const method = await deliverReport(withReport!, pdf);
-    return step(
-      id,
-      "delivered",
-      method === "email" ? `Emailed to ${claimed.customer.email}` : "Ready to download (email not configured)",
-      { delivery: { method, to: claimed.customer.email, sentAt: new Date().toISOString() } },
-    );
+    const method = await deliverReport(withPdf!, pdf);
+    return step(id, "delivered", method === "email" ? `Emailed to ${claimed.customer.email}` : "Ready to download (email not configured)", {
+      delivery: { method, to: claimed.customer.email, sentAt: new Date().toISOString() },
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const review = err instanceof NeedsReviewError;
     console.error(`[xtract] order ${id} ${review ? "needs review" : "failed"}:`, err);
-    const o = await step(id, review ? "needs_review" : "failed", review ? message : "Processing error — our team has been notified", {
-      error: message,
-    });
+    const o = await step(id, review ? "needs_review" : "failed", review ? message : "Processing error — our team has been notified", { error: message });
     if (o) await notifyOperator(o, message).catch((e) => console.error("[xtract] notify failed", e));
     return o;
   }
 }
 
+/** Re-render an existing report after its branding / permit info / photo changed. */
+export async function regenerate(id: string): Promise<Order | null> {
+  const o = await getOrder(id);
+  if (!o) return null;
+  const pdf = await renderOrderPdf(o);
+  const file = await storePdf(o, pdf);
+  return updateOrder(id, (x) => ({ ...x, files: { ...x.files, pdf: file } }));
+}
+
 /** Put a failed / needs-review order back in the queue (admin action). */
 export async function requeue(id: string): Promise<boolean> {
   const o = await updateOrder(id, (x) =>
-    x.status === "failed" || x.status === "needs_review" || x.status === "delivered"
-      ? withEvent(x, "queued", "Re-queued by admin")
-      : null,
+    x.kind === "auto" && (x.status === "failed" || x.status === "needs_review" || x.status === "delivered") ? withEvent(x, "queued", "Re-queued by admin") : null,
   );
   return o !== null;
 }

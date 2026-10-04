@@ -1,29 +1,32 @@
-import { NextRequest, NextResponse } from "next/server";
-import { TIERS } from "@/lib/config";
-import { measureRoof } from "@/lib/measure";
+import { NextResponse } from "next/server";
 import { renderReportPdf } from "@/lib/pdf";
-import { SAMPLE_ADDRESS, sampleInsights } from "@/lib/sample";
-import type { ReportTier } from "@/lib/types";
+import { sampleAerial, sampleMeasurements } from "@/lib/reports";
+import { SAMPLE_PROPERTY } from "@/lib/sampleModel";
 
-// Sample report rendered by the exact same pipeline code as paid orders.
-export async function GET(req: NextRequest) {
-  const t = req.nextUrl.searchParams.get("tier") as ReportTier;
-  const tier = TIERS.includes(t) ? t : "full";
-  const insights = sampleInsights();
-  const d = insights.imageryDate!;
+// The sample report, rendered live by the same code as paid orders.
+export async function GET() {
   const pdf = await renderReportPdf({
     orderId: "XR-SAMPLE",
-    tier,
-    address: SAMPLE_ADDRESS,
-    preparedFor: "Sample Roofing Co.",
+    address: SAMPLE_PROPERTY.address,
+    preparedBy: { company: "Diversity Roofing", phone: "(904) 979-0556" },
     createdAt: new Date(),
-    source: { provider: "demo", imageryDate: `${d.year}-${String(d.month).padStart(2, "0")}-${String(d.day).padStart(2, "0")}`, imageryQuality: "HIGH" },
-    measurements: measureRoof(insights),
+    source: { provider: "model", label: "Supplied professional roof model · Google imagery", imageryDate: SAMPLE_PROPERTY.imageryDate },
+    measurements: sampleMeasurements(),
+    aerial: { bytes: await sampleAerial(), kind: "jpg", credit: "Google" },
+    property: {
+      yearBuilt: SAMPLE_PROPERTY.builtYear,
+      effectiveYearBuilt: SAMPLE_PROPERTY.builtYear,
+      parcelId: SAMPLE_PROPERTY.parcel,
+      county: SAMPLE_PROPERTY.county,
+      source: "Supplied sample report (St. Johns County parcel record)",
+      checkedAt: new Date().toISOString(),
+      permitsChecked: false,
+    },
   });
   return new NextResponse(new Uint8Array(pdf), {
     headers: {
       "Content-Type": "application/pdf",
-      "Content-Disposition": `inline; filename="Xtract-sample-${tier}.pdf"`,
+      "Content-Disposition": 'inline; filename="Xtract-Sample-Roof-Report.pdf"',
       "Cache-Control": "public, max-age=3600",
     },
   });

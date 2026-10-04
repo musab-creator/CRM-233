@@ -1,82 +1,59 @@
 import Link from "next/link";
 import {
   ArrowRight,
+  Building2,
   Calculator,
   Check,
   ChevronDown,
   Clock,
-  Download,
   FileCheck,
+  Layers,
   Mail,
   MapPin,
   Package,
   Receipt,
+  Ruler,
   Satellite,
   ScanLine,
+  ShieldCheck,
 } from "lucide-react";
 import { AddressStart } from "@/components/AddressStart";
-import { HeroScan } from "@/components/HeroScan";
-import { ReportExplorer } from "@/components/ReportExplorer";
+import { PricingCalculator } from "@/components/PricingCalculator";
+import { PropertyMap } from "@/components/PropertyMap";
+import { RoofExplorer } from "@/components/RoofExplorer";
 import { SiteFooter } from "@/components/SiteFooter";
 import { SiteHeader } from "@/components/SiteHeader";
-import { PRODUCTS, TIERS, formatPrice } from "@/lib/config";
-import { measureRoof } from "@/lib/measure";
-import { sampleInsights } from "@/lib/sample";
+import { PRICE_TIERS, REPORT_PAGES, formatPrice } from "@/lib/config";
+import { buildRoof3D } from "@/lib/model3d";
+import { sampleMeasurements } from "@/lib/reports";
+import { SAMPLE_PROPERTY } from "@/lib/sampleModel";
 
 const steps = [
-  {
-    icon: MapPin,
-    title: "Enter the address",
-    body: "Pick a report type and check out. No subscription, no account to set up.",
-  },
-  {
-    icon: Satellite,
-    title: "We extract the roof",
-    body: "Our pipeline locates the building, pulls aerial roof geometry and measures every plane — pitch, area, edges.",
-  },
-  {
-    icon: Mail,
-    title: "Report hits your inbox",
-    body: "A branded PDF is generated and emailed automatically. Track every step live on your order page.",
-  },
+  { icon: MapPin, title: "Order by address", body: "Type the property address and check out. No subscription, no account required." },
+  { icon: Satellite, title: "We extract the roof", body: "The pipeline locates the building, pulls aerial roof geometry, measures every facet and edge, and looks up the parcel record." },
+  { icon: Mail, title: "Report lands in your inbox", body: "An 8-page PDF is generated and emailed automatically, with a link to the interactive 3D model and quantity CSV." },
 ];
 
 const uses = [
-  { icon: Calculator, title: "Bids without the ladder", body: "Quote retail jobs from the truck with squares and a waste table." },
-  { icon: Receipt, title: "Insurance supplements", body: "Attach measurements to estimates when the adjuster's squares come in short." },
-  { icon: Package, title: "Material orders", body: "Bundles, rolls and drip-edge pieces calculated from the measured lengths." },
-  { icon: FileCheck, title: "Consistent documentation", body: "Same layout every job: overview, lengths, pitch, area, summary, materials." },
+  { icon: Calculator, title: "Bids without the ladder", body: "Quote retail jobs from the truck with squares, pitch and a waste table." },
+  { icon: Receipt, title: "Insurance supplements", body: "Attach a full measurement report when the adjuster's squares come in short." },
+  { icon: Package, title: "Material orders", body: "Bundles and rolls for five major brands at four waste levels — ready to send to your supplier." },
+  { icon: Building2, title: "Roof age at a glance", body: "Year built and parcel from the county roll, with permit status stated plainly." },
 ];
 
 const faqs = [
-  {
-    q: "How does the report get made?",
-    a: "When your payment clears, an automated pipeline geocodes the address, requests the building's roof geometry from Google's aerial-imagery Solar API, measures each roof plane, renders the PDF and emails it to you. No one has to touch the order.",
-  },
-  {
-    q: "How long does it take?",
-    a: "Usually a few minutes. If the address can't be matched to a building or the imagery isn't good enough, the order is flagged for manual review and we contact you instead of sending a bad report.",
-  },
-  {
-    q: "How accurate are the measurements?",
-    a: "Roof area, pitch and facet count come straight from the plane geometry in the imagery. Linear measurements (eaves, rakes, ridges, hips, valleys) are derived from that geometry and are labelled as estimates — verify critical lengths on site before ordering custom materials.",
-  },
-  {
-    q: "What's in the materials list?",
-    a: "Shingle bundles, underlayment rolls, starter, hip & ridge cap, drip edge and valley leak barrier, calculated at the suggested waste factor using standard coverage rates. Confirm quantities with your supplier.",
-  },
-  {
-    q: "Does it work for any roof?",
-    a: "It works best on pitched residential roofs with recent aerial coverage. Very new construction, heavy tree cover, or flat commercial roofs may be routed to manual review.",
-  },
-  {
-    q: "What if I'm not happy with a report?",
-    a: "Reply to the delivery email with your order number. We'll re-run it or refund it.",
-  },
+  ["How does the report get made?", "When your payment clears, an automated pipeline geocodes the address, requests the building's roof geometry from Google's aerial imagery (Solar API), measures each facet and edge, checks the Florida parcel roll for year built, renders the 8-page PDF and emails it. Nobody has to touch the order."],
+  ["How long does it take?", "Usually a few minutes. If the address can't be matched to a building or the imagery isn't good enough, the order is flagged for review and we contact you instead of sending a bad report — and you're not charged for a report we can't deliver."],
+  ["How accurate is it?", "Roof area, pitch and facet count come from the roof geometry. Linear measurements are derived from it and labelled clearly; anything the imagery can't show (like parapet walls) is marked 'not measured' rather than guessed. See the Accuracy page for our validation against a professional report."],
+  ["What's on the materials page?", "Shingles, starter, ice & water, synthetic underlayment and hip & ridge caps for IKO, CertainTeed, GAF, Owens Corning and Atlas at 0%, 10%, the recommended waste and 15%, plus valley metal and drip edge pieces. The math reproduces a professional report to the bundle."],
+  ["Can I put my company on the report?", "Yes. Every page says 'Prepared by' your company with your phone number. Sign in to edit branding, add the last roof permit year or upload your own cover photo — the PDF regenerates instantly."],
+  ["Is it an Xactimate ESX file?", "No. You get the PDF plus a quantity CSV (areas, edge lengths, squares by pitch, materials). Xactimate line-item mapping and ESX export are not included."],
 ];
 
 export default function Home() {
-  const m = measureRoof(sampleInsights());
+  const m = sampleMeasurements();
+  const roof = buildRoof3D(m)!;
+  const waste = m.wasteTable.find((w) => w.pct === m.suggestedWastePct)!;
 
   return (
     <>
@@ -84,62 +61,44 @@ export default function Home() {
       <main>
         {/* Hero */}
         <section className="blueprint relative overflow-hidden text-white">
-          <div className="mx-auto grid max-w-6xl items-center gap-14 px-4 pb-20 pt-14 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:pb-28 lg:pt-20">
+          <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 pb-20 pt-12 sm:px-6 lg:grid-cols-[1fr_1.05fr] lg:pb-24 lg:pt-16">
             <div>
               <p className="inline-flex items-center gap-2 rounded-full border border-sky/25 bg-sky/10 px-3 py-1 text-xs font-semibold text-sky">
-                <ScanLine className="h-3.5 w-3.5" aria-hidden="true" /> Aerial roof measurements · automated delivery
+                <ScanLine className="h-3.5 w-3.5" aria-hidden="true" /> Roof intelligence, clearly presented
               </p>
-              <h1 className="mt-5 text-4xl font-extrabold leading-[1.08] tracking-tight sm:text-5xl lg:text-[3.4rem]">
-                Roof reports,
+              <h1 className="mt-5 text-4xl font-extrabold leading-[1.06] tracking-tight sm:text-5xl lg:text-[3.35rem]">
+                See the roof.
                 <br />
-                <span className="text-amber">extracted</span> in minutes.
+                <span className="text-amber">Get every number.</span>
               </h1>
               <p className="mt-5 max-w-lg text-lg leading-8 text-slate-300">
-                Type an address. Get roof area, pitch, every edge length, a waste table and a materials list — measured from aerial imagery and emailed to you automatically.
+                Order by address. An 8-page roof report — diagrams, edge lengths, pitch, waste table, brand-by-brand materials and roof age — is measured from aerial imagery and emailed to you automatically.
               </p>
               <div className="mt-8">
                 <AddressStart />
               </div>
               <ul className="mt-6 flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-300">
-                {[`From ${formatPrice(PRODUCTS.quick.priceCents)}`, "No subscription", "PDF + email delivery"].map((t) => (
+                {[`From ${formatPrice(PRICE_TIERS[2].cents)}–${formatPrice(PRICE_TIERS[0].cents)}`, "8-page PDF + 3D model", "Delivered automatically"].map((t) => (
                   <li key={t} className="flex items-center gap-1.5">
                     <Check className="h-4 w-4 text-amber" aria-hidden="true" /> {t}
                   </li>
                 ))}
               </ul>
             </div>
-            <HeroScan m={m} />
+            <RoofExplorer
+              roof={roof}
+              title="3436 State Rd 13 N"
+              subtitle="Jacksonville, FL · sample report"
+              stats={{ area: m.totalAreaSqFt, facets: m.facetCount, pitch: m.predominantPitch }}
+              note="Facets, areas and pitches from the measured roof model. Wall heights are illustrative."
+            />
           </div>
-        </section>
-
-        {/* How it works */}
-        <section id="how" className="scroll-mt-16 border-b border-line bg-white">
-          <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
-            <p className="text-sm font-bold uppercase tracking-wider text-brand">How it works</p>
-            <h2 className="mt-2 max-w-2xl text-3xl font-extrabold tracking-tight sm:text-4xl">Order to inbox with no one in the loop.</h2>
-            <div className="relative mt-12">
-            <div aria-hidden="true" className="absolute left-0 right-0 top-[3.25rem] hidden h-px bg-gradient-to-r from-brand/0 via-brand/40 to-brand/0 md:block" />
-            <ol className="relative grid gap-6 md:grid-cols-3">
-              {steps.map((s, i) => (
-                <li key={s.title} className="relative rounded-2xl border border-line bg-white p-6">
-                  <div className="flex items-center gap-3">
-                    <span className="relative z-10 flex h-14 w-14 items-center justify-center rounded-2xl bg-ink text-amber shadow-lg shadow-ink/20">
-                      <s.icon className="h-6 w-6" aria-hidden="true" />
-                    </span>
-                    <span className="font-mono text-sm font-semibold text-muted">0{i + 1}</span>
-                  </div>
-                  <h3 className="mt-5 text-lg font-bold">{s.title}</h3>
-                  <p className="mt-2 leading-7 text-slate">{s.body}</p>
-                </li>
-              ))}
-            </ol>
-            </div>
-            <div className="mt-8 flex flex-wrap items-center gap-2 rounded-2xl bg-panel p-4 font-mono text-xs text-slate sm:text-sm">
-              <Clock className="h-4 w-4 text-brand" aria-hidden="true" />
-              {["paid", "locating", "measuring", "rendering", "delivering", "delivered"].map((s, i, a) => (
-                <span key={s} className="flex items-center gap-2">
-                  <span className={i === a.length - 1 ? "font-semibold text-emerald-700" : ""}>{s}</span>
-                  {i < a.length - 1 && <ArrowRight className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />}
+          <div className="border-t border-white/10 bg-black/20">
+            <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-8 gap-y-2 px-4 py-4 text-sm sm:px-6">
+              <span className="font-mono text-[11px] uppercase tracking-widest text-sky">Every report</span>
+              {["Geometry & lengths", "Area & pitch", "Waste & materials", "Permit & roof age"].map((t) => (
+                <span key={t} className="flex items-center gap-2 font-semibold text-slate-200">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber" aria-hidden="true" /> {t}
                 </span>
               ))}
             </div>
@@ -147,38 +106,138 @@ export default function Home() {
         </section>
 
         {/* The report */}
-        <section id="report" className="scroll-mt-16 bg-panel">
+        <section className="bg-panel">
           <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
             <div className="flex flex-wrap items-end justify-between gap-6">
               <div>
-                <p className="text-sm font-bold uppercase tracking-wider text-brand">Inside every report</p>
-                <h2 className="mt-2 max-w-2xl text-3xl font-extrabold tracking-tight sm:text-4xl">The numbers you actually order from.</h2>
-                <p className="mt-3 max-w-2xl text-slate">
-                  This is a live sample roof run through the same measurement engine as paid orders. Switch diagrams to see what lands in your PDF.
-                </p>
+                <p className="text-sm font-bold uppercase tracking-wider text-brand">The Xtract report</p>
+                <h2 className="mt-2 max-w-2xl text-3xl font-extrabold tracking-tight sm:text-4xl">Eight pages. Everything you order from.</h2>
+                <p className="mt-3 max-w-2xl text-slate">These are real pages from the sample report, rendered by the same code that produces every paid report.</p>
               </div>
-              <a
-                href="/api/sample?tier=full"
-                target="_blank"
-                rel="noopener"
-                className="inline-flex h-11 items-center gap-2 rounded-lg border border-ink/15 bg-white px-4 text-sm font-bold text-ink transition-colors duration-200 hover:border-ink/40"
-              >
-                <Download className="h-4 w-4" aria-hidden="true" /> Sample PDF
-              </a>
+              <Link href="/sample" className="inline-flex h-11 items-center gap-2 rounded-lg bg-ink px-5 text-sm font-bold text-white transition-colors duration-200 hover:bg-ink-2">
+                Explore the sample <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </Link>
             </div>
-            <div className="mt-10">
-              <ReportExplorer m={m} />
+            <div className="mt-10 grid grid-cols-2 gap-4 sm:grid-cols-4">
+              {REPORT_PAGES.map(([title, desc], i) => (
+                <Link key={title} href="/sample" className="group">
+                  <div className="overflow-hidden rounded-xl border border-line bg-white shadow-sm transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-lg">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={`/report/page-${i + 1}.webp`} alt={`Sample page ${i + 1}: ${title}`} width={935} height={1210} loading="lazy" className="h-auto w-full" />
+                  </div>
+                  <p className="mt-2 text-sm font-bold">
+                    <span className="mr-1.5 font-mono text-xs text-brand">{String(i + 1).padStart(2, "0")}</span>
+                    {title}
+                  </p>
+                  <p className="text-xs leading-5 text-muted">{desc}</p>
+                </Link>
+              ))}
             </div>
           </div>
         </section>
 
-        {/* Use cases */}
+        {/* Real property */}
         <section className="bg-white">
+          <div className="mx-auto grid max-w-6xl items-center gap-10 px-4 py-20 sm:px-6 lg:grid-cols-[1fr_1.4fr]">
+            <div>
+              <p className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider text-brand">
+                <Satellite className="h-4 w-4" aria-hidden="true" /> The house in its real setting
+              </p>
+              <h2 className="mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl">From roof geometry to the real property.</h2>
+              <p className="mt-4 text-slate">Every report page links to live satellite imagery of the address, next to the aerial captured for the report, so you can check trees, access and neighbours before you drive out.</p>
+              <dl className="mt-6 grid grid-cols-2 gap-4 text-sm">
+                {[
+                  ["Imagery date", "Feb 11, 2016"],
+                  ["Year built", String(SAMPLE_PROPERTY.builtYear)],
+                  ["County", `${SAMPLE_PROPERTY.county}`],
+                  ["Parcel", SAMPLE_PROPERTY.parcel],
+                ].map(([k, v]) => (
+                  <div key={k} className="rounded-xl bg-panel p-3">
+                    <dt className="text-xs font-bold uppercase tracking-wider text-muted">{k}</dt>
+                    <dd className="mt-0.5 font-mono font-semibold">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+            <PropertyMap query={`${SAMPLE_PROPERTY.lat},${SAMPLE_PROPERTY.lng}`} label={SAMPLE_PROPERTY.address} aerialSrc="/sample-aerial.jpg" aerialCaption="Report aerial · Google, Feb 11, 2016" />
+          </div>
+        </section>
+
+        {/* How it works */}
+        <section id="how" className="blueprint scroll-mt-28 text-white">
+          <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+            <p className="text-sm font-bold uppercase tracking-wider text-sky">How it works</p>
+            <h2 className="mt-2 max-w-2xl text-3xl font-extrabold tracking-tight sm:text-4xl">Order to inbox with no one in the loop.</h2>
+            <ol className="mt-12 grid gap-5 md:grid-cols-3">
+              {steps.map((s, i) => (
+                <li key={s.title} className="rounded-2xl border border-white/10 bg-white/5 p-6">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-amber text-ink">
+                      <s.icon className="h-6 w-6" aria-hidden="true" />
+                    </span>
+                    <span className="font-mono text-sm font-semibold text-slate-400">0{i + 1}</span>
+                  </div>
+                  <h3 className="mt-5 text-lg font-bold">{s.title}</h3>
+                  <p className="mt-2 leading-7 text-slate-300">{s.body}</p>
+                </li>
+              ))}
+            </ol>
+            <div className="mt-8 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-black/20 p-4 font-mono text-xs text-slate-300 sm:text-sm">
+              <Clock className="h-4 w-4 text-amber" aria-hidden="true" />
+              {["paid", "locating", "measuring", "rendering", "delivering", "delivered"].map((s, i, a) => (
+                <span key={s} className="flex items-center gap-2">
+                  <span className={i === a.length - 1 ? "font-semibold text-emerald-400" : ""}>{s}</span>
+                  {i < a.length - 1 && <ArrowRight className="h-3.5 w-3.5 text-slate-500" aria-hidden="true" />}
+                </span>
+              ))}
+              <span className="ml-auto text-slate-400">tracked live on your order page</span>
+            </div>
+          </div>
+        </section>
+
+        {/* Accuracy */}
+        <section className="bg-white">
+          <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+            <div className="grid gap-10 lg:grid-cols-[1fr_1.2fr]">
+              <div>
+                <p className="flex items-center gap-2 text-sm font-bold uppercase tracking-wider text-brand">
+                  <ShieldCheck className="h-4 w-4" aria-hidden="true" /> Checked against a professional report
+                </p>
+                <h2 className="mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl">Clarity extends to the limitations.</h2>
+                <p className="mt-4 text-slate">We ran the measurement engine on the sample property and compared it, line by line, with the professional report prepared for that roof. What matched, and what the imagery can&apos;t show, is published — not hidden.</p>
+                <Link href="/quality" className="mt-6 inline-flex items-center gap-2 font-bold text-brand hover:underline">
+                  Read the full validation <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </Link>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {[
+                  [Ruler, "Roof area", `${m.totalAreaSqFt.toLocaleString()} sq ft`, "reference 8,150 — within 0.02%"],
+                  [Layers, "Facets & pitch", `${m.facetCount} · ${m.predominantPitch}/12`, "reference 35 · 5/12 — exact"],
+                  [Package, "Material quantities", "24 of 24", "brand quantities match the reference to the bundle"],
+                  [FileCheck, "Recommended waste", `${m.suggestedWastePct}% · ${waste.squares} SQ`, "reference 14% — exact"],
+                ].map(([Icon, k, v, note]) => {
+                  const I = Icon as typeof Ruler;
+                  return (
+                    <div key={k as string} className="rounded-2xl border border-line p-5">
+                      <I className="h-5 w-5 text-brand" aria-hidden="true" />
+                      <p className="mt-3 text-xs font-bold uppercase tracking-wider text-muted">{k as string}</p>
+                      <p className="font-mono text-2xl font-semibold">{v as string}</p>
+                      <p className="mt-1 text-sm text-slate">{note as string}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Uses */}
+        <section className="bg-panel">
           <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
             <h2 className="max-w-2xl text-3xl font-extrabold tracking-tight sm:text-4xl">Built for how roofers work.</h2>
             <div className="mt-10 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
               {uses.map((u) => (
-                <div key={u.title} className="rounded-2xl border border-line p-6 transition-shadow duration-200 hover:shadow-md">
+                <div key={u.title} className="rounded-2xl border border-line bg-white p-6 transition-shadow duration-200 hover:shadow-md">
                   <u.icon className="h-6 w-6 text-brand" aria-hidden="true" />
                   <h3 className="mt-4 font-bold">{u.title}</h3>
                   <p className="mt-2 text-sm leading-6 text-slate">{u.body}</p>
@@ -189,64 +248,49 @@ export default function Home() {
         </section>
 
         {/* Pricing */}
-        <section id="pricing" className="blueprint scroll-mt-16 text-white">
+        <section className="blueprint text-white">
           <div className="mx-auto max-w-6xl px-4 py-20 sm:px-6">
-            <p className="text-sm font-bold uppercase tracking-wider text-sky">Pricing</p>
-            <h2 className="mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl">Pay per report. That&apos;s it.</h2>
-            <div className="mt-10 grid gap-6 md:grid-cols-3">
-              {TIERS.map((t) => {
-                const p = PRODUCTS[t];
-                return (
-                  <div
-                    key={t}
-                    className={`relative flex flex-col rounded-2xl p-7 ${
-                      p.popular ? "bg-white text-ink shadow-2xl shadow-black/40 ring-2 ring-amber" : "border border-white/15 bg-white/5"
-                    }`}
-                  >
-                    {p.popular && (
-                      <span className="absolute -top-3 left-7 rounded-full bg-amber px-3 py-1 text-xs font-bold text-ink">Most ordered</span>
-                    )}
-                    <h3 className="text-lg font-bold">{p.name}</h3>
-                    <p className={`mt-1 text-sm ${p.popular ? "text-muted" : "text-slate-400"}`}>{p.tagline}</p>
-                    <div className="mt-5 flex items-baseline gap-1">
-                      <span className="font-mono text-5xl font-semibold">{formatPrice(p.priceCents)}</span>
-                      <span className={p.popular ? "text-muted" : "text-slate-400"}>/ report</span>
-                    </div>
-                    <ul className="mt-6 flex-1 space-y-3 text-sm">
-                      {p.includes.map((i) => (
-                        <li key={i} className="flex gap-2.5">
-                          <Check className={`mt-0.5 h-4 w-4 shrink-0 ${p.popular ? "text-brand" : "text-amber"}`} aria-hidden="true" />
-                          <span className={p.popular ? "text-slate" : "text-slate-200"}>{i}</span>
-                        </li>
-                      ))}
-                    </ul>
-                    <Link
-                      href={`/order?tier=${t}`}
-                      className={`mt-8 inline-flex h-12 items-center justify-center gap-2 rounded-xl text-sm font-bold transition-colors duration-200 ${
-                        p.popular ? "bg-brand text-white hover:bg-brand-600" : "bg-white/10 text-white hover:bg-white/20"
-                      }`}
-                    >
-                      Order {p.name} <ArrowRight className="h-4 w-4" aria-hidden="true" />
-                    </Link>
-                  </div>
-                );
-              })}
+            <div className="flex flex-wrap items-end justify-between gap-6">
+              <div>
+                <p className="text-sm font-bold uppercase tracking-wider text-sky">Pricing</p>
+                <h2 className="mt-2 text-3xl font-extrabold tracking-tight sm:text-4xl">Pay per report. Volume pricing is automatic.</h2>
+              </div>
+              <Link href="/pricing" className="font-bold text-sky hover:underline">
+                Pricing details
+              </Link>
+            </div>
+            <div className="mt-10 grid gap-4 md:grid-cols-3">
+              {PRICE_TIERS.map((t, i) => (
+                <div key={t.name} className={`rounded-2xl p-6 ${i === 1 ? "bg-white text-ink ring-2 ring-amber" : "border border-white/15 bg-white/5"}`}>
+                  <p className="font-bold">{t.name}</p>
+                  <p className="mt-2 font-mono text-4xl font-semibold">
+                    {formatPrice(t.cents)}
+                    <span className={`ml-1 text-sm font-normal ${i === 1 ? "text-muted" : "text-slate-400"}`}>/ report</span>
+                  </p>
+                  <p className={`mt-2 text-sm ${i === 1 ? "text-slate" : "text-slate-300"}`}>
+                    {t.max ? `Reports ${t.min}–${t.max}` : `Report ${t.min}+`} each month
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6">
+              <PricingCalculator dark />
             </div>
           </div>
         </section>
 
         {/* FAQ */}
-        <section id="faq" className="scroll-mt-16 bg-white">
+        <section id="faq" className="bg-white">
           <div className="mx-auto max-w-3xl px-4 py-20 sm:px-6">
             <h2 className="text-3xl font-extrabold tracking-tight sm:text-4xl">Questions</h2>
             <div className="mt-8 divide-y divide-line border-y border-line">
-              {faqs.map((f) => (
-                <details key={f.q} className="group py-1">
+              {faqs.map(([q, a]) => (
+                <details key={q} className="group py-1">
                   <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-4 py-3 text-left font-semibold [&::-webkit-details-marker]:hidden">
-                    {f.q}
+                    {q}
                     <ChevronDown className="h-5 w-5 shrink-0 text-muted transition-transform duration-200 group-open:rotate-180" aria-hidden="true" />
                   </summary>
-                  <p className="pb-5 leading-7 text-slate">{f.a}</p>
+                  <p className="pb-5 leading-7 text-slate">{a}</p>
                 </details>
               ))}
             </div>
@@ -256,7 +300,7 @@ export default function Home() {
         {/* CTA */}
         <section className="bg-panel">
           <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
-            <div className="flex flex-col items-start justify-between gap-6 rounded-3xl bg-brand p-8 text-white sm:p-12 md:flex-row md:items-center">
+            <div className="flex flex-col items-start justify-between gap-6 rounded-3xl bg-gradient-to-br from-brand to-bright p-8 text-white sm:p-12 md:flex-row md:items-center">
               <div>
                 <h2 className="text-2xl font-extrabold tracking-tight sm:text-3xl">Your next roof, measured before you get there.</h2>
                 <p className="mt-2 text-sky-100">Order now and the report is on its way in minutes.</p>

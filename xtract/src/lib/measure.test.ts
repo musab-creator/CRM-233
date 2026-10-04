@@ -48,10 +48,10 @@ test("simple gable: exact area, eaves, ridge and rakes", () => {
   assert.ok(Math.abs(m.lengths.rake - 67) <= 1, `rake ${m.lengths.rake}`);
   assert.equal(m.lengths.hip, 0);
   assert.equal(m.lengths.valley, 0);
-  assert.equal(m.suggestedWastePct, 11);
-  assert.deepEqual(m.wasteTable.map((w) => w.pct), [0, 8, 11, 13, 15, 18, 23]);
-  // squares round up, matching QuickMeasure convention
-  assert.equal(m.wasteTable[0].squares, Math.ceil(m.totalAreaSqFt / 100));
+  assert.equal(m.suggestedWastePct, 10);
+  assert.deepEqual(m.wasteTable.map((w) => w.pct), [7, 9, 10, 12, 14, 17, 19]);
+  // squares round up to the tenth, matching measurement-report convention
+  assert.equal(m.wasteTable[2].squares, Math.ceil(m.wasteTable[2].areaSqFt / 10) / 10);
 });
 
 test("demo roofs are internally consistent for many addresses", () => {

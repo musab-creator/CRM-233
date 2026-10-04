@@ -1,38 +1,42 @@
-import { NextRequest, NextResponse, after } from "next/server";
-import { PRODUCTS, TIERS, appUrl, integrations } from "@/lib/config";
+import { NextRequest, after } from "next/server";
+import { sameOrigin, currentUser } from "@/lib/auth";
+import { json } from "@/lib/access";
+import { appUrl, formatPrice, integrations, tierFor } from "@/lib/config";
 import { markPaid, runOrder } from "@/lib/pipeline";
-import { createOrder, newOrderId, newToken, updateOrder } from "@/lib/store";
+import { createOrder, monthlyCount, newOrderId, newToken, updateOrder, upsertUser } from "@/lib/store";
 import { stripe } from "@/lib/stripe";
-import type { Order, ReportTier } from "@/lib/types";
+import type { Order } from "@/lib/types";
 
 export const maxDuration = 60;
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function clean(v: unknown, max = 200): string {
-  return typeof v === "string" ? v.trim().slice(0, max) : "";
-}
+const clean = (v: unknown, max = 200) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
 export async function POST(req: NextRequest) {
+  if (!sameOrigin(req)) return json({ error: "Request rejected" }, 403);
   let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    return json({ error: "Invalid request" }, 400);
   }
 
-  const tier = clean(body.tier) as ReportTier;
+  const user = await currentUser();
   const address = clean(body.address, 300);
   const name = clean(body.name, 120);
-  const email = clean(body.email, 200).toLowerCase();
+  const email = (user?.email ?? clean(body.email, 200)).toLowerCase();
   const errors: Record<string, string> = {};
-  if (!TIERS.includes(tier)) errors.tier = "Choose a report type";
   if (address.length < 8 || !/\d/.test(address)) errors.address = "Enter the full street address, including the number";
   if (!name) errors.name = "Enter your name";
   if (!EMAIL.test(email)) errors.email = "Enter a valid email — the report is delivered there";
-  if (Object.keys(errors).length) return NextResponse.json({ errors }, { status: 422 });
+  if (Object.keys(errors).length) return json({ errors }, 422);
 
-  const product = PRODUCTS[tier];
+  const company = clean(body.company, 120) || user?.company || undefined;
+  const phone = clean(body.phone, 40) || user?.phone || undefined;
+  if (user && (company !== user.company || phone !== user.phone)) await upsertUser(user.email, { company, phone });
+
+  // Volume pricing: rate for this report's position in the month.
+  const tier = tierFor((await monthlyCount(email)) + 1);
   const live = integrations();
   const now = new Date().toISOString();
   const order: Order = {
@@ -40,29 +44,23 @@ export async function POST(req: NextRequest) {
     token: newToken(),
     createdAt: now,
     updatedAt: now,
-    tier,
-    priceCents: product.priceCents,
+    kind: "auto",
+    priceCents: tier.cents,
+    priceTier: tier.name,
     address,
-    customer: {
-      name,
-      email,
-      company: clean(body.company, 120) || undefined,
-      phone: clean(body.phone, 40) || undefined,
-    },
+    customer: { name, email, company, phone },
     notes: clean(body.notes, 1000) || undefined,
     status: "awaiting_payment",
-    events: [{ at: now, status: "awaiting_payment", message: "Order placed" }],
+    events: [{ at: now, status: "awaiting_payment", message: `Order placed (${tier.name} · ${formatPrice(tier.cents)})` }],
     payment: { provider: live.stripe ? "stripe" : "demo" },
   };
   await createOrder(order);
 
   const statusUrl = `${appUrl()}/order/${order.id}?t=${order.token}`;
-
   if (!live.stripe) {
-    // Demo mode: no payment, start processing right after responding.
     await markPaid(order.id);
     after(() => runOrder(order.id));
-    return NextResponse.json({ id: order.id, redirectUrl: statusUrl });
+    return json({ id: order.id, redirectUrl: statusUrl });
   }
 
   const session = await stripe().checkout.sessions.create({
@@ -75,14 +73,14 @@ export async function POST(req: NextRequest) {
         quantity: 1,
         price_data: {
           currency: "usd",
-          unit_amount: product.priceCents,
-          product_data: { name: `Xtract ${product.name}`, description: address },
+          unit_amount: tier.cents,
+          product_data: { name: "Xtract Roof Report (8 pages)", description: address },
         },
       },
     ],
     success_url: statusUrl,
-    cancel_url: `${appUrl()}/order?tier=${tier}&address=${encodeURIComponent(address)}&canceled=1`,
+    cancel_url: `${appUrl()}/order?address=${encodeURIComponent(address)}&canceled=1`,
   });
   await updateOrder(order.id, (o) => ({ ...o, payment: { ...o.payment, sessionId: session.id } }));
-  return NextResponse.json({ id: order.id, redirectUrl: session.url });
+  return json({ id: order.id, redirectUrl: session.url });
 }

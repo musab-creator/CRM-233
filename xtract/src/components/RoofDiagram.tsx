@@ -1,10 +1,10 @@
-import { EDGE_HEX } from "@/lib/edges";
+import { EDGE_DASHED, EDGE_HEX } from "@/lib/edges";
 import type { Pt, RoofMeasurements } from "@/lib/types";
 
 export type DiagramMode = "lengths" | "pitch" | "area" | "scan";
 
 interface Props {
-  m: RoofMeasurements;
+  m: Pick<RoofMeasurements, "facets" | "edges">;
   mode: DiagramMode;
   className?: string;
   title?: string;
@@ -64,6 +64,7 @@ export function RoofDiagram({ m, mode, className, title }: Props) {
               x2={bx}
               y2={by}
               stroke={EDGE_HEX[e.type]}
+              strokeDasharray={EDGE_DASHED[e.type] && !dark ? `${fs * 0.4} ${fs * 0.3}` : undefined}
               strokeWidth={fs * (dark ? 0.2 : 0.17)}
               strokeLinecap="round"
               className={dark ? "draw-edge" : undefined}
@@ -76,7 +77,7 @@ export function RoofDiagram({ m, mode, className, title }: Props) {
         m.edges.map((e, i) => {
           const [ax, ay] = tx(e.a);
           const [bx, by] = tx(e.b);
-          if (Math.hypot(bx - ax, by - ay) < fs * 2.2) return null;
+          if (Math.hypot(bx - ax, by - ay) < fs * 3.4) return null;
           const cx = (ax + bx) / 2;
           const cy = (ay + by) / 2;
           const s = String(Math.round(e.lengthFt));

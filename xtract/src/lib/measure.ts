@@ -1,14 +1,5 @@
-import type {
-  BuildingInsights,
-  Edge,
-  EdgeType,
-  Facet,
-  MaterialLine,
-  Pt,
-  RoofMeasurements,
-  SolarRoofSegment,
-  WasteRow,
-} from "./types";
+import { brandMaterials, materialWasteColumns, quickMaterials } from "./materials";
+import type { BuildingInsights, Edge, EdgeType, Facet, Pt, RoofMeasurements, SolarRoofSegment, WasteRow } from "./types";
 
 // Turns Google Solar API roof planes into a contractor roof report.
 //
@@ -22,7 +13,37 @@ import type {
 const SQFT_PER_M2 = 10.7639;
 const FT_PER_M = 3.28084;
 
-export const WASTE_COLUMNS = [0, 8, 11, 13, 15, 18, 23];
+export const EMPTY_LENGTHS = (): Record<EdgeType, number> => ({
+  eave: 0,
+  rake: 0,
+  ridge: 0,
+  hip: 0,
+  valley: 0,
+  flash: 0,
+  step: 0,
+  transition: 0,
+  parapet: 0,
+  unspecified: 0,
+});
+
+/** Summary waste columns centred on the recommendation (e.g. 13% → 10…22%). */
+export function wasteColumns(recommended: number): number[] {
+  return [-3, -1, 0, 2, 4, 7, 9].map((d) => Math.max(0, recommended + d));
+}
+
+/** Round up to a tenth of a square, matching measurement-report convention. */
+export const squaresOf = (sqft: number) => Math.ceil(Math.round(sqft) / 10 - 1e-9) / 10;
+
+/** 449.83 → 449ft 10in */
+export function ftIn(ft: number): string {
+  let f = Math.floor(ft);
+  let i = Math.round((ft - f) * 12);
+  if (i === 12) {
+    f += 1;
+    i = 0;
+  }
+  return `${f}ft ${i}in`;
+}
 
 const DIRECTIONS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 
@@ -130,11 +151,12 @@ function polyDistance(a: Pt[], b: Pt[]): number {
   return best;
 }
 
-function suggestWaste(facets: number, valleys: number): number {
-  if (facets <= 4 && valleys === 0) return 11;
-  if (facets <= 10) return 13;
-  if (facets <= 20) return 15;
-  return 18;
+export function suggestWaste(facets: number, valleys: number): number {
+  if (facets <= 4 && valleys === 0) return 10;
+  if (facets <= 10) return 12;
+  if (facets <= 25) return 13;
+  if (facets <= 40) return 14;
+  return 15;
 }
 
 export function measureRoof(insights: BuildingInsights): RoofMeasurements {
@@ -230,7 +252,7 @@ export function measureRoof(insights: BuildingInsights): RoofMeasurements {
   // --- Build facet polygons & edges -------------------------------------
   const edges: Edge[] = [];
   const facets: Facet[] = [];
-  const lengths: Record<EdgeType, number> = { eave: 0, rake: 0, ridge: 0, hip: 0, valley: 0, flash: 0 };
+  const lengths = EMPTY_LENGTHS();
   const topWidths = new Map<number, { a: Pt; b: Pt; w: number }>();
 
   for (const p of planes) {
@@ -309,92 +331,88 @@ export function measureRoof(insights: BuildingInsights): RoofMeasurements {
   lengths.hip = hipLen;
   lengths.valley = valleyLen;
 
-  // --- Totals ---------------------------------------------------------------
-  const totalArea = facets.reduce((s, f) => s + f.areaSqFt, 0);
-  const footprint = segments.reduce((s, x) => s + x.stats.groundAreaMeters2 * SQFT_PER_M2, 0);
+  const footprint = segments.reduce((sum, x) => sum + x.stats.groundAreaMeters2 * SQFT_PER_M2, 0);
+  // Solar planes don't reveal walls or pitch-change seams; those stay unmeasured.
+  return summarize(facets, edges, lengths, { footprintSqFt: footprint, unmeasured: ["step", "transition", "parapet", "unspecified"] });
+}
+
+/** Shared roll-up: totals, pitch table, waste table and materials. */
+export function summarize(
+  facets: Facet[],
+  edges: Edge[],
+  lengths: Record<EdgeType, number>,
+  opts: { footprintSqFt: number; unmeasured: EdgeType[]; manual?: { areaSqFt: number; facetCount: number; pitch: number } },
+): RoofMeasurements {
+  const manual = opts.manual;
+  const totalArea = manual ? manual.areaSqFt : facets.reduce((sum, f) => sum + f.areaSqFt, 0);
+  const flatArea = manual ? (manual.pitch === 0 ? manual.areaSqFt : 0) : facets.filter((f) => f.pitch === 0).reduce((sum, f) => sum + f.areaSqFt, 0);
 
   const byPitch = new Map<number, number>();
+  if (manual) byPitch.set(manual.pitch, manual.areaSqFt);
   for (const f of facets) byPitch.set(f.pitch, (byPitch.get(f.pitch) ?? 0) + f.areaSqFt);
   const pitchBreakdown = [...byPitch.entries()]
-    .map(([pitch, areaSqFt]) => ({ pitch, areaSqFt, percent: (areaSqFt / totalArea) * 100 }))
-    .sort((a, b) => b.areaSqFt - a.areaSqFt);
+    .map(([pitch, areaSqFt]) => ({ pitch, areaSqFt, percent: (areaSqFt / totalArea) * 100, squares: squaresOf(areaSqFt) }))
+    .sort((a, b) => a.pitch - b.pitch);
+  const predominant = [...pitchBreakdown].sort((a, b) => b.areaSqFt - a.areaSqFt)[0];
 
   const r = (n: number) => Math.round(n);
-  const roundedLengths = Object.fromEntries(
-    Object.entries(lengths).map(([k, v]) => [k, r(v)]),
-  ) as Record<EdgeType, number>;
+  const roundedLengths = Object.fromEntries(Object.entries(lengths).map(([k, v]) => [k, r(v)])) as Record<EdgeType, number>;
 
-  const suggestedWastePct = suggestWaste(facets.length, roundedLengths.valley);
-  const wasteTable: WasteRow[] = WASTE_COLUMNS.map((pct) => {
+  const facetCount = manual ? manual.facetCount : facets.length;
+  const suggestedWastePct = suggestWaste(facetCount, roundedLengths.valley);
+  const wasteTable: WasteRow[] = wasteColumns(suggestedWastePct).map((pct) => {
     const areaSqFt = r(totalArea * (1 + pct / 100));
-    return { pct, areaSqFt, squares: Math.ceil(areaSqFt / 100) };
+    return { pct, areaSqFt, squares: squaresOf(areaSqFt) };
   });
 
-  const derived = {
-    dripEdge: roundedLengths.eave + roundedLengths.rake,
-    // Florida practice: starter along the full perimeter (FBC R905.2.8.5).
-    starter: roundedLengths.eave + roundedLengths.rake,
-    ridgeCap: roundedLengths.ridge + roundedLengths.hip,
-    leakBarrier: roundedLengths.valley,
+  const pitched = totalArea - flatArea;
+  const inputs = {
+    pitchedAreaSqFt: pitched,
+    eaves: lengths.eave,
+    rakes: lengths.rake,
+    ridges: lengths.ridge,
+    hips: lengths.hip,
+    valleys: lengths.valley,
+    flashing: lengths.flash + lengths.step,
   };
-
-  const suggested = wasteTable.find((w) => w.pct === suggestedWastePct)!;
-  const materials: MaterialLine[] = [
-    {
-      item: "Architectural shingles",
-      qty: suggested.squares * 3,
-      unit: "bundles",
-      basis: `${suggested.squares} SQ at ${suggestedWastePct}% waste, 3 bundles/SQ`,
-    },
-    {
-      item: "Synthetic underlayment",
-      qty: Math.ceil(suggested.areaSqFt / 1000),
-      unit: "rolls",
-      basis: "10 SQ (1,000 sq ft) per roll",
-    },
-    {
-      item: "Starter strip",
-      qty: Math.ceil(derived.starter / 120),
-      unit: "bundles",
-      basis: `${derived.starter} LF eaves + rakes, 120 LF/bundle`,
-    },
-    {
-      item: "Hip & ridge cap",
-      qty: Math.ceil(derived.ridgeCap / 25),
-      unit: "bundles",
-      basis: `${derived.ridgeCap} LF ridges + hips, 25 LF/bundle`,
-    },
-    {
-      item: "Drip edge",
-      qty: Math.ceil(derived.dripEdge / 10),
-      unit: "10' pcs",
-      basis: `${derived.dripEdge} LF eaves + rakes`,
-    },
-  ];
-  if (derived.leakBarrier > 0) {
-    materials.push({
-      item: "Leak barrier (valleys)",
-      qty: Math.ceil(derived.leakBarrier / 50),
-      unit: "rolls",
-      basis: `${derived.leakBarrier} LF valleys, 36" × 50' roll`,
-    });
-  }
-
-  const complexity = facets.length <= 4 ? "Simple" : facets.length <= 12 ? "Moderate" : "Complex";
+  const derived = {
+    dripEdge: r(lengths.eave + lengths.rake),
+    // Florida practice: starter along the full perimeter (FBC R905.2.8.5).
+    starter: r(lengths.eave + lengths.rake),
+    ridgeCap: r(lengths.ridge + lengths.hip),
+    leakBarrier: r(lengths.valley),
+    iceWater: r(inputs.eaves + inputs.valleys + inputs.flashing),
+  };
 
   return {
     totalAreaSqFt: r(totalArea),
-    footprintSqFt: r(footprint),
-    facetCount: facets.length,
-    predominantPitch: pitchBreakdown[0].pitch,
+    pitchedAreaSqFt: r(pitched),
+    flatAreaSqFt: r(flatArea),
+    predominantPitchAreaSqFt: r(predominant.areaSqFt),
+    footprintSqFt: r(opts.footprintSqFt),
+    unmeasured: opts.unmeasured,
+    facetCount,
+    predominantPitch: predominant.pitch,
     pitchBreakdown,
     facets,
     edges,
     lengths: roundedLengths,
+    exactLengths: lengths,
     derived,
-    complexity,
+    complexity: facetCount <= 4 ? "Simple" : facetCount <= 12 ? "Moderate" : "Complex",
     suggestedWastePct,
     wasteTable,
-    materials,
+    materials: quickMaterials(inputs, suggestedWastePct),
+    brandMaterials: brandMaterials(inputs, materialWasteColumns(suggestedWastePct)),
   };
+}
+
+/** Report from manually entered quantities (no geometry, so no diagrams). */
+export function measureManual(input: { areaSqFt: number; facets: number; pitch: number; lengths: Partial<Record<EdgeType, number>> }): RoofMeasurements {
+  const lengths = { ...EMPTY_LENGTHS(), ...input.lengths };
+  return summarize([], [], lengths, {
+    footprintSqFt: input.areaSqFt / Math.sqrt(1 + (input.pitch / 12) ** 2),
+    unmeasured: [],
+    manual: { areaSqFt: input.areaSqFt, facetCount: input.facets, pitch: Math.round(input.pitch) },
+  });
 }

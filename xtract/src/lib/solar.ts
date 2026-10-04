@@ -8,6 +8,7 @@ export interface GeocodeResult {
   lat: number;
   lng: number;
   formattedAddress: string;
+  county?: string;
 }
 
 function hash(str: string): number {
@@ -44,7 +45,10 @@ export async function geocode(address: string): Promise<GeocodeResult> {
     throw new NeedsReviewError(`Address could not be located (${data.status})`);
   }
   const r = data.results[0];
-  return { lat: r.geometry.location.lat, lng: r.geometry.location.lng, formattedAddress: r.formatted_address };
+  const county = (r.address_components as { long_name: string; types: string[] }[] | undefined)
+    ?.find((c) => c.types.includes("administrative_area_level_2"))
+    ?.long_name.replace(/ County$/, "");
+  return { lat: r.geometry.location.lat, lng: r.geometry.location.lng, formattedAddress: r.formatted_address, county };
 }
 
 export async function fetchBuildingInsights(lat: number, lng: number, seed: string): Promise<BuildingInsights> {
