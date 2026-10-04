@@ -1,7 +1,10 @@
 # CRM-233
 
-The application lives in [`roofing-crm/`](./roofing-crm) — see its
-[README](./roofing-crm/README.md) to run it.
+Two apps live in this repo:
+
+- [`roofing-crm/`](./roofing-crm) — the Diversity Roofing CRM ([README](./roofing-crm/README.md))
+- [`xtract/`](./xtract) — Xtract Roof Reports: order-by-address roof measurement
+  reports, generated and emailed automatically ([README](./xtract/README.md))
 
 ---
 
