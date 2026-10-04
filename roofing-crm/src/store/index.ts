@@ -1,7 +1,8 @@
 import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type {
   User, Lead, Homeowner, InsurancePolicy, Claim, Inspection,
-  ContingencyAgreement, Campaign, Activity, DashboardStats, StormEvent
+  ContingencyAgreement, Campaign, Activity, DashboardStats, StormEvent, RoofReport
 } from '@/types';
 import { mockLeads, mockHomeowners, mockPolicies, mockClaims, mockInspections,
   mockContingencies, mockCampaigns, mockActivities, mockUsers, mockStormEvents } from '@/lib/mock-data';
@@ -52,6 +53,11 @@ interface CRMStore {
   activities: Activity[];
   addActivity: (activity: Activity) => void;
 
+  // Roof reports
+  roofReports: RoofReport[];
+  addRoofReport: (report: RoofReport) => void;
+  updateRoofReport: (id: string, updates: Partial<RoofReport>) => void;
+
   // Storm events
   stormEvents: StormEvent[];
 
@@ -59,7 +65,7 @@ interface CRMStore {
   getDashboardStats: () => DashboardStats;
 }
 
-export const useCRMStore = create<CRMStore>((set, get) => ({
+export const useCRMStore = create<CRMStore>()(persist((set, get) => ({
   // Auth
   currentUser: mockUsers[0],
   users: mockUsers,
@@ -119,6 +125,13 @@ export const useCRMStore = create<CRMStore>((set, get) => ({
   activities: mockActivities,
   addActivity: (activity) => set((s) => ({ activities: [activity, ...s.activities] })),
 
+  // Roof reports
+  roofReports: [],
+  addRoofReport: (report) => set((s) => ({ roofReports: [report, ...s.roofReports] })),
+  updateRoofReport: (id, updates) => set((s) => ({
+    roofReports: s.roofReports.map((r) => r.id === id ? { ...r, ...updates } : r)
+  })),
+
   // Storm events
   stormEvents: mockStormEvents,
 
@@ -150,4 +163,13 @@ export const useCRMStore = create<CRMStore>((set, get) => ({
       avgClaimTime: 14.5,
     };
   },
+}), {
+  // Only roof reports are kept across reloads for now; everything else is
+  // still mock data that resets, as before.
+  name: 'crm-roof-reports-v1',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (s) => ({ roofReports: s.roofReports }),
+  // Rehydrated from AppShell after mount so the server render and the first
+  // client render match.
+  skipHydration: true,
 }));

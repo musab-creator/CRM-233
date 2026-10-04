@@ -165,7 +165,7 @@ export default function PoliciesPage() {
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <Shield className="h-7 w-7 text-orange-500" />
             <h1 className="text-2xl font-bold text-gray-900">Insurance Policies</h1>
@@ -180,7 +180,7 @@ export default function PoliciesPage() {
                 setAnalysisProgress(0);
               }
             }}
-            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-orange-700 transition-colors"
+            className="justify-center inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-orange-700 transition-colors"
           >
             <Upload className="h-4 w-4" />
             Upload Policy
@@ -526,8 +526,8 @@ export default function PoliciesPage() {
             <h2 className="text-lg font-semibold text-gray-900">All Policies</h2>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
-              <thead>
+            <table className="block w-full text-left text-sm md:table">
+              <thead className="hidden md:table-header-group">
                 <tr className="border-b border-gray-100 bg-gray-50/50">
                   <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wider text-gray-500">
                     Homeowner
@@ -555,10 +555,10 @@ export default function PoliciesPage() {
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-50">
+              <tbody className="block divide-y divide-gray-100 md:table-row-group md:divide-gray-50">
                 {policies.length === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="px-6 py-12 text-center text-gray-400">
+                  <tr className="block md:table-row">
+                    <td colSpan={8} className="block px-6 py-12 text-center text-gray-400 md:table-cell">
                       No policies uploaded yet. Click "Upload Policy" to get started.
                     </td>
                   </tr>
@@ -566,8 +566,8 @@ export default function PoliciesPage() {
                   policies.map((policy) => {
                     const ho = homeownerMap.get(policy.homeownerId);
                     return (
-                      <tr key={policy.id} className="hover:bg-gray-50/50 transition-colors">
-                        <td className="px-6 py-4">
+                      <tr key={policy.id} className="block py-3 hover:bg-gray-50/50 transition-colors md:table-row md:py-0">
+                        <td className="block px-4 pb-2 md:table-cell md:px-6 md:py-4">
                           <p className="font-medium text-gray-900">
                             {ho ? `${ho.firstName} ${ho.lastName}` : 'Unknown'}
                           </p>
@@ -577,26 +577,26 @@ export default function PoliciesPage() {
                             </p>
                           )}
                         </td>
-                        <td className="px-6 py-4 text-gray-700">{policy.carrier}</td>
-                        <td className="px-6 py-4 font-mono text-xs text-gray-600">{policy.policyNumber}</td>
-                        <td className="px-6 py-4">
+                        <td data-label="Carrier" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-700">{policy.carrier}</td>
+                        <td data-label="Policy #" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none font-mono text-xs text-gray-600">{policy.policyNumber}</td>
+                        <td data-label="Type" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none">
                           <StatusBadge
                             label={policy.policyType}
                             colorClass={getPolicyTypeBadge(policy.policyType)}
                             size="md"
                           />
                         </td>
-                        <td className="px-6 py-4 text-gray-700">
+                        <td data-label="Deductible" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-700">
                           {policy.deductibleType === 'flat'
                             ? formatCurrency(policy.deductible)
                             : `${policy.deductible}%`}
                         </td>
-                        <td className="px-6 py-4 text-gray-700">{formatDate(policy.bestDateOfLoss)}</td>
-                        <td className="px-6 py-4 font-semibold text-gray-900">
+                        <td data-label="Date of loss" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-700">{formatDate(policy.bestDateOfLoss)}</td>
+                        <td data-label="Dwelling coverage" className="flex items-center justify-between gap-3 px-4 py-1.5 text-right md:table-cell md:px-6 md:py-4 md:text-left before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none font-semibold text-gray-900">
                           {formatCurrency(policy.dwellingCoverage)}
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-2">
+                        <td className="block px-4 pt-2 md:table-cell md:px-6 md:py-4">
+                          <div className="grid grid-cols-2 gap-2 md:flex md:items-center">
                             <button
                               onClick={() => {
                                 setShowUpload(true);
@@ -609,13 +609,13 @@ export default function PoliciesPage() {
                                   );
                                 }
                               }}
-                              className="rounded-md px-3 py-1.5 text-xs font-medium text-orange-700 hover:bg-orange-50 transition-colors"
+                              className="rounded-md border border-orange-200 px-3 py-2 text-sm font-medium text-orange-700 hover:bg-orange-50 transition-colors md:border-0 md:py-1.5 md:text-xs"
                             >
                               View
                             </button>
                             <button
                               onClick={() => router.push(`/contingency?policyId=${policy.id}`)}
-                              className="rounded-md bg-orange-50 px-3 py-1.5 text-xs font-medium text-orange-700 hover:bg-orange-100 transition-colors"
+                              className="rounded-md bg-orange-50 px-3 py-2 text-sm font-medium text-orange-700 hover:bg-orange-100 transition-colors md:py-1.5 md:text-xs"
                             >
                               Generate Contingency
                             </button>

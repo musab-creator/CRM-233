@@ -13,13 +13,15 @@ import Link from 'next/link';
 import {
   ArrowLeft, User, MapPin, Phone, Mail, Shield, FileText,
   Camera, FileSignature, ClipboardCheck, Calendar, DollarSign,
-  MessageSquare, Edit, ChevronRight
+  MessageSquare, Edit, ChevronRight, Ruler, Map as MapIcon
 } from 'lucide-react';
+import ReportEstimateActions from '@/components/ReportEstimateActions';
+import { SOURCE_LABELS, squares } from '@/lib/roof-report';
 import type { LeadStatus } from '@/types';
 
 export default function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { leads, homeowners, policies, claims, inspections, contingencies, users, activities, updateLead } = useCRMStore();
+  const { leads, homeowners, policies, claims, inspections, contingencies, users, activities, roofReports, updateLead } = useCRMStore();
 
   const lead = leads.find(l => l.id === id);
   if (!lead) {
@@ -40,6 +42,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
   const leadInspections = inspections.filter(i => i.leadId === lead.id);
   const leadContingency = lead.contingencyId ? contingencies.find(c => c.id === lead.contingencyId) : null;
   const leadActivities = activities.filter(a => a.leadId === lead.id).slice(0, 10);
+  const roofReport = roofReports.find(r => r.leadId === lead.id);
 
   const insuranceStatuses: LeadStatus[] = [
     'new', 'contacted', 'inspection_scheduled', 'inspection_complete',
@@ -53,13 +56,13 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
     <AppShell>
       <div className="max-w-6xl mx-auto">
         {/* Back button and header */}
-        <div className="flex items-center gap-4 mb-6">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-6">
           <Link href="/leads" className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </Link>
-          <div className="flex-1">
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-gray-900">
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
                 {homeowner ? `${homeowner.firstName} ${homeowner.lastName}` : 'Unknown'}
               </h1>
               <StatusBadge
@@ -78,7 +81,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
             </p>
           </div>
           {lead.estimatedValue && (
-            <div className="text-right">
+            <div className="w-full pl-12 sm:w-auto sm:pl-0 sm:text-right">
               <p className="text-sm text-gray-500">Estimated Value</p>
               <p className="text-2xl font-bold text-green-600">{formatCurrency(lead.estimatedValue)}</p>
             </div>
@@ -110,16 +113,16 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {/* Left column - Main info */}
-          <div className="col-span-2 space-y-6">
+          <div className="space-y-6 lg:col-span-2">
             {/* Homeowner Info */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
               <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
                 <User className="w-4 h-4" /> Homeowner Information
               </h2>
               {homeowner && (
-                <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
                   <div className="flex items-center gap-2">
                     <MapPin className="w-4 h-4 text-gray-400" />
                     <span>{homeowner.address}, {homeowner.city}, {homeowner.state} {homeowner.zip}</span>
@@ -129,8 +132,8 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
                     <span>{homeowner.phone}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Mail className="w-4 h-4 text-gray-400" />
-                    <span>{homeowner.email}</span>
+                    <Mail className="w-4 h-4 flex-shrink-0 text-gray-400" />
+                    <span className="min-w-0 break-all">{homeowner.email}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Calendar className="w-4 h-4 text-gray-400" />
@@ -151,7 +154,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
                     View Full Policy <ChevronRight className="w-3 h-3" />
                   </Link>
                 </div>
-                <div className="grid grid-cols-3 gap-4 text-sm">
+                <div className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
                   <div>
                     <p className="text-gray-500 text-xs">Carrier</p>
                     <p className="font-medium">{policy.carrier}</p>
@@ -189,7 +192,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
                   </h2>
                   <StatusBadge label={getClaimStatusLabel(claim.status)} colorClass={getClaimStatusColor(claim.status)} />
                 </div>
-                <div className="grid grid-cols-3 gap-4 text-sm">
+                <div className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
                   <div>
                     <p className="text-gray-500 text-xs">Claim #</p>
                     <p className="font-medium">{claim.claimNumber}</p>
@@ -234,6 +237,31 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
 
           {/* Right column - Actions & Activity */}
           <div className="space-y-6">
+            {/* Roof report -> estimate */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">Roof Report &amp; Estimate</h2>
+              {roofReport ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div><span className="text-gray-500">Squares</span><p className="font-semibold text-gray-900">{squares(roofReport.measurements).toFixed(2)}</p></div>
+                    <div><span className="text-gray-500">Pitch</span><p className="font-semibold text-gray-900">{roofReport.measurements.pitch}/12</p></div>
+                    <div><span className="text-gray-500">Source</span><p className="font-semibold text-gray-900">{SOURCE_LABELS[roofReport.source]}{roofReport.simulated ? ' (simulated)' : ''}</p></div>
+                    <div><span className="text-gray-500">Estimates</span><p className="font-semibold text-gray-900">{roofReport.estimates.map(e => e.number).join(', ') || '—'}</p></div>
+                  </div>
+                  <ReportEstimateActions report={roofReport} />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Link href={`/roof-measure?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors">
+                    <MapIcon className="w-4 h-4" /> Measure on Satellite
+                  </Link>
+                  <Link href={`/roof-reports?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-50 text-orange-700 rounded-lg text-sm hover:bg-orange-100 transition-colors">
+                    <Ruler className="w-4 h-4" /> Upload or Enter a Roof Report
+                  </Link>
+                </div>
+              )}
+            </div>
+
             {/* Quick Actions */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
               <h2 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h2>

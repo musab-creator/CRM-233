@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import {
   LayoutDashboard, Users, FileText, Shield, ClipboardCheck,
   Camera, Megaphone, Settings, ChevronLeft, ChevronRight,
-  LogOut, Building2, FileSignature
+  LogOut, Building2, FileSignature, Ruler, Calculator, X, Map as MapIcon
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -17,16 +17,27 @@ const navItems = [
   { href: '/policies', label: 'Policies', icon: Shield },
   { href: '/claims', label: 'Claims Tracker', icon: FileText },
   { href: '/inspections', label: 'Inspections', icon: Camera },
+  { href: '/roof-measure', label: 'Roof Measure', icon: MapIcon },
+  { href: '/roof-reports', label: 'Roof Reports', icon: Ruler },
+  { href: '/estimator', label: 'Estimator', icon: Calculator },
   { href: '/contingency', label: 'Contingency', icon: FileSignature },
   { href: '/marketing', label: 'Marketing', icon: Megaphone, managerOnly: true },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  mobileOpen: boolean;
+  onClose: () => void;
+}
+
+export default function Sidebar({ collapsed: collapsedDesktop, onToggleCollapse, mobileOpen, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { currentUser, setCurrentUser, users } = useCRMStore();
-  const [collapsed, setCollapsed] = useState(false);
   const [showUserSwitch, setShowUserSwitch] = useState(false);
+  // The phone drawer always shows labels; collapsing is a desktop-only mode.
+  const collapsed = collapsedDesktop && !mobileOpen;
 
   if (!currentUser) return null;
 
@@ -37,7 +48,8 @@ export default function Sidebar() {
   return (
     <aside className={cn(
       'fixed left-0 top-0 h-full bg-slate-900 text-white transition-all duration-300 z-50 flex flex-col',
-      collapsed ? 'w-16' : 'w-64'
+      collapsed ? 'w-16' : 'w-64',
+      mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
     )}>
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-700">
@@ -50,6 +62,9 @@ export default function Sidebar() {
             <p className="text-[10px] text-slate-400">Roofing CRM</p>
           </div>
         )}
+        <button onClick={onClose} className="ml-auto rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white lg:hidden" aria-label="Close menu">
+          <X className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Navigation */}
@@ -111,8 +126,9 @@ export default function Sidebar() {
 
       {/* Collapse toggle */}
       <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="absolute -right-3 top-8 w-6 h-6 bg-slate-700 rounded-full flex items-center justify-center hover:bg-slate-600 transition-colors"
+        onClick={onToggleCollapse}
+        className="absolute -right-3 top-8 w-6 h-6 bg-slate-700 rounded-full hidden lg:flex items-center justify-center hover:bg-slate-600 transition-colors"
+        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       >
         {collapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronLeft className="w-3 h-3" />}
       </button>

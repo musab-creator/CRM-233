@@ -45,3 +45,13 @@ body {
   border-color: #f97316;
   background: #fff7ed;
 }
+
+/* iOS Safari zooms the page when a focused field's text is under 16px.
+   Unlayered, so it wins over Tailwind's text-sm/text-xs utilities. */
+@media (max-width: 639px) {
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}

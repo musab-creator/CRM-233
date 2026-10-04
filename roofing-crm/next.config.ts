@@ -1,7 +1,24 @@
 import type { NextConfig } from "next";
 
+// Where the standalone Roof Measure is published. Its permit index (~42 MB of
+// JSON, refreshed by the harvest in the desktop app) is read from there
+// instead of being copied into this repo, so one upload keeps both current.
+const ROOF_MEASURE_SITE =
+  process.env.ROOF_MEASURE_SITE || "https://musab-creator.github.io/roof-measure";
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return {
+      beforeFiles: [],
+      afterFiles: [],
+      fallback: [
+        {
+          source: "/roof-measure-data/permits/:path*",
+          destination: `${ROOF_MEASURE_SITE}/permits/:path*`,
+        },
+      ],
+    };
+  },
 };
 
 export default nextConfig;

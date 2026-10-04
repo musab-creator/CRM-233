@@ -224,14 +224,14 @@ export default function MarketingPage() {
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Marketing &amp; Campaigns</h1>
             <p className="text-sm text-gray-500">Track campaigns, lead sources, and marketing ROI</p>
           </div>
           <button
             onClick={openNewCampaignModal}
-            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 transition-colors"
+            className="justify-center inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 transition-colors"
           >
             <Plus className="h-4 w-4" />
             New Campaign
@@ -440,7 +440,7 @@ export default function MarketingPage() {
 
       {/* New Campaign Modal */}
       {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40"
@@ -448,7 +448,7 @@ export default function MarketingPage() {
           />
 
           {/* Modal */}
-          <div className="relative z-10 w-full max-w-lg rounded-xl bg-white p-6 shadow-xl mx-4 max-h-[90vh] overflow-y-auto">
+          <div className="relative z-10 max-w-lg max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-lg font-semibold text-gray-900">New Campaign</h2>
               <button
@@ -503,7 +503,7 @@ export default function MarketingPage() {
               </div>
 
               {/* Dates */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
                   <input
@@ -562,7 +562,7 @@ export default function MarketingPage() {
               </div>
 
               {/* Actions */}
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="flex items-center justify-end gap-3 pt-2 [&>button]:flex-1 sm:[&>button]:flex-none">
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}

@@ -159,7 +159,7 @@ export default function DashboardPage() {
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">
               Welcome back, {currentUser?.name?.split(' ')[0] ?? 'User'}
@@ -167,7 +167,7 @@ export default function DashboardPage() {
             <p className="text-sm text-gray-500">{today}</p>
           </div>
           {currentUser?.role && (
-            <span className="inline-flex items-center rounded-full bg-orange-100 px-3 py-1 text-sm font-medium text-orange-800 capitalize">
+            <span className="inline-flex self-start sm:self-auto items-center rounded-full bg-orange-100 px-3 py-1 text-sm font-medium text-orange-800 capitalize">
               {currentUser.role.replace('_', ' ')}
             </span>
           )}

@@ -125,9 +125,12 @@ function ContingencyContent() {
 
       {/* Stepper */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+        <p className="mb-3 text-sm font-medium text-gray-900 sm:hidden">
+          Step {step} of {steps.length}: {steps[step - 1]?.label}
+        </p>
         <div className="flex items-center justify-between">
           {steps.map((s, i) => (
-            <div key={s.num} className="flex items-center">
+            <div key={s.num} className="flex flex-1 items-center last:flex-none">
               <div className="flex items-center gap-2">
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
                   step > s.num ? 'bg-green-500 text-white' :
@@ -136,14 +139,14 @@ function ContingencyContent() {
                 }`}>
                   {step > s.num ? <CheckCircle className="w-4 h-4" /> : s.num}
                 </div>
-                <span className={`text-sm font-medium ${
+                <span className={`hidden sm:inline text-sm font-medium ${
                   step >= s.num ? 'text-gray-900' : 'text-gray-400'
                 }`}>
                   {s.label}
                 </span>
               </div>
               {i < steps.length - 1 && (
-                <div className={`w-12 h-0.5 mx-3 ${step > s.num ? 'bg-green-500' : 'bg-gray-200'}`} />
+                <div className={`flex-1 sm:flex-none sm:w-12 h-0.5 mx-2 sm:mx-3 ${step > s.num ? 'bg-green-500' : 'bg-gray-200'}`} />
               )}
             </div>
           ))}
@@ -175,7 +178,7 @@ function ContingencyContent() {
           {selectedPolicy && homeowner && (
             <div className="mt-6 p-4 bg-gray-50 rounded-lg">
               <h3 className="font-semibold text-sm text-gray-700 mb-3">Auto-Populated Data</h3>
-              <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
                 <div className="space-y-2">
                   <h4 className="font-medium text-gray-600 flex items-center gap-1"><User className="w-3 h-3" /> Homeowner</h4>
                   <p>{homeowner.firstName} {homeowner.lastName}</p>
@@ -373,7 +376,7 @@ function ContingencyContent() {
               {/* Homeowner Section */}
               <div className="mb-6">
                 <h3 className="font-bold text-sm text-gray-800 bg-gray-100 px-3 py-1.5 mb-3">HOMEOWNER INFORMATION</h3>
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm px-3">
+                <div className="grid grid-cols-1 gap-x-8 gap-y-2 text-sm px-3 sm:grid-cols-2">
                   <div><span className="text-gray-500">Name:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.firstName} {homeowner.lastName}</span></div>
                   <div><span className="text-gray-500">Phone:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.phone}</span></div>
                   <div><span className="text-gray-500">Address:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.address}</span></div>
@@ -385,7 +388,7 @@ function ContingencyContent() {
               {/* Insurance Section */}
               <div className="mb-6">
                 <h3 className="font-bold text-sm text-gray-800 bg-gray-100 px-3 py-1.5 mb-3">INSURANCE INFORMATION</h3>
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm px-3">
+                <div className="grid grid-cols-1 gap-x-8 gap-y-2 text-sm px-3 sm:grid-cols-2">
                   <div><span className="text-gray-500">Insurance Carrier:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{selectedPolicy.carrier}</span></div>
                   <div><span className="text-gray-500">Policy Number:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{selectedPolicy.policyNumber}</span></div>
                   <div>
@@ -431,7 +434,7 @@ function ContingencyContent() {
               </div>
 
               {/* Signatures */}
-              <div className="grid grid-cols-2 gap-8 mt-10">
+              <div className="grid grid-cols-2 gap-4 sm:gap-8 mt-10">
                 <div>
                   <div className="border-b border-gray-400 mb-1 h-10" />
                   <p className="text-sm text-gray-600">Homeowner Signature</p>
@@ -560,8 +563,9 @@ function ContingencyContent() {
               <p>No contingency agreements generated yet</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-left">
+            <div className="overflow-x-auto">
+            <table className="block md:table w-full text-sm">
+              <thead className="hidden md:table-header-group bg-gray-50 text-left">
                 <tr>
                   <th className="px-4 py-3 font-medium text-gray-600">Homeowner</th>
                   <th className="px-4 py-3 font-medium text-gray-600">Carrier</th>
@@ -572,16 +576,16 @@ function ContingencyContent() {
                   <th className="px-4 py-3 font-medium text-gray-600">Signed</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="block md:table-row-group divide-y divide-gray-100">
                 {contingencies.map(c => (
-                  <tr key={c.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium">{c.homeownerName}</td>
-                    <td className="px-4 py-3">{c.insuranceCarrier}</td>
-                    <td className="px-4 py-3">
+                  <tr key={c.id} className="block py-3 md:table-row md:py-0 hover:bg-gray-50">
+                    <td className="block px-4 py-1 md:table-cell md:px-4 md:py-3 font-medium">{c.homeownerName}</td>
+                    <td data-label="Carrier" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">{c.insuranceCarrier}</td>
+                    <td data-label="Policy type" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">
                       <StatusBadge label={c.policyType} colorClass={getPolicyTypeBadge(c.policyType)} />
                     </td>
-                    <td className="px-4 py-3">{getClaimTypeLabel(c.claimType)}</td>
-                    <td className="px-4 py-3">
+                    <td data-label="Claim type" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">{getClaimTypeLabel(c.claimType)}</td>
+                    <td data-label="Status" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                         c.status === 'signed' ? 'bg-green-100 text-green-700' :
                         c.status === 'pending_signature' ? 'bg-amber-100 text-amber-700' :
@@ -591,12 +595,13 @@ function ContingencyContent() {
                         {c.status.replace('_', ' ')}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{formatDate(c.generatedAt)}</td>
-                    <td className="px-4 py-3 text-gray-500">{c.signedAt ? formatDate(c.signedAt) : '-'}</td>
+                    <td data-label="Generated" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-500">{formatDate(c.generatedAt)}</td>
+                    <td data-label="Signed" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-500">{c.signedAt ? formatDate(c.signedAt) : '-'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </div>
