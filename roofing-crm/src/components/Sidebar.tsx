@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import {
   LayoutDashboard, Users, FileText, Shield, ClipboardCheck,
   Camera, Megaphone, Settings, ChevronLeft, ChevronRight,
-  LogOut, Building2, FileSignature
+  LogOut, Building2, FileSignature, Ruler, Calculator
 } from 'lucide-react';
 import { useState } from 'react';
 
@@ -17,6 +17,8 @@ const navItems = [
   { href: '/policies', label: 'Policies', icon: Shield },
   { href: '/claims', label: 'Claims Tracker', icon: FileText },
   { href: '/inspections', label: 'Inspections', icon: Camera },
+  { href: '/roof-reports', label: 'Roof Reports', icon: Ruler },
+  { href: '/estimator', label: 'Estimator', icon: Calculator },
   { href: '/contingency', label: 'Contingency', icon: FileSignature },
   { href: '/marketing', label: 'Marketing', icon: Megaphone, managerOnly: true },
   { href: '/settings', label: 'Settings', icon: Settings },

@@ -13,13 +13,16 @@ import Link from 'next/link';
 import {
   ArrowLeft, User, MapPin, Phone, Mail, Shield, FileText,
   Camera, FileSignature, ClipboardCheck, Calendar, DollarSign,
-  MessageSquare, Edit, ChevronRight
+  MessageSquare, Edit, ChevronRight, Ruler, Calculator
 } from 'lucide-react';
+import { useBuildEstimate } from '@/components/useBuildEstimate';
+import { SOURCE_LABELS, squares } from '@/lib/roof-report';
 import type { LeadStatus } from '@/types';
 
 export default function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { leads, homeowners, policies, claims, inspections, contingencies, users, activities, updateLead } = useCRMStore();
+  const { leads, homeowners, policies, claims, inspections, contingencies, users, activities, roofReports, updateLead } = useCRMStore();
+  const buildEstimate = useBuildEstimate();
 
   const lead = leads.find(l => l.id === id);
   if (!lead) {
@@ -40,6 +43,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
   const leadInspections = inspections.filter(i => i.leadId === lead.id);
   const leadContingency = lead.contingencyId ? contingencies.find(c => c.id === lead.contingencyId) : null;
   const leadActivities = activities.filter(a => a.leadId === lead.id).slice(0, 10);
+  const roofReport = roofReports.find(r => r.leadId === lead.id);
 
   const insuranceStatuses: LeadStatus[] = [
     'new', 'contacted', 'inspection_scheduled', 'inspection_complete',
@@ -234,6 +238,31 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
 
           {/* Right column - Actions & Activity */}
           <div className="space-y-6">
+            {/* Roof report -> estimate */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">Roof Report &amp; Estimate</h2>
+              {roofReport ? (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div><span className="text-gray-500">Squares</span><p className="font-semibold text-gray-900">{squares(roofReport.measurements).toFixed(2)}</p></div>
+                    <div><span className="text-gray-500">Pitch</span><p className="font-semibold text-gray-900">{roofReport.measurements.pitch}/12</p></div>
+                    <div><span className="text-gray-500">Source</span><p className="font-semibold text-gray-900">{SOURCE_LABELS[roofReport.source]}{roofReport.simulated ? ' (simulated)' : ''}</p></div>
+                    <div><span className="text-gray-500">Estimates</span><p className="font-semibold text-gray-900">{roofReport.estimates.map(e => e.number).join(', ') || '—'}</p></div>
+                  </div>
+                  <button
+                    onClick={() => buildEstimate(roofReport)}
+                    className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors"
+                  >
+                    <Calculator className="w-4 h-4" /> Build Estimate from Report
+                  </button>
+                </div>
+              ) : (
+                <Link href={`/roof-reports?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-50 text-orange-700 rounded-lg text-sm hover:bg-orange-100 transition-colors">
+                  <Ruler className="w-4 h-4" /> Pull Roof Report
+                </Link>
+              )}
+            </div>
+
             {/* Quick Actions */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
               <h2 className="text-sm font-semibold text-gray-700 mb-3">Quick Actions</h2>

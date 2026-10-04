@@ -57,6 +57,9 @@ export default function TopBar() {
               <Link href="/policies?new=true" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
                 Upload Policy
               </Link>
+              <Link href="/roof-reports" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
+                Pull Roof Report
+              </Link>
             </div>
           )}
         </div>

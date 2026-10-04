@@ -31,6 +31,8 @@ already configured, you just press Run.
 | **Contingency** | Generates a filled contingency from policy data after three rep questions, with an admin-use box, then sends for e-signature |
 | **Claims** | Full claim lifecycle plus one-click follow-up emails to adjusters |
 | **Inspections** | CompanyCam photo sync and inspection reports texted to homeowners |
+| **Roof Reports** | Pull roof measurements for a property — upload a Roofr / GAF QuickMeasure / EagleView PDF, order from EagleView, or type them in — then build an estimate from them in one click |
+| **Estimator** | The Diversity Roofing Estimator, embedded. Estimates built from a roof report open here with the roof sections, drip edge, starter, ridge, valley, pipe boots and gutter footage already filled in |
 | **Marketing** | Campaign tracking, ROI, cost-per-lead, lead source performance |
 | **Settings** | Company config, team, integration keys, notification preferences |
 
@@ -61,6 +63,20 @@ at a time to switch each one live — see `.env.example` for the variable names.
 | SMTP | Adjuster follow-up emails | Logged, not sent |
 | Twilio | Homeowner texts | Logged, not sent |
 | Google Drive | Contingency templates | Local template |
+| EagleView | Roof measurement orders | Simulated measurements, flagged "Simulated" everywhere |
+
+Roof report **PDF uploads are real, not mocked**: the text is read server-side
+(`unpdf`) and parsed in `src/lib/roof-report.ts`.
+
+### Roof report → estimator handoff
+
+The estimator is a self-contained app at `public/tools/estimator.html`, served
+from the CRM's own origin. "Build estimate" (`src/lib/estimator-handoff.ts`)
+writes a new estimate into the estimator's saved state (`localStorage`
+`dr_estimator_v1`) and queues it to open (`sessionStorage` `dr_resume`), using
+the same mapping as the estimator's own "Apply to this estimate" button and the
+manager's saved pricing. The estimator file itself is unmodified — if it is
+replaced with a newer build, re-check those two keys still exist.
 
 ---
 
@@ -76,6 +92,8 @@ src/
 │   ├── contingency/    Contingency generator
 │   ├── claims/         Claims tracker
 │   ├── inspections/    CompanyCam
+│   ├── roof-reports/   Roof measurement reports
+│   ├── estimator/      Embedded estimator (public/tools/estimator.html)
 │   ├── marketing/      Campaigns
 │   └── settings/       Config
 ├── components/         Shared UI

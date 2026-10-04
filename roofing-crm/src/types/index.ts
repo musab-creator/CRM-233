@@ -281,3 +281,44 @@ export interface DashboardStats {
   conversionRate: number;
   avgClaimTime: number;
 }
+
+// ==================== ROOF REPORTS ====================
+
+export type RoofReportSource = 'eagleview' | 'roofr' | 'gaf_quickmeasure' | 'manual';
+
+// Field names and units mirror the estimator's `takeoff` object so a report
+// can be handed to it without translation. Lengths are in linear feet,
+// areas in square feet.
+export interface RoofMeasurements {
+  totalSqFt: number;
+  pitchedSqFt: number;
+  flatSqFt: number;
+  twoStorySqFt: number;
+  pitch: number; // predominant pitch, rise per 12
+  facets: number;
+  eaves: number;
+  rakes: number;
+  valleys: number;
+  hipsRidges: number;
+  eavesRakes: number; // drip edge / starter run
+  penetrations: number | null; // null = not on the report
+  wastePct: number;
+}
+
+export interface RoofReport {
+  id: string;
+  leadId?: string;
+  homeownerId?: string;
+  address: string;
+  city: string;
+  state: string;
+  zip: string;
+  source: RoofReportSource;
+  fileName?: string;
+  orderId?: string;
+  simulated?: boolean; // true when the numbers came from a mocked provider
+  measurements: RoofMeasurements;
+  createdAt: string;
+  createdBy: string;
+  estimates: { number: string; createdAt: string }[];
+}

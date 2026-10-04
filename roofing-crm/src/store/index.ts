@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import type {
   User, Lead, Homeowner, InsurancePolicy, Claim, Inspection,
-  ContingencyAgreement, Campaign, Activity, DashboardStats, StormEvent
+  ContingencyAgreement, Campaign, Activity, DashboardStats, StormEvent, RoofReport
 } from '@/types';
 import { mockLeads, mockHomeowners, mockPolicies, mockClaims, mockInspections,
   mockContingencies, mockCampaigns, mockActivities, mockUsers, mockStormEvents } from '@/lib/mock-data';
@@ -51,6 +51,11 @@ interface CRMStore {
   // Activities
   activities: Activity[];
   addActivity: (activity: Activity) => void;
+
+  // Roof reports
+  roofReports: RoofReport[];
+  addRoofReport: (report: RoofReport) => void;
+  updateRoofReport: (id: string, updates: Partial<RoofReport>) => void;
 
   // Storm events
   stormEvents: StormEvent[];
@@ -118,6 +123,13 @@ export const useCRMStore = create<CRMStore>((set, get) => ({
   // Activities
   activities: mockActivities,
   addActivity: (activity) => set((s) => ({ activities: [activity, ...s.activities] })),
+
+  // Roof reports
+  roofReports: [],
+  addRoofReport: (report) => set((s) => ({ roofReports: [report, ...s.roofReports] })),
+  updateRoofReport: (id, updates) => set((s) => ({
+    roofReports: s.roofReports.map((r) => r.id === id ? { ...r, ...updates } : r)
+  })),
 
   // Storm events
   stormEvents: mockStormEvents,
