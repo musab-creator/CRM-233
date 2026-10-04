@@ -2,18 +2,19 @@
 
 import { useRouter } from 'next/navigation';
 import { useCRMStore } from '@/store';
-import { sendReportToEstimator } from '@/lib/estimator-handoff';
+import { createEstimateFromRoofReport } from '@/store/estimator';
 import { generateId } from '@/lib/utils';
 import type { RoofReport } from '@/types';
 
-// Turns a saved roof report into a new estimate in the estimator and opens it.
+// Turns a saved roof report into a new, saved estimate in the native
+// estimator and opens it.
 export function useBuildEstimate() {
   const router = useRouter();
   const { homeowners, currentUser, updateRoofReport, addActivity } = useCRMStore();
 
   return (report: RoofReport) => {
     const owner = homeowners.find((h) => h.id === report.homeownerId);
-    const { number } = sendReportToEstimator(report, {
+    const { id, number } = createEstimateFromRoofReport(report, {
       name: owner ? `${owner.firstName} ${owner.lastName}` : report.address,
       phone: owner?.phone,
       email: owner?.email,
@@ -28,6 +29,6 @@ export function useBuildEstimate() {
       description: `Estimate ${number} built from roof report for ${report.address}`,
       createdAt: now,
     });
-    router.push('/estimator');
+    router.push(`/estimator/${id}`);
   };
 }
