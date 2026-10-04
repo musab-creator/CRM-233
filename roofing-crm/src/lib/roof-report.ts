@@ -9,8 +9,13 @@ import type { RoofMeasurements, RoofReportSource } from '@/types';
 // ("Total Roof Area = 2,345 sq ft", "Ridges = 63 ft"); every parsed report is
 // shown to the rep for review before it is saved, so a missed field is caught
 // there rather than priced.
+//
+// Reports printed from Roof Measure (public/tools/roof-measure) use Roofr's
+// layout and wording with the company's name in place of Roofr's, so they go
+// through the Roofr branch.
 
 export const SOURCE_LABELS: Record<RoofReportSource, string> = {
+  roof_measure: 'Roof Measure',
   eagleview: 'EagleView',
   roofr: 'Roofr',
   gaf_quickmeasure: 'GAF QuickMeasure',
@@ -42,6 +47,7 @@ export function emptyMeasurements(): RoofMeasurements {
     valleys: 0,
     hipsRidges: 0,
     eavesRakes: 0,
+    flashing: 0,
     penetrations: null,
     wastePct: 15,
   };
@@ -85,6 +91,7 @@ function parseRoofr(t: string, m: RoofMeasurements): string {
   m.hipsRidges = hr ? feetInches(hr[1]) : round2(hips + ridges);
   const er = t.match(/Eaves \+ rakes\s*([\d,]+ft(?:\s*\d+in)?)/i);
   m.eavesRakes = er ? feetInches(er[1]) : round2(m.eaves + m.rakes);
+  m.flashing = round2(len('(?:Total )?wall flashing') + len('(?:Total )?step flashing'));
   return addr ? addr[1].trim() : '';
 }
 
@@ -134,6 +141,7 @@ function parseEagleView(t: string, m: RoofMeasurements): string {
   const combined = eq('(?:Ridges\\/Hips|Hips\\/Ridges)');
   m.hipsRidges = combined || round2(eq('Ridges') + eq('Hips'));
   m.eavesRakes = eq('Drip Edge(?: \\(Eaves \\+ Rakes\\))?') || round2(m.eaves + m.rakes);
+  m.flashing = round2(eq('(?:Total )?(?:Wall|Counter) Flashing') + eq('(?:Total )?Step Flashing'));
   const pen = t.match(/(?:Total )?Penetrations\s*=?\s*(\d+)/i);
   if (pen) m.penetrations = parseInt(pen[1], 10);
   return addr ? addr[1].trim() : '';
@@ -145,8 +153,10 @@ export function parseRoofReportText(raw: string): ParsedRoofReport {
   let source: RoofReportSource | null = null;
   let address = '';
 
-  if (/Roofr\.com|Prepared by Roofr/i.test(t)) {
-    source = 'roofr';
+  const roofr = /Roofr\.com|Prepared by Roofr/i.test(t);
+  const roofMeasure = !roofr && /Roof Report/i.test(t) && /Prepared by/i.test(t) && /Length measurement report/i.test(t);
+  if (roofr || roofMeasure) {
+    source = roofr ? 'roofr' : 'roof_measure';
     address = parseRoofr(t, m);
   } else if (/EagleView/i.test(t)) {
     source = 'eagleview';

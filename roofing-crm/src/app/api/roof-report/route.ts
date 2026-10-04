@@ -52,7 +52,7 @@ async function parseUpload(request: NextRequest) {
     return NextResponse.json(
       {
         error:
-          'No measurements found. Supported: Roofr, GAF QuickMeasure and EagleView report PDFs. Scanned (image-only) PDFs have no text to read — enter the numbers manually.',
+          'No measurements found. Supported: Roof Measure, Roofr, GAF QuickMeasure and EagleView report PDFs. Scanned (image-only) PDFs have no text to read — enter the numbers manually.',
       },
       { status: 422 },
     );

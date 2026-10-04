@@ -31,7 +31,7 @@ already configured, you just press Run.
 | **Contingency** | Generates a filled contingency from policy data after three rep questions, with an admin-use box, then sends for e-signature |
 | **Claims** | Full claim lifecycle plus one-click follow-up emails to adjusters |
 | **Inspections** | CompanyCam photo sync and inspection reports texted to homeowners |
-| **Roof Reports** | Pull roof measurements for a property — upload a Roofr / GAF QuickMeasure / EagleView PDF, order from EagleView, or type them in — then build an estimate from them in one click |
+| **Roof Reports** | Pull roof measurements for a property — measure it on satellite with **Roof Measure** (auto-trace or hand trace), upload a Roof Measure / Roofr / GAF QuickMeasure / EagleView PDF, order from EagleView, or type them in — then build an estimate from them in one click |
 | **Estimator** | The Diversity Roofing Estimator, embedded. Estimates built from a roof report open here with the roof sections, drip edge, starter, ridge, valley, pipe boots and gutter footage already filled in |
 | **Marketing** | Campaign tracking, ROI, cost-per-lead, lead source performance |
 | **Settings** | Company config, team, integration keys, notification preferences |
@@ -65,6 +65,15 @@ at a time to switch each one live — see `.env.example` for the variable names.
 | Google Drive | Contingency templates | Local template |
 | EagleView | Roof measurement orders | Simulated measurements, flagged "Simulated" everywhere |
 
+**Roof Measure** (`public/tools/roof-measure`) is a verbatim copy of
+[musab-creator/roof-measure](https://github.com/musab-creator/roof-measure) —
+see `SOURCE.md` there before touching it. It needs a Google Maps Platform key
+(`NEXT_PUBLIC_GOOGLE_MAPS_API_KEY`, or pasted into the tool once per browser).
+"Use these measurements" reads the traced roof through the tool's own
+`computeTotals()` (`src/lib/roof-measure-bridge.ts`). Its permit index is
+served from the published site via a rewrite in `next.config.ts`, and its
+`/relay/pao` and `/relay/clay` local-server relays are ported to `src/app/relay/`.
+
 Roof report **PDF uploads are real, not mocked**: the text is read server-side
 (`unpdf`) and parsed in `src/lib/roof-report.ts`.
 
@@ -92,7 +101,8 @@ src/
 │   ├── contingency/    Contingency generator
 │   ├── claims/         Claims tracker
 │   ├── inspections/    CompanyCam
-│   ├── roof-reports/   Roof measurement reports
+│   ├── roof-reports/   Roof measurement reports (Roof Measure, PDFs, manual)
+│   ├── relay/          Roof Measure's public-record relays
 │   ├── estimator/      Embedded estimator (public/tools/estimator.html)
 │   ├── marketing/      Campaigns
 │   └── settings/       Config

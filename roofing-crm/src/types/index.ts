@@ -284,7 +284,7 @@ export interface DashboardStats {
 
 // ==================== ROOF REPORTS ====================
 
-export type RoofReportSource = 'eagleview' | 'roofr' | 'gaf_quickmeasure' | 'manual';
+export type RoofReportSource = 'roof_measure' | 'eagleview' | 'roofr' | 'gaf_quickmeasure' | 'manual';
 
 // Field names and units mirror the estimator's `takeoff` object so a report
 // can be handed to it without translation. Lengths are in linear feet,
@@ -301,6 +301,7 @@ export interface RoofMeasurements {
   valleys: number;
   hipsRidges: number;
   eavesRakes: number; // drip edge / starter run
+  flashing: number; // wall + step flashing
   penetrations: number | null; // null = not on the report
   wastePct: number;
 }

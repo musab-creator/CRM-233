@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roof Measure - Diversity Roofing</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="brand">
+      <div>
+        <h1>Roof Measure</h1>
+        <div class="sub">Satellite roof measurements &amp; takeoff</div>
+      </div>
+      <button id="btnNew" class="ghost small" title="Clear everything and start a new roof">New roof</button>
+    </header>
+    <nav class="modebar"><button id="modeRes" class="mode on" title="Houses: pitched roofs, Roofr-style report">Residential</button><button id="modeCom" class="mode" title="Commercial buildings: flat / low-slope roofs, commercial report">Commercial</button></nav>
+
+    <!-- SETUP -->
+    <details class="panel" id="panelSetup" open>
+      <summary>1. Property</summary>
+      <div class="body">
+        <div id="keyRow" class="field">
+          <label>Google Maps API key</label>
+          <div class="row">
+            <input id="apiKey" type="password" placeholder="Paste API key" autocomplete="off">
+            <button id="btnShowKey" class="ghost small" title="Show or hide the saved key">Show</button>
+            <button id="btnCopyKey" class="ghost small" title="Copy the saved key">Copy</button>
+            <button id="btnSaveKey">Save</button>
+          </div>
+          <details class="help">
+            <summary>How to get a key (one time, about 5 minutes)</summary>
+            <ol>
+              <li>Go to <b>console.cloud.google.com</b>, create a project, and enable billing. Google includes a monthly free credit that covers typical use.</li>
+              <li>APIs &amp; Services &rarr; Library &rarr; enable <b>Maps JavaScript API</b>, <b>Geocoding API</b>, <b>Solar API</b>, and <b>Maps Static API</b> (used for the report photo).</li>
+              <li>Credentials &rarr; Create credentials &rarr; API key. Under API restrictions, limit it to those 4 APIs. Leave website restrictions off if you open this file by double-clicking it.</li>
+              <li>Paste the key above and click Save. It is stored only in this browser.</li>
+            </ol>
+          </details>
+        </div>
+        <div class="field">
+          <label>Address (or "lat, lng")</label>
+          <div class="row">
+            <input id="address" type="text" placeholder="123 Main St, Jacksonville, FL">
+            <button id="btnGo" class="primary">Go</button>
+          </div>
+        </div>
+        <div class="row wrap pickrow">
+          <button id="btnPick" class="ghost small" title="Click the house on the map, or steer with the arrow keys and press Enter">Pick on map</button>
+          <button id="btnLockCenter" class="primary small" hidden title="Lock the house under the + in the middle of the map (Enter)">Lock center</button>
+          <span class="muted small">or double-click a house on the map</span>
+        </div>
+        <div class="row links" id="extLinks" hidden>
+          <a id="lnkStreet" target="_blank" rel="noopener">Street View</a>
+          <a id="lnkEarth" target="_blank" rel="noopener">Google Earth 3D</a>
+        </div>
+        <h4>Permits &amp; roof age</h4>
+        <div id="permitOut" class="out"></div>
+        <div class="grid2" style="margin-top:6px">
+          <label>Last roof permit date (if not found) <input id="pm_date" type="date"></label>
+          <label>Permit # <input id="pm_number" type="text" placeholder="optional"></label>
+        </div>
+        <div class="row wrap" style="margin-top:6px"><button id="btnPermits" class="ghost small" title="Search the city / county permit records again">Look up permits again</button></div>
+      </div>
+    </details>
+
+    <!-- COMMERCIAL -->
+    <details class="panel com-only" id="panelCommercial" open>
+      <summary>2. Commercial roof</summary>
+      <div class="body">
+        <p class="muted">Flat and low-slope roofs: outline, roof levels, parapet walls and heights, rooftop units, wind zones and a full material estimate. Enter the address above first.</p>
+        <div class="row wrap"><button id="btnCom" class="primary">Measure commercial roof</button></div>
+        <div id="comOut" class="out"></div>
+        <h4>Roof system</h4>
+        <div class="grid2">
+          <label>System <select id="c_system">
+            <option value="tpo_ma">TPO 60 mil, mechanically attached</option><option value="tpo_fa">TPO 60 mil, fully adhered</option>
+            <option value="pvc_ma">PVC 60 mil, mechanically attached</option><option value="epdm_fa">EPDM 60 mil, fully adhered</option>
+            <option value="modbit">SBS modified bitumen, 2-ply</option><option value="silicone">Silicone coating (restoration)</option></select></label>
+          <label>Waste % <input id="c_waste" type="number" step="1" min="0" max="30"></label>
+          <label>Insulation target R <input id="c_rTarget" type="number" step="1" min="0" max="60" title="FBC Energy climate zone 2: R-25 continuous above deck. 0 = no new insulation"></label>
+          <label>Wind speed (mph) <input id="c_wind" type="number" step="5" min="90" max="200"></label>
+        </div>
+        <label class="chk"><input type="checkbox" id="c_cover"> 1/2" HD cover board</label>
+        <label class="chk"><input type="checkbox" id="c_taper"> Tapered insulation / crickets</label>
+        <h4>Site counts (override)</h4>
+        <div class="grid2">
+          <label>Roof drains <input id="c_drains" type="number" min="0" placeholder="estimate"></label>
+          <label>Overflow scuppers <input id="c_scuppers" type="number" min="0" placeholder="estimate"></label>
+          <label>Skylights <input id="c_skylights" type="number" min="0" placeholder="0"></label>
+          <label>Roof hatches <input id="c_hatches" type="number" min="0" placeholder="0"></label>
+          <label>Roof height ft <input id="c_height" type="number" min="0" placeholder="measured"></label>
+        </div>
+        <div class="row wrap" style="margin-top:10px">
+          <button id="btnComReport" class="primary">Print / PDF commercial report</button>
+          <button id="btnComDownload">Download commercial report</button>
+        </div>
+      </div>
+    </details>
+
+    <!-- AUTO MEASURE -->
+    <details class="panel" id="panelAuto" open>
+      <summary>2. Auto measure (Google Solar API)</summary>
+      <div class="body">
+        <p class="muted">Pulls Google's 3D roof model for this building: total roof area, footprint, and every roof plane with its pitch. Covers most US homes.</p>
+        <div class="row">
+          <button id="btnSolar" class="primary" disabled>Get roof data</button>
+          <button id="btnAuto" class="primary" disabled title="Builds every facet and line automatically from Google's roof height model">Auto-trace roof</button>
+          <button id="btnScan" disabled title="Probes 24 points around the pin to find detached garages, sheds and pool houses (24 Solar API lookups)">Scan for other structures</button>
+        </div>
+        <label class="chk" style="margin-top:6px"><input type="checkbox" id="chkSolar" checked> Show planes on map</label>
+        <div id="solarOut" class="out"></div>
+      </div>
+    </details>
+
+    <!-- TRACE -->
+    <details class="panel" id="panelTrace" open>
+      <summary>3. Trace roof</summary>
+      <div class="body">
+        <div class="field">
+          <label>Default pitch (rise per 12")</label>
+          <div class="row">
+            <select id="defaultPitch"></select>
+            <button id="btnApplyPitch" class="ghost small" title="Set every facet to the default pitch">Apply to all facets</button>
+          </div>
+        </div>
+        <p class="muted">Pick a tool, click the roof corners, double-click (or press Enter) to finish. Points snap to existing corners. Right-click or Backspace removes the last point. Esc cancels. In <b>Select</b> mode, drag corners to adjust and right-click a corner to delete it. Facets that touch are grouped into one structure; a detached shed or garage becomes Structure #2. Mark skylights or chimneys as <b>Exclude</b> on the facet to subtract them.</p>
+        <div class="field">
+          <label class="chk"><input type="checkbox" id="chkFacetEdges" checked> Show facet edge lengths</label>
+        </div>
+        <div id="selection" class="out" hidden></div>
+        <h4>Facets</h4>
+        <div id="facetList" class="list"></div>
+        <h4>Lines</h4>
+        <div id="edgeList" class="list"></div>
+      </div>
+    </details>
+
+    <!-- SUMMARY -->
+    <details class="panel" id="panelSummary" open>
+      <summary>4. Measurements &amp; materials</summary>
+      <div class="body">
+        <div id="summaryOut" class="out"></div>
+        <div class="field">
+          <label>Waste factor</label>
+          <select id="waste">
+            <option value="0">0%</option>
+            <option value="5">5%</option>
+            <option value="10" selected>10% (simple gable)</option>
+            <option value="12">12%</option>
+            <option value="15">15% (hip / cut-up)</option>
+            <option value="18">18%</option>
+            <option value="20">20%</option>
+          </select>
+        </div>
+        <div id="materialsOut" class="out"></div>
+        <details class="help">
+          <summary>Material coverage assumptions</summary>
+          <div class="grid2">
+            <label>Ridge cap LF / bundle <input id="m_ridgeCapLF" type="number" step="1" value="33"></label>
+            <label>Starter LF / bundle <input id="m_starterLF" type="number" step="1" value="105"></label>
+            <label>Underlayment squares / roll <input id="m_underlaySq" type="number" step="0.5" value="10"></label>
+            <label>Ice &amp; water LF / roll (36" wide) <input id="m_iwLF" type="number" step="0.1" value="66.7"></label>
+            <label>Drip edge stick (ft) <input id="m_dripStick" type="number" step="1" value="10"></label>
+            <label>Valley metal stick (ft) <input id="m_valleyStick" type="number" step="1" value="10"></label>
+            <label>Nails / square <input id="m_nailsPerSq" type="number" step="10" value="320"></label>
+            <label>Nails / box <input id="m_nailsPerBox" type="number" step="100" value="7200"></label>
+          </div>
+        </details>
+      </div>
+    </details>
+
+    <!-- EXPORT -->
+    <details class="panel" id="panelExport">
+      <summary>5. Report, save &amp; export</summary>
+      <div class="body">
+        <div class="grid2">
+          <label>Customer / job name <input id="jobName" type="text" placeholder="Smith residence"></label>
+          <label>Prepared by (rep) <input id="co_rep" type="text" placeholder="Your name"></label>
+        </div>
+        <div class="row wrap" style="margin-top:8px">
+          <button id="btnReport" class="primary">Print / PDF report</button>
+          <button id="btnReportHTML" title="Self-contained report file you can email or open later">Download report</button>
+          <button id="btnCSV">Export CSV</button>
+          <button id="btnJSON">Export JSON</button>
+          <label class="filebtn">Import JSON<input id="fileJSON" type="file" accept="application/json" hidden></label>
+        </div>
+        <details class="help">
+          <summary>Company details shown on the report</summary>
+          <div class="grid2">
+            <label>Company name <input id="co_name" type="text"></label>
+            <label>Phone <input id="co_phone" type="text"></label>
+            <label>Email <input id="co_email" type="text"></label>
+            <label>Website <input id="co_website" type="text"></label>
+            <label>License # <input id="co_license" type="text"></label>
+            <label>Office address <input id="co_address" type="text"></label>
+          </div>
+        </details>
+        <h4>Saved roofs (this browser)</h4>
+        <div class="row">
+          <button id="btnSave">Save this roof</button>
+        </div>
+        <div id="savedList" class="list"></div>
+      </div>
+    </details>
+
+    <footer class="muted small">
+      Measurements come from orthorectified satellite imagery and are typically within a few percent of field measurements. Verify pitch, penetrations, and layers on site.
+    </footer>
+  </aside>
+
+  <main id="mapwrap">
+    <div id="map"></div>
+    <div id="toolbar">
+      <button data-tool="select" class="tool active" title="Select / edit (S)"><span class="sw" style="background:#fff"></span>Select</button>
+      <button data-tool="facet" class="tool" title="Roof facet polygon (F)"><span class="sw" style="background:#00d8ff"></span>Facet</button>
+      <button data-tool="eave" class="tool" title="Eave (E)"><span class="sw" style="background:#4caf50"></span>Eave</button>
+      <button data-tool="ridge" class="tool" title="Ridge (R)"><span class="sw" style="background:#b5d46a"></span>Ridge</button>
+      <button data-tool="hip" class="tool" title="Hip (H)"><span class="sw" style="background:#8e5bd6"></span>Hip</button>
+      <button data-tool="valley" class="tool" title="Valley (V)"><span class="sw" style="background:#e5533d"></span>Valley</button>
+      <button data-tool="rake" class="tool" title="Rake (K)"><span class="sw" style="background:#f5c242"></span>Rake</button>
+      <button data-tool="wall" class="tool" title="Wall flashing (W)"><span class="sw" style="background:#3b8be6"></span>Wall</button>
+      <button data-tool="step" class="tool" title="Step flashing (T)"><span class="sw" style="background:#e0902a"></span>Step</button>
+      <button data-tool="transition" class="tool" title="Transition (N)"><span class="sw" style="background:#e26ee6"></span>Transition</button>
+      <button data-tool="parapet" class="tool" title="Parapet wall (P)"><span class="sw" style="background:#f0a030"></span>Parapet</button>
+      <button data-tool="unspecified" class="tool" title="Unspecified line (U)"><span class="sw" style="background:#4fc3f7"></span>Other</button>
+      <span class="sep"></span>
+      <button id="btnFinish" class="tool" title="Finish shape (Enter)">Finish</button>
+      <button id="btnUndo" class="tool" title="Undo last point (Backspace)">Undo pt</button>
+      <button id="btnDelete" class="tool danger" title="Delete selected (Del)">Delete</button>
+    </div>
+    <div id="hint"></div>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="nokey" class="overlay">
+      <div class="card">
+        <h2>Roof Measure</h2>
+        <p>Paste your Google Maps API key in the left panel to load satellite imagery.</p>
+        <p class="muted">Need a key? Open "How to get a key" in the Property panel.</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="report"></div>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.js"></script>
+<script src="app.js"></script>
+<script src="autotrace.js"></script>
+<script src="autotrace2.js"></script>
+<script src="report.js"></script>
+<script src="permits.js"></script>
+<script src="pin.js"></script>
+<script src="autocomplete.js"></script>
+<script src="commercial.js"></script>
+<script src="commercial_report.js"></script>
+</body>
+</html>

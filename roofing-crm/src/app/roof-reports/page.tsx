@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useDropzone } from 'react-dropzone';
@@ -9,12 +9,13 @@ import { useCRMStore } from '@/store';
 import { useBuildEstimate } from '@/components/useBuildEstimate';
 import { formatDate, generateId } from '@/lib/utils';
 import { SOURCE_LABELS, defaultWaste, emptyMeasurements, round2, squares } from '@/lib/roof-report';
+import { ROOF_MEASURE_URL, prefillRoofMeasure, readRoofMeasure, seedRoofMeasureKey } from '@/lib/roof-measure-bridge';
 import {
-  Ruler, Upload, Satellite, PencilLine, Calculator, Loader2, AlertTriangle, FileText, X,
+  Ruler, Upload, Satellite, PencilLine, Calculator, Loader2, AlertTriangle, FileText, X, Map as MapIcon, ExternalLink, ArrowDownToLine,
 } from 'lucide-react';
 import type { RoofMeasurements, RoofReport, RoofReportSource } from '@/types';
 
-type Method = 'upload' | 'order' | 'manual';
+type Method = 'measure' | 'upload' | 'order' | 'manual';
 
 interface Draft {
   source: RoofReportSource;
@@ -36,6 +37,7 @@ const FIELDS: { key: keyof RoofMeasurements; label: string; unit: string }[] = [
   { key: 'eavesRakes', label: 'Drip edge (eaves + rakes)', unit: 'LF' },
   { key: 'hipsRidges', label: 'Hips + ridges', unit: 'LF' },
   { key: 'valleys', label: 'Valleys', unit: 'LF' },
+  { key: 'flashing', label: 'Wall + step flashing', unit: 'LF' },
   { key: 'penetrations', label: 'Penetrations', unit: 'ea' },
   { key: 'wastePct', label: 'Waste', unit: '%' },
 ];
@@ -50,7 +52,9 @@ function RoofReportsContent() {
 
   const [leadId, setLeadId] = useState('');
   const [address, setAddress] = useState({ address: '', city: '', state: 'FL', zip: '' });
-  const [method, setMethod] = useState<Method>('upload');
+  const [method, setMethod] = useState<Method>('measure');
+  const [measureReady, setMeasureReady] = useState(false);
+  const measureFrame = useRef<HTMLIFrameElement>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -64,6 +68,11 @@ function RoofReportsContent() {
     },
     [leads, homeowners],
   );
+
+  useEffect(() => {
+    seedRoofMeasureKey();
+    setMeasureReady(true);
+  }, []);
 
   useEffect(() => {
     const fromUrl = searchParams.get('leadId');
@@ -133,6 +142,27 @@ function RoofReportsContent() {
     }
   };
 
+  // Sends the picked property to Roof Measure once it (and its map) has loaded.
+  const prefillMeasure = useCallback(() => {
+    const frame = measureFrame.current;
+    if (!frame || !address.address) return;
+    const lead = leads.find((l) => l.id === leadId);
+    const owner = lead && homeowners.find((h) => h.id === lead.homeownerId);
+    const full = [address.address, address.city, `${address.state} ${address.zip}`.trim()].filter(Boolean).join(', ');
+    return prefillRoofMeasure(frame, full, owner ? `${owner.firstName} ${owner.lastName}` : '');
+  }, [address, leadId, leads, homeowners]);
+
+  const pullFromRoofMeasure = () => {
+    setError('');
+    try {
+      const { address: found, measurements } = readRoofMeasure(measureFrame.current);
+      setDraft({ source: 'roof_measure', measurements });
+      if (!address.address && found) setAddress(found);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not read Roof Measure');
+    }
+  };
+
   const chooseMethod = (m: Method) => {
     setMethod(m);
     setError('');
@@ -195,6 +225,7 @@ function RoofReportsContent() {
   };
 
   const methods: { id: Method; label: string; sub: string; icon: typeof Upload }[] = [
+    { id: 'measure', label: 'Measure on satellite', sub: 'Roof Measure — auto-trace or trace by hand', icon: MapIcon },
     { id: 'upload', label: 'Upload report PDF', sub: 'Roofr, GAF QuickMeasure, EagleView', icon: Upload },
     { id: 'order', label: 'Order from EagleView', sub: 'Simulated until API keys are added', icon: Satellite },
     { id: 'manual', label: 'Enter manually', sub: 'Hand measurements or another vendor', icon: PencilLine },
@@ -253,7 +284,7 @@ function RoofReportsContent() {
       {/* Step 2: measurements */}
       <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
         <h2 className="mb-3 text-sm font-semibold text-gray-700">2. Get measurements</h2>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           {methods.map((m) => (
             <button
               key={m.id}
@@ -270,6 +301,45 @@ function RoofReportsContent() {
             </button>
           ))}
         </div>
+
+        {method === 'measure' && measureReady && (
+          <div className="mt-4 overflow-hidden rounded-xl border border-gray-200">
+            <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 py-2.5">
+              <p className="flex-1 text-xs text-gray-600">
+                Find the house, press <strong>Get roof data</strong> then <strong>Auto-trace roof</strong> (or trace facets and
+                lines by hand). When the totals look right, pull them in.
+              </p>
+              <button
+                onClick={prefillMeasure}
+                disabled={!address.address}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                Go to property
+              </button>
+              <a
+                href={ROOF_MEASURE_URL}
+                target="_blank"
+                rel="noopener"
+                className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                <ExternalLink className="h-3.5 w-3.5" /> Full screen
+              </a>
+              <button
+                onClick={pullFromRoofMeasure}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-orange-700"
+              >
+                <ArrowDownToLine className="h-3.5 w-3.5" /> Use these measurements
+              </button>
+            </div>
+            <iframe
+              ref={measureFrame}
+              src={ROOF_MEASURE_URL}
+              title="Roof Measure"
+              onLoad={prefillMeasure}
+              className="block h-[78vh] min-h-[560px] w-full bg-white"
+            />
+          </div>
+        )}
 
         {method === 'upload' && !draft && (
           <div

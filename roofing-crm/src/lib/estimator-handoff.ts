@@ -266,6 +266,7 @@ export function sendReportToEstimator(report: RoofReport, customer: HandoffCusto
   setQty('starter', m.eavesRakes);
   setQty('ridge', m.hipsRidges);
   setQty('valley', m.valleys);
+  if (m.flashing > 0) setQty('flashing', m.flashing);
   if (m.penetrations !== null) setQty('boots', m.penetrations, m.penetrations > 0);
   if (m.eaves > 0) est.gutter.runs[0].lf = Math.round(m.eaves);
 
