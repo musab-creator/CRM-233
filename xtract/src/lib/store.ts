@@ -4,9 +4,11 @@ import crypto from "node:crypto";
 import type { Message, Order, OrderEvent, OrderStatus, User } from "./types";
 
 // File-backed store. Good for a single server (Replit, a VPS, `next start`).
-// On serverless hosts with an ephemeral disk, point XTRACT_DATA_DIR at a
-// mounted volume or swap this module for a database.
-export const DATA_DIR = process.env.XTRACT_DATA_DIR || path.join(process.cwd(), ".data");
+// On Vercel only /tmp is writable and it is wiped between instances, so data
+// there is demo-grade; for production point XTRACT_DATA_DIR at a mounted
+// volume or swap this module for a database.
+export const DATA_DIR =
+  process.env.XTRACT_DATA_DIR || (process.env.VERCEL ? "/tmp/xtract" : path.join(process.cwd(), ".data"));
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const LEGACY_ORDERS = path.join(DATA_DIR, "orders.json");
 export const REPORTS_DIR = path.join(DATA_DIR, "reports");
