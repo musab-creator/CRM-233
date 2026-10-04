@@ -17,6 +17,10 @@ const nextConfig: NextConfig = {
           source: "/tools/roof-measure/permits/:path*",
           destination: `${ROOF_MEASURE_SITE}/permits/:path*`,
         },
+        {
+          source: "/roof-measure-data/permits/:path*",
+          destination: `${ROOF_MEASURE_SITE}/permits/:path*`,
+        },
       ],
     };
   },

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import type {
   User, Lead, Homeowner, InsurancePolicy, Claim, Inspection,
   ContingencyAgreement, Campaign, Activity, DashboardStats, StormEvent, RoofReport
@@ -64,7 +65,7 @@ interface CRMStore {
   getDashboardStats: () => DashboardStats;
 }
 
-export const useCRMStore = create<CRMStore>((set, get) => ({
+export const useCRMStore = create<CRMStore>()(persist((set, get) => ({
   // Auth
   currentUser: mockUsers[0],
   users: mockUsers,
@@ -162,4 +163,13 @@ export const useCRMStore = create<CRMStore>((set, get) => ({
       avgClaimTime: 14.5,
     };
   },
+}), {
+  // Only roof reports are kept across reloads for now; everything else is
+  // still mock data that resets, as before.
+  name: 'crm-roof-reports-v1',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (s) => ({ roofReports: s.roofReports }),
+  // Rehydrated from AppShell after mount so the server render and the first
+  // client render match.
+  skipHydration: true,
 }));
