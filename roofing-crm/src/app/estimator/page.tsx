@@ -12,7 +12,7 @@ export default function EstimatorPage() {
   return (
     <AppShell>
       <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3">
             <Calculator className="h-7 w-7 text-orange-500" />
             <h1 className="text-2xl font-bold text-gray-900">Estimator</h1>

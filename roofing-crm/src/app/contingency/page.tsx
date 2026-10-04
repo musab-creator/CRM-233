@@ -564,8 +564,8 @@ function ContingencyContent() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-left">
+            <table className="block md:table w-full text-sm">
+              <thead className="hidden md:table-header-group bg-gray-50 text-left">
                 <tr>
                   <th className="px-4 py-3 font-medium text-gray-600">Homeowner</th>
                   <th className="px-4 py-3 font-medium text-gray-600">Carrier</th>
@@ -576,16 +576,16 @@ function ContingencyContent() {
                   <th className="px-4 py-3 font-medium text-gray-600">Signed</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="block md:table-row-group divide-y divide-gray-100">
                 {contingencies.map(c => (
-                  <tr key={c.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium">{c.homeownerName}</td>
-                    <td className="px-4 py-3">{c.insuranceCarrier}</td>
-                    <td className="px-4 py-3">
+                  <tr key={c.id} className="block py-3 md:table-row md:py-0 hover:bg-gray-50">
+                    <td className="block px-4 py-1 md:table-cell md:px-4 md:py-3 font-medium">{c.homeownerName}</td>
+                    <td data-label="Carrier" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">{c.insuranceCarrier}</td>
+                    <td data-label="Policy type" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">
                       <StatusBadge label={c.policyType} colorClass={getPolicyTypeBadge(c.policyType)} />
                     </td>
-                    <td className="px-4 py-3">{getClaimTypeLabel(c.claimType)}</td>
-                    <td className="px-4 py-3">
+                    <td data-label="Claim type" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">{getClaimTypeLabel(c.claimType)}</td>
+                    <td data-label="Status" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none ">
                       <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                         c.status === 'signed' ? 'bg-green-100 text-green-700' :
                         c.status === 'pending_signature' ? 'bg-amber-100 text-amber-700' :
@@ -595,8 +595,8 @@ function ContingencyContent() {
                         {c.status.replace('_', ' ')}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{formatDate(c.generatedAt)}</td>
-                    <td className="px-4 py-3 text-gray-500">{c.signedAt ? formatDate(c.signedAt) : '-'}</td>
+                    <td data-label="Generated" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-500">{formatDate(c.generatedAt)}</td>
+                    <td data-label="Signed" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-gray-500">{c.signedAt ? formatDate(c.signedAt) : '-'}</td>
                   </tr>
                 ))}
               </tbody>

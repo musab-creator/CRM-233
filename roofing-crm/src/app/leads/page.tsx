@@ -245,7 +245,7 @@ export default function LeadsPage() {
           </div>
           <button
             onClick={() => setShowNewLeadModal(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 transition-colors"
+            className="justify-center inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-orange-700 transition-colors"
           >
             <Plus className="h-4 w-4" />
             New Lead
@@ -298,7 +298,48 @@ export default function LeadsPage() {
 
         {/* Table View */}
         {viewMode === 'table' && (
-          <div className="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-200">
+          <div className="space-y-3 md:hidden">
+            {sortedLeads.length === 0 ? (
+              <p className="rounded-xl bg-white px-4 py-10 text-center text-sm text-gray-500 ring-1 ring-gray-200">
+                No leads found. Tap &quot;New Lead&quot; to create one.
+              </p>
+            ) : (
+              sortedLeads.map((lead) => {
+                const ho = getHomeowner(lead.homeownerId);
+                const rep = getUser(lead.assignedTo);
+                return (
+                  <Link
+                    key={lead.id}
+                    href={`/leads/${lead.id}`}
+                    className="block rounded-xl bg-white p-4 shadow-sm ring-1 ring-gray-200 active:bg-gray-50"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="font-semibold text-gray-900">{ho ? `${ho.firstName} ${ho.lastName}` : 'Unknown'}</p>
+                      <StatusBadge label={getLeadStatusLabel(lead.status)} colorClass={getLeadStatusColor(lead.status)} />
+                    </div>
+                    <p className="mt-0.5 text-sm text-gray-600">{ho ? `${ho.address}, ${ho.city}` : '-'}</p>
+                    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                      <span
+                        className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                          lead.jobType === 'insurance' ? 'bg-blue-100 text-blue-800' : 'bg-emerald-100 text-emerald-800'
+                        }`}
+                      >
+                        {lead.jobType === 'insurance' ? 'Insurance' : 'Retail'}
+                      </span>
+                      <span className="font-medium text-gray-900">
+                        {lead.estimatedValue ? formatCurrency(lead.estimatedValue) : '-'}
+                      </span>
+                      <span className="text-gray-500">{rep?.name || 'Unassigned'}</span>
+                      <span className="text-gray-400">{formatDate(lead.createdAt)}</span>
+                    </div>
+                  </Link>
+                );
+              })
+            )}
+          </div>
+        )}
+        {viewMode === 'table' && (
+          <div className="hidden overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-gray-200 md:block">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
@@ -469,7 +510,7 @@ export default function LeadsPage() {
 
       {/* New Lead Modal */}
       {showNewLeadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40"
@@ -480,7 +521,7 @@ export default function LeadsPage() {
           />
 
           {/* Modal */}
-          <div className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl">
+          <div className="relative max-w-2xl max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6">
             <div className="flex items-center justify-between border-b border-gray-200 pb-4">
               <h2 className="text-xl font-bold text-gray-900">New Lead</h2>
               <button
@@ -667,7 +708,7 @@ export default function LeadsPage() {
             </div>
 
             {/* Actions */}
-            <div className="mt-6 flex items-center justify-end gap-3 border-t border-gray-200 pt-4">
+            <div className="mt-6 flex items-center justify-end gap-3 border-t border-gray-200 pt-4 [&>button]:flex-1 sm:[&>button]:flex-none">
               <button
                 onClick={() => {
                   resetForm();

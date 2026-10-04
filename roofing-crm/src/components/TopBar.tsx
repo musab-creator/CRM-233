@@ -41,7 +41,7 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
         <div className="relative">
           <button
             onClick={() => { setShowQuickAdd(!showQuickAdd); setShowNotifications(false); }}
-            className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-2.5 sm:py-1.5 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors"
             aria-label="Quick Add"
           >
             <Plus className="w-4 h-4" />

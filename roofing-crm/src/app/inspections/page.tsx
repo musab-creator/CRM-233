@@ -158,7 +158,7 @@ export default function InspectionsPage() {
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">
               Inspections &amp; Reports
@@ -169,7 +169,7 @@ export default function InspectionsPage() {
           </div>
           <button
             onClick={() => setShowScheduleModal(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-orange-700 transition-colors"
+            className="justify-center inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-orange-700 transition-colors"
           >
             <Plus className="h-4 w-4" />
             Schedule Inspection
@@ -466,8 +466,8 @@ export default function InspectionsPage() {
 
         {/* Schedule Inspection Modal */}
         {showScheduleModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4">
+            <div className="max-w-md max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6">
               <h2 className="text-lg font-bold text-gray-900">Schedule Inspection</h2>
               <p className="mt-1 text-sm text-gray-500">
                 Select a lead and pick a date/time for the property inspection.
@@ -514,7 +514,7 @@ export default function InspectionsPage() {
                   />
                 </div>
               </div>
-              <div className="mt-6 flex items-center justify-end gap-2">
+              <div className="mt-6 flex items-center justify-end gap-2 [&>button]:flex-1 sm:[&>button]:flex-none">
                 <button
                   onClick={() => {
                     setShowScheduleModal(false);

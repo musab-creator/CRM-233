@@ -252,7 +252,7 @@ export default function ClaimsPage() {
     <AppShell>
       <div className="space-y-6">
         {/* Header */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Claims Tracker</h1>
             <p className="mt-1 text-sm text-gray-500">
@@ -261,7 +261,7 @@ export default function ClaimsPage() {
           </div>
           <button
             onClick={() => setShowNewClaimModal(true)}
-            className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-orange-700 transition-colors"
+            className="justify-center inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-orange-700 transition-colors"
           >
             <Plus className="h-4 w-4" />
             File New Claim
@@ -329,7 +329,7 @@ export default function ClaimsPage() {
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+                <thead className="hidden bg-gray-50 md:table-header-group">
                   <tr>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">
                       Claim #
@@ -368,8 +368,52 @@ export default function ClaimsPage() {
                     return (
                       <tr key={claim.id} className="group">
                         <td colSpan={9} className="p-0">
+                          {/* Main Row (phone card) */}
+                          <div className="space-y-2 p-4 md:hidden">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="font-semibold text-gray-900">{getHomeownerName(claim.homeownerId)}</p>
+                                <p className="text-xs text-gray-500">{claim.claimNumber} &middot; {claim.carrier}</p>
+                              </div>
+                              <StatusBadge
+                                label={getClaimStatusLabel(claim.status)}
+                                colorClass={getClaimStatusColor(claim.status)}
+                              />
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                              <span
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${claimTypeBadgeColor(claim.claimType)}`}
+                              >
+                                {getClaimTypeLabel(claim.claimType)}
+                              </span>
+                              <span className="text-gray-600">
+                                {claim.adjusterName || <span className="italic text-gray-400">No adjuster</span>}
+                              </span>
+                              <span className="text-gray-400">Filed {formatDate(claim.dateFiled)}</span>
+                              {claim.approvedAmount != null && (
+                                <span className="font-medium text-green-700">{formatCurrency(claim.approvedAmount)}</span>
+                              )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 pt-1">
+                              <button
+                                onClick={() => setExpandedClaimId(isExpanded ? null : claim.id)}
+                                className="inline-flex items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 active:bg-gray-50"
+                              >
+                                {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                                Details
+                              </button>
+                              <button
+                                onClick={() => openEmailPanel(claim, 'adjuster')}
+                                className="inline-flex items-center justify-center gap-1 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white active:bg-orange-700"
+                              >
+                                <Send className="h-4 w-4" />
+                                Follow-Up
+                              </button>
+                            </div>
+                          </div>
+
                           {/* Main Row */}
-                          <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto_auto_auto] items-center">
+                          <div className="hidden grid-cols-[auto_1fr_auto_auto_auto_auto_auto_auto_auto] items-center md:grid">
                             <div className="px-4 py-3 text-sm font-medium text-gray-900 whitespace-nowrap">
                               {claim.claimNumber}
                             </div>
@@ -714,8 +758,8 @@ export default function ClaimsPage() {
 
         {/* New Claim Modal */}
         {showNewClaimModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 sm:items-center sm:p-4">
+            <div className="max-w-lg max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl bg-white p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] shadow-xl sm:max-h-[90vh] sm:rounded-2xl sm:p-6">
               <div className="flex items-center justify-between mb-1">
                 <h2 className="text-lg font-bold text-gray-900">File New Claim</h2>
                 <button
@@ -729,7 +773,7 @@ export default function ClaimsPage() {
                     setNewAdjusterPhone('');
                     setNewClaimNotes('');
                   }}
-                  className="rounded-lg p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+                  className="rounded-lg p-2 -m-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -875,7 +919,7 @@ export default function ClaimsPage() {
                 </div>
               </div>
 
-              <div className="mt-6 flex items-center justify-end gap-2">
+              <div className="mt-6 flex items-center justify-end gap-2 [&>button]:flex-1 sm:[&>button]:flex-none">
                 <button
                   onClick={() => {
                     setShowNewClaimModal(false);
