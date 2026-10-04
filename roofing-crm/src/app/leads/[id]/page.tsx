@@ -13,16 +13,15 @@ import Link from 'next/link';
 import {
   ArrowLeft, User, MapPin, Phone, Mail, Shield, FileText,
   Camera, FileSignature, ClipboardCheck, Calendar, DollarSign,
-  MessageSquare, Edit, ChevronRight, Ruler, Calculator, Map as MapIcon
+  MessageSquare, Edit, ChevronRight, Ruler, Map as MapIcon
 } from 'lucide-react';
-import { useBuildEstimate } from '@/components/useBuildEstimate';
+import ReportEstimateActions from '@/components/ReportEstimateActions';
 import { SOURCE_LABELS, squares } from '@/lib/roof-report';
 import type { LeadStatus } from '@/types';
 
 export default function LeadDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { leads, homeowners, policies, claims, inspections, contingencies, users, activities, roofReports, updateLead } = useCRMStore();
-  const buildEstimate = useBuildEstimate();
 
   const lead = leads.find(l => l.id === id);
   if (!lead) {
@@ -249,12 +248,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
                     <div><span className="text-gray-500">Source</span><p className="font-semibold text-gray-900">{SOURCE_LABELS[roofReport.source]}{roofReport.simulated ? ' (simulated)' : ''}</p></div>
                     <div><span className="text-gray-500">Estimates</span><p className="font-semibold text-gray-900">{roofReport.estimates.map(e => e.number).join(', ') || '—'}</p></div>
                   </div>
-                  <button
-                    onClick={() => buildEstimate(roofReport)}
-                    className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors"
-                  >
-                    <Calculator className="w-4 h-4" /> Build Estimate from Report
-                  </button>
+                  <ReportEstimateActions report={roofReport} />
                 </div>
               ) : (
                 <div className="space-y-2">

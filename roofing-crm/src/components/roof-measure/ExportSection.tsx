@@ -7,6 +7,7 @@ import { useRM } from './store';
 import { buildResidentialReport, deleteSavedRoof, download, exportCSV, exportJSON, importJSONFile, loadSavedRoof, saveRoof, savedRoofs } from './actions';
 import { openReport } from './ReportViewer';
 import { Btn, H4, inputCls, LField } from './ui';
+import TransferButtons from './TransferButtons';
 
 // 5. Report, save & export: job name, rep, the Roofr-format report (print / download), CSV / JSON export and
 // import, company details, saved roofs in this browser.
@@ -77,6 +78,14 @@ export default function ExportSection() {
 
   return (
     <div>
+      <div className="mb-4 rounded-xl border border-orange-200 bg-orange-50 p-3">
+        <p className="text-sm font-semibold text-gray-900">Turn this roof into a full estimate</p>
+        <p className="mb-2 mt-0.5 text-xs text-gray-600">
+          Saves the roof report to the CRM and opens a priced estimate built from these measurements — or go straight to
+          its customer proposal.
+        </p>
+        <TransferButtons />
+      </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <LField label="Customer / job name"><input data-testid="job-name" className={inputCls} type="text" placeholder="Smith residence" value={jobName} onChange={(e) => setJobName(e.target.value)} /></LField>
         <LField label="Prepared by (rep)"><CompanyInput k="rep" /></LField>

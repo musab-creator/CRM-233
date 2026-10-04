@@ -321,5 +321,7 @@ export interface RoofReport {
   measurements: RoofMeasurements;
   createdAt: string;
   createdBy: string;
-  estimates: { number: string; createdAt: string }[];
+  // Estimates built from this report (id is missing on ones made before the
+  // native estimator).
+  estimates: { id?: string; number: string; createdAt: string }[];
 }

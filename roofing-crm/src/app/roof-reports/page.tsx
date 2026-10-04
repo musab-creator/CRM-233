@@ -7,6 +7,7 @@ import { useDropzone } from 'react-dropzone';
 import AppShell from '@/components/AppShell';
 import { useCRMStore } from '@/store';
 import { useBuildEstimate } from '@/components/useBuildEstimate';
+import ReportEstimateActions from '@/components/ReportEstimateActions';
 import { formatDate, generateId } from '@/lib/utils';
 import { SOURCE_LABELS, defaultWaste, emptyMeasurements, round2, squares } from '@/lib/roof-report';
 import {
@@ -167,7 +168,7 @@ function RoofReportsContent() {
 
   const canSave = !!draft && draft.measurements.totalSqFt > 0 && !!address.address;
 
-  const save = (andBuild: boolean) => {
+  const save = (then: 'none' | 'estimate' | 'proposal') => {
     if (!draft || !canSave) return;
     const lead = leads.find((l) => l.id === leadId);
     const report: RoofReport = {
@@ -194,7 +195,7 @@ function RoofReportsContent() {
       createdAt: report.createdAt,
     });
     setDraft(method === 'manual' ? { source: 'manual', measurements: emptyMeasurements() } : null);
-    if (andBuild) buildEstimate(report);
+    if (then !== 'none') buildEstimate(report, then);
   };
 
   const leadName = (id?: string) => {
@@ -389,14 +390,21 @@ function RoofReportsContent() {
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <button
-                onClick={() => save(true)}
+                onClick={() => save('estimate')}
                 disabled={!canSave}
                 className="inline-flex items-center gap-2 rounded-lg bg-orange-600 px-4 py-2 text-sm font-semibold text-white hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Calculator className="h-4 w-4" /> Save & build estimate
               </button>
               <button
-                onClick={() => save(false)}
+                onClick={() => save('proposal')}
+                disabled={!canSave}
+                className="inline-flex items-center gap-2 rounded-lg border border-orange-300 bg-white px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <FileText className="h-4 w-4" /> Save & build proposal
+              </button>
+              <button
+                onClick={() => save('none')}
                 disabled={!canSave}
                 className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -461,13 +469,8 @@ function RoofReportsContent() {
                     <td data-label="Estimates" className="flex items-center justify-between gap-3 px-4 py-1 md:table-cell md:px-4 md:py-3 before:text-xs before:font-medium before:text-gray-500 before:font-sans before:content-[attr(data-label)] md:before:content-none text-xs text-gray-600">
                       {r.estimates.length ? r.estimates.map((e) => e.number).join(', ') : '—'}
                     </td>
-                    <td className="block px-4 py-1 md:table-cell md:px-4 md:py-3 text-right">
-                      <button
-                        onClick={() => buildEstimate(r)}
-                        className="mt-1 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-orange-600 px-3 py-2 text-sm font-semibold text-white hover:bg-orange-700 md:mt-0 md:w-auto md:py-1.5 md:text-xs"
-                      >
-                        <Calculator className="h-3.5 w-3.5" /> Build estimate
-                      </button>
+                    <td className="block px-4 py-1 md:table-cell md:min-w-[17rem] md:px-4 md:py-3">
+                      <ReportEstimateActions report={r} className="mt-1 md:mt-0" />
                     </td>
                   </tr>
                 ))}

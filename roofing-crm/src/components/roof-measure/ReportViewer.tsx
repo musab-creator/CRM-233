@@ -6,6 +6,7 @@ import { Download, Printer, X } from 'lucide-react';
 import type { BuiltReport } from './actions';
 import { download } from './actions';
 import { Btn } from './ui';
+import TransferButtons from './TransferButtons';
 
 // Shows a built report in a full-screen sheet (an iframe with the report's own
 // document) and prints it from there: printing the iframe prints only the
@@ -56,7 +57,8 @@ export default function ReportViewer() {
   return (
     <div className="fixed inset-0 z-[70] flex flex-col bg-gray-900/95" role="dialog" aria-modal="true" aria-label={report.title} data-testid="report-viewer">
       <div className="flex flex-wrap items-center gap-2 border-b border-gray-700 bg-gray-900 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] text-white">
-        <div className="min-w-0 flex-1 truncate text-sm font-semibold">{report.title}</div>
+        <div className="min-w-0 flex-1 basis-full truncate text-sm font-semibold sm:basis-auto">{report.title}</div>
+        <TransferButtons dark />
         <Btn variant="primary" small onClick={() => void printFrame(frame.current)}><Printer className="h-3.5 w-3.5" />Print / PDF</Btn>
         <Btn small onClick={() => download(report.fileName, report.downloadDoc, 'text/html')}><Download className="h-3.5 w-3.5" />Download</Btn>
         <Btn small variant="ghost" className="text-white hover:bg-gray-800" onClick={close} aria-label="Close report"><X className="h-4 w-4" />Close</Btn>
