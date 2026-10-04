@@ -233,10 +233,10 @@ function RoofReportsContent() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Ruler className="h-7 w-7 text-orange-500" />
-          <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-1 items-start gap-3">
+          <Ruler className="mt-1 h-7 w-7 flex-shrink-0 text-orange-500" />
+          <div className="min-w-0">
             <h1 className="text-2xl font-bold text-gray-900">Roof Reports</h1>
             <p className="text-sm text-gray-500">
               Pull measurements for a property, then send them straight into the estimator.
@@ -245,7 +245,7 @@ function RoofReportsContent() {
         </div>
         <Link
           href="/estimator"
-          className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+          className="inline-flex flex-shrink-0 items-center gap-2 self-start whitespace-nowrap rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
         >
           <Calculator className="h-4 w-4" /> Open Estimator
         </Link>
@@ -305,7 +305,7 @@ function RoofReportsContent() {
         {method === 'measure' && measureReady && (
           <div className="mt-4 overflow-hidden rounded-xl border border-gray-200">
             <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 bg-gray-50 px-4 py-2.5">
-              <p className="flex-1 text-xs text-gray-600">
+              <p className="w-full text-xs text-gray-600 sm:w-auto sm:flex-1">
                 Find the house, press <strong>Get roof data</strong> then <strong>Auto-trace roof</strong> (or trace facets and
                 lines by hand). When the totals look right, pull them in.
               </p>

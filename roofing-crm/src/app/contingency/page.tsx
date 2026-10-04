@@ -125,9 +125,12 @@ function ContingencyContent() {
 
       {/* Stepper */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
+        <p className="mb-3 text-sm font-medium text-gray-900 sm:hidden">
+          Step {step} of {steps.length}: {steps[step - 1]?.label}
+        </p>
         <div className="flex items-center justify-between">
           {steps.map((s, i) => (
-            <div key={s.num} className="flex items-center">
+            <div key={s.num} className="flex flex-1 items-center last:flex-none">
               <div className="flex items-center gap-2">
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
                   step > s.num ? 'bg-green-500 text-white' :
@@ -136,14 +139,14 @@ function ContingencyContent() {
                 }`}>
                   {step > s.num ? <CheckCircle className="w-4 h-4" /> : s.num}
                 </div>
-                <span className={`text-sm font-medium ${
+                <span className={`hidden sm:inline text-sm font-medium ${
                   step >= s.num ? 'text-gray-900' : 'text-gray-400'
                 }`}>
                   {s.label}
                 </span>
               </div>
               {i < steps.length - 1 && (
-                <div className={`w-12 h-0.5 mx-3 ${step > s.num ? 'bg-green-500' : 'bg-gray-200'}`} />
+                <div className={`flex-1 sm:flex-none sm:w-12 h-0.5 mx-2 sm:mx-3 ${step > s.num ? 'bg-green-500' : 'bg-gray-200'}`} />
               )}
             </div>
           ))}
@@ -175,7 +178,7 @@ function ContingencyContent() {
           {selectedPolicy && homeowner && (
             <div className="mt-6 p-4 bg-gray-50 rounded-lg">
               <h3 className="font-semibold text-sm text-gray-700 mb-3">Auto-Populated Data</h3>
-              <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
                 <div className="space-y-2">
                   <h4 className="font-medium text-gray-600 flex items-center gap-1"><User className="w-3 h-3" /> Homeowner</h4>
                   <p>{homeowner.firstName} {homeowner.lastName}</p>
@@ -373,7 +376,7 @@ function ContingencyContent() {
               {/* Homeowner Section */}
               <div className="mb-6">
                 <h3 className="font-bold text-sm text-gray-800 bg-gray-100 px-3 py-1.5 mb-3">HOMEOWNER INFORMATION</h3>
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm px-3">
+                <div className="grid grid-cols-1 gap-x-8 gap-y-2 text-sm px-3 sm:grid-cols-2">
                   <div><span className="text-gray-500">Name:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.firstName} {homeowner.lastName}</span></div>
                   <div><span className="text-gray-500">Phone:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.phone}</span></div>
                   <div><span className="text-gray-500">Address:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{homeowner.address}</span></div>
@@ -385,7 +388,7 @@ function ContingencyContent() {
               {/* Insurance Section */}
               <div className="mb-6">
                 <h3 className="font-bold text-sm text-gray-800 bg-gray-100 px-3 py-1.5 mb-3">INSURANCE INFORMATION</h3>
-                <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm px-3">
+                <div className="grid grid-cols-1 gap-x-8 gap-y-2 text-sm px-3 sm:grid-cols-2">
                   <div><span className="text-gray-500">Insurance Carrier:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{selectedPolicy.carrier}</span></div>
                   <div><span className="text-gray-500">Policy Number:</span> <span className="font-medium border-b border-gray-300 pb-0.5">{selectedPolicy.policyNumber}</span></div>
                   <div>
@@ -431,7 +434,7 @@ function ContingencyContent() {
               </div>
 
               {/* Signatures */}
-              <div className="grid grid-cols-2 gap-8 mt-10">
+              <div className="grid grid-cols-2 gap-4 sm:gap-8 mt-10">
                 <div>
                   <div className="border-b border-gray-400 mb-1 h-10" />
                   <p className="text-sm text-gray-600">Homeowner Signature</p>
@@ -560,6 +563,7 @@ function ContingencyContent() {
               <p>No contingency agreements generated yet</p>
             </div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-left">
                 <tr>
@@ -597,6 +601,7 @@ function ContingencyContent() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </div>

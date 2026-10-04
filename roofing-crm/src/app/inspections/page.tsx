@@ -183,8 +183,8 @@ export default function InspectionsPage() {
               <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-orange-100">
                 <Camera className="h-6 w-6 text-orange-600" />
               </div>
-              <div>
-                <div className="flex items-center gap-2">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-lg font-semibold text-gray-900">
                     CompanyCam Integration
                   </h2>
@@ -196,13 +196,13 @@ export default function InspectionsPage() {
                 <p className="mt-1 text-sm text-gray-500">
                   Sync inspection photos and generate reports directly from CompanyCam projects.
                 </p>
-                <div className="mt-3 flex items-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
                   <input
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder="CompanyCam API Key"
-                    className="w-64 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"
+                    className="w-full max-w-64 rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 focus:border-orange-500 focus:ring-1 focus:ring-orange-500 outline-none"
                   />
                   <button
                     onClick={handleSaveApiKey}

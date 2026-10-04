@@ -523,7 +523,7 @@ export default function LeadsPage() {
               </fieldset>
 
               {/* Name */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">
                     First Name <span className="text-red-500">*</span>
@@ -551,7 +551,7 @@ export default function LeadsPage() {
               </div>
 
               {/* Contact */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">Email</label>
                   <input
@@ -585,7 +585,7 @@ export default function LeadsPage() {
                   placeholder="123 Main St"
                 />
               </div>
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">City</label>
                   <input
@@ -619,7 +619,7 @@ export default function LeadsPage() {
               </div>
 
               {/* Source & Assigned To */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">Source</label>
                   <select
