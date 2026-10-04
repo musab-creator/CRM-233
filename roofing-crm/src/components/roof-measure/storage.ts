@@ -53,3 +53,15 @@ export function removeKey(key: string) {
     /* ignore */
   }
 }
+
+// Puts a deployment-wide Google Maps key (NEXT_PUBLIC_GOOGLE_MAPS_API_KEY) into
+// the key slot when this browser has none yet. A key saved in the page wins.
+export function seedRoofMeasureKey() {
+  const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+  if (!key) return;
+  try {
+    if (!localStorage.getItem(KEYS.apiKey)) localStorage.setItem(KEYS.apiKey, key);
+  } catch {
+    /* storage blocked: the page asks for a key itself */
+  }
+}

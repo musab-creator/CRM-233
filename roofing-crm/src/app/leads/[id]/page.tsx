@@ -13,7 +13,7 @@ import Link from 'next/link';
 import {
   ArrowLeft, User, MapPin, Phone, Mail, Shield, FileText,
   Camera, FileSignature, ClipboardCheck, Calendar, DollarSign,
-  MessageSquare, Edit, ChevronRight, Ruler, Calculator
+  MessageSquare, Edit, ChevronRight, Ruler, Calculator, Map as MapIcon
 } from 'lucide-react';
 import { useBuildEstimate } from '@/components/useBuildEstimate';
 import { SOURCE_LABELS, squares } from '@/lib/roof-report';
@@ -257,9 +257,14 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
                   </button>
                 </div>
               ) : (
-                <Link href={`/roof-reports?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-50 text-orange-700 rounded-lg text-sm hover:bg-orange-100 transition-colors">
-                  <Ruler className="w-4 h-4" /> Pull Roof Report
-                </Link>
+                <div className="space-y-2">
+                  <Link href={`/roof-measure?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-600 text-white rounded-lg text-sm font-medium hover:bg-orange-700 transition-colors">
+                    <MapIcon className="w-4 h-4" /> Measure on Satellite
+                  </Link>
+                  <Link href={`/roof-reports?leadId=${lead.id}`} className="flex items-center gap-2 w-full px-3 py-2 bg-orange-50 text-orange-700 rounded-lg text-sm hover:bg-orange-100 transition-colors">
+                    <Ruler className="w-4 h-4" /> Upload or Enter a Roof Report
+                  </Link>
+                </div>
               )}
             </div>
 

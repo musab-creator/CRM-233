@@ -222,7 +222,7 @@ export function computeMaterials(t: Pick<Summary, 'byType' | 'squares' | 'square
 
 const round2 = (n: number) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
 
-// The "Report summary" numbers in the CRM's RoofMeasurements field names (same mapping as roof-measure-bridge.ts).
+// The "Report summary" numbers in the CRM's RoofMeasurements field names (same mapping the retired iframe bridge used).
 export function toRoofMeasurements(t: Pick<Summary, 'sloped' | 'pitched' | 'flat' | 'twoStory' | 'predominant' | 'facetCount' | 'byType'> & { recWaste: number }, defaultPitch = 6): RoofMeasurements {
   const bt = t.byType;
   return {

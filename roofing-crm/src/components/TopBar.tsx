@@ -61,8 +61,11 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
               <Link href="/policies?new=true" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
                 Upload Policy
               </Link>
-              <Link href="/roof-reports" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
-                Pull Roof Report
+              <Link href="/roof-measure" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
+                Measure a Roof
+              </Link>
+              <Link href="/estimator/new" className="block px-4 py-2 text-sm hover:bg-gray-50" onClick={() => setShowQuickAdd(false)}>
+                New Estimate
               </Link>
             </div>
           )}

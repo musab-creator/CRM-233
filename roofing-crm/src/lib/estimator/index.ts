@@ -1,5 +1,5 @@
 // Diversity Roofing estimator: pricing engine, data and helpers, ported from
-// the single-file estimator (public/tools/estimator.html) with identical
+// the single-file Diversity_Roofing_Estimator.html app with identical
 // numbers. Persistence, roles and the roof-report handoff live in
 // src/store/estimator.ts.
 //

@@ -1,7 +1,7 @@
 // Data shapes for the Diversity Roofing estimator.
 //
 // Estimates and the price book keep the exact field names the original
-// single-file estimator (public/tools/estimator.html) stored in
+// single-file estimator (Diversity_Roofing_Estimator.html) stored in
 // localStorage["dr_estimator_v1"], so estimates made there load here
 // unchanged. Numeric fields are typed as numbers, but older saves and form
 // inputs can hold numeric strings or blanks; every calculation coerces with

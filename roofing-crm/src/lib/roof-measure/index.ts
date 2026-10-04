@@ -1,5 +1,5 @@
-// Native TypeScript port of Roof Measure's engine (public/tools/roof-measure,
-// commit 3a11299): spherical geometry, measurements, auto-trace, the Roofr
+// Native TypeScript port of Roof Measure's engine (github.com/musab-creator/
+// roof-measure, commit 3a11299): spherical geometry, measurements, auto-trace, the Roofr
 // format report, permits, the commercial measure and report, and address
 // lookups. Framework-agnostic: no DOM or Google Maps objects; the map editor
 // draws and edits, this computes.

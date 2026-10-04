@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 
 // Roof Measure's Duval County Property Appraiser relay (port of /relay/pao in
 // its serve.ps1). The appraiser's site blocks cross-site browser requests, so
-// Roof Measure (public/tools/roof-measure/permits.js) fetches the record
+// Roof Measure's permit lookup (src/lib/roof-measure/permits.ts) fetches the record
 // through here. Fixed target only — not an open proxy.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36';
 

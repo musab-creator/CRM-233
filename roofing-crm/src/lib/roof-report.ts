@@ -3,14 +3,14 @@ import type { RoofMeasurements, RoofReportSource } from '@/types';
 // Parses the extracted text of a roof measurement report PDF.
 //
 // The Roofr and GAF QuickMeasure branches are ported from the parser inside
-// public/tools/estimator.html, so a PDF read here yields the same numbers the
-// estimator would get if the PDF were dropped into it directly. The EagleView
+// the original single-file estimator, so a PDF read here yields the same
+// numbers the estimator always produced. The EagleView
 // branch is best-effort against EagleView's "Report Summary" layout
 // ("Total Roof Area = 2,345 sq ft", "Ridges = 63 ft"); every parsed report is
 // shown to the rep for review before it is saved, so a missed field is caught
 // there rather than priced.
 //
-// Reports printed from Roof Measure (public/tools/roof-measure) use Roofr's
+// Reports printed from Roof Measure (/roof-measure) use Roofr's
 // layout and wording with the company's name in place of Roofr's, so they go
 // through the Roofr branch.
 

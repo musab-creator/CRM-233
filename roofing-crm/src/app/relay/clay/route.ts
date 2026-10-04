@@ -1,6 +1,6 @@
 // Roof Measure's Clay County permit search relay (port of /relay/clay in its
 // serve.ps1). Clay's EnerGov portal blocks cross-site browser requests, so
-// Roof Measure (public/tools/roof-measure/permits.js) posts its search here.
+// Roof Measure's permit lookup (src/lib/roof-measure/permits.ts) posts its search here.
 // Fixed target only — not an open proxy.
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36';
 const CLAY_SEARCH = 'https://claycountyfl-energovpub.tylerhost.net/apps/selfservice/api/energov/search/search';

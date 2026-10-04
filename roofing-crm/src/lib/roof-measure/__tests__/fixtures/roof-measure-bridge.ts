@@ -1,3 +1,5 @@
+// TEST FIXTURE: the retired iframe integration, kept as the reference the
+// native code is compared against. Not used by the app.
 import type { RoofMeasurements } from '@/types';
 import { round2 } from '@/lib/roof-report';
 

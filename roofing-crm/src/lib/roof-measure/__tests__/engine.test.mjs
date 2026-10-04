@@ -2,7 +2,7 @@
 // support, Solar API helpers, address lookups and the /relay/jaxepics route.
 // Run: node --experimental-strip-types --import ./src/lib/roof-measure/__tests__/register.mjs src/lib/roof-measure/__tests__/engine.test.mjs
 import * as rm from '../index.ts';
-import { totalsToMeasurements } from '../../roof-measure-bridge.ts';
+import { totalsToMeasurements } from './fixtures/roof-measure-bridge.ts';
 import { GET, POST } from '../../../app/relay/jaxepics/route.ts';
 import { randomRoof, fakeSolar } from './helpers/roofs.mjs';
 import { check, diff, summary } from './helpers/assert.mjs';

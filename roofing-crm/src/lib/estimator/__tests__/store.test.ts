@@ -2,7 +2,8 @@
 // The estimator store (src/store/estimator.ts): server-render safety,
 // first-run seeding, migration from the old embedded estimator, save /
 // revision rules, roles, the pricing audit log, and the roof-report handoff
-// against the existing estimator-handoff.ts it replaces.
+// against the retired embedded-estimator handoff it replaced (kept as
+// fixtures/estimator-handoff.ts).
 //
 //   node --experimental-strip-types src/lib/estimator/__tests__/store.test.ts
 import { register } from 'node:module';
@@ -197,7 +198,7 @@ check(store.persist.hasHydrated(), 'hydrates in the browser');
 
 // ---- roof report handoff vs estimator-handoff.ts ----
 {
-  const H = (await import('@/lib/estimator-handoff' as string)) as typeof import('@/lib/estimator-handoff');
+  const H = (await import('./fixtures/estimator-handoff.ts' as string)) as typeof import('./fixtures/estimator-handoff');
   const reports: any[] = [
     {
       id: 'r1', address: '1923 Sterling Lane', city: 'Fernandina Beach', state: 'FL', zip: '32034', source: 'roofr',
