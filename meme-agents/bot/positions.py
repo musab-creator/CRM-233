@@ -129,6 +129,10 @@ class PositionManager:
         tied -= sum(p.proceeds_sol for p in self.active("real"))
         return start_sol + float(r["s"]) - tied
 
+    async def _symbol(self, mint: str) -> str:
+        row = await self.db.fetchone("SELECT symbol FROM mints WHERE mint=?", [mint])
+        return (row["symbol"] if row and row["symbol"] else None) or mint[:6]
+
     async def realized_since(self, since: float) -> float:
         r = await self.db.fetchone(
             "SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND status='closed' AND closed_at>=?",
@@ -254,8 +258,8 @@ class PositionManager:
         await self._save(p)
         await self._record_fill(p, f, "entry", ts)
         if p.kind == "real":
-            msg = (f"ENTRY [{p.mode}] {p.mint}\nsize ${p.size_usd:.2f} = {p.sol_in:.4f} SOL @ {price:.3e} SOL"
-                   f"\ntokens {f.tokens:,.0f}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
+            msg = (f"🟢 ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f} = {p.sol_in:.4f} SOL "
+                   f"@ {price:.3e} SOL\ntokens {f.tokens:,.0f}\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(msg.replace("\n", " | "))
             if self.notify:
                 await self.notify(msg)
@@ -331,9 +335,17 @@ class PositionManager:
             p.pnl_usd = p.pnl_sol * (p.sol_usd_exit or 0)
         await self._save(p)
         if p.kind == "real":
-            txt = (f"EXIT [{p.mode}] {reason} {p.mint}\nsold {f.tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
+            sym = await self._symbol(p.mint)
+            if closed:
+                ret = (p.proceeds_sol / p.cost_sol - 1) * 100 if p.cost_sol else 0.0
+                head = (f"{'✅ WIN' if (p.pnl_usd or 0) > 0 else '❌ LOSS'} {sym} [{p.mode}] "
+                        f"{'+' if (p.pnl_usd or 0) >= 0 else '-'}${abs(p.pnl_usd or 0):.2f} ({ret:+.0f}%) · "
+                        f"{reason.replace('_', ' ')}")
+            else:
+                head = f"EXIT {sym} [{p.mode}] {reason.replace('_', ' ')} (partial)"
+            txt = (f"{head}\nsold {f.tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
                    + (f"\nclosed pnl {p.pnl_sol:+.4f} SOL (${p.pnl_usd:+.2f})" if closed else "")
-                   + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
+                   + f"\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(txt.replace("\n", " | "))
             if self.notify:
                 await self.notify(txt)

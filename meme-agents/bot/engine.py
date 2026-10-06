@@ -20,6 +20,7 @@ from .budget import Budget, utc_day, utc_month
 from .config import Settings
 from .consensus import gate
 from .db import Database
+from .digest import hour_start, hourly_digest
 from .feeds.dexscreener import DexScreener, summarize_pair
 from .feeds.helius import Helius, RpcError
 from .feeds.http import HttpError
@@ -108,6 +109,7 @@ class Engine:
         self._credits_saved = 0
         self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
+        self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
         self.stop = asyncio.Event()
 
     # --- setup ---------------------------------------------------------------------
@@ -562,12 +564,29 @@ class Engine:
             "reconnects": getattr(self.feed, "reconnects", 0), "stalls": getattr(self.feed, "stalls", 0),
             "last_msg_at": getattr(self.feed, "last_msg_at", None), "queue": self.queue.qsize(),
             "cycles": self.cycles, "crashes": sum(self.crashes.values()), "paused": self.risk.paused_reason}))
+        await self._hourly_digest()
         if utc_day() != day:
             text, path = await write_daily(self.db, self.s, day)
             log.info("wrote %s", path)
             await self.tg.send(f"Daily summary {day}\n" + text[:3500])
             day = utc_day()
         return day
+
+    async def _hourly_digest(self) -> None:
+        """At the top of each UTC hour, send the previous hour's trades to Telegram
+        (TELEGRAM_DIGEST: all = every hour, wins = only hours with a winning trade, off)."""
+        now_hour = hour_start(now_s())
+        if self._digest_hour is None:
+            self._digest_hour = now_hour
+            return
+        if now_hour <= self._digest_hour:
+            return
+        since, self._digest_hour = self._digest_hour, now_hour
+        if not self.tg.enabled or self.s.TELEGRAM_DIGEST == "off":
+            return
+        text, wins = await hourly_digest(self.db, self.s, since, now_hour)
+        if self.s.TELEGRAM_DIGEST == "all" or wins:
+            await self.tg.send(text)
 
     async def _supervise(self, name: str, factory) -> None:
         """Run a background loop and restart it if it ever raises or returns early.

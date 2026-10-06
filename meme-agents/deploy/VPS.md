@@ -116,7 +116,9 @@ The bot now:
 - starts again after a reboot;
 - restarts if it crashes or hangs;
 - gets a health check every 5 minutes, with a Telegram message if it goes down (when
-  Telegram is set up).
+  Telegram is set up);
+- with Telegram set up, also messages you on every entry and exit, sends an hourly digest of
+  trades and open positions, and the daily summary at midnight UTC.
 
 ## 9. Watch it
 

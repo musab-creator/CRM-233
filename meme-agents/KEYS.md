@@ -151,6 +151,12 @@ lasts about five days a month. Raise it, or lower `X_SEARCH_MAX_RESULTS`, to hav
    your chat. `chat not found` means the id is wrong; `bot can't initiate conversation with a
    user` means you have not sent the bot a message yet (step 2).
 
+What the bot sends: every entry and exit (✅ WIN / ❌ LOSS with the return, reason and hold
+time), an **hourly digest** at the top of each UTC hour with the hour's closed trades, open
+positions, candidates and today's totals (`TELEGRAM_DIGEST=all`; `wins` sends it only for hours
+with a winning trade; `off` disables it), the daily summary at midnight UTC, and health
+alerts from the cron check.
+
 ### Jupiter (`JUPITER_API_KEY`), optional, live mode only
 
 1. Sign in at [portal.jup.ag](https://portal.jup.ag) and create an API key on the Free plan,

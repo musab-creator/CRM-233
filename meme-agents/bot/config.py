@@ -55,6 +55,7 @@ class Settings:
     CRYPTOPANIC_TOKEN: str = field(default="", repr=False)
     TELEGRAM_BOT_TOKEN: str = field(default="", repr=False)
     TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_DIGEST: str = "all"              # hourly Telegram digest: all | wins (hours with a winning trade) | off
     WALLET_PRIVATE_KEY: str = field(default="", repr=False)
 
     # --- paths -----------------------------------------------------------------
@@ -207,6 +208,7 @@ class ConfigError(ValueError):
 
 
 STREAM_MODES = ("off", "positions", "all")
+DIGEST_MODES = ("all", "wins", "off")
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -248,4 +250,7 @@ def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None
     s.PUMPPORTAL_TRADE_STREAM = s.PUMPPORTAL_TRADE_STREAM.strip().lower()
     if s.PUMPPORTAL_TRADE_STREAM not in STREAM_MODES:
         raise ConfigError(f"PUMPPORTAL_TRADE_STREAM={s.PUMPPORTAL_TRADE_STREAM!r}: use one of {', '.join(STREAM_MODES)}")
+    s.TELEGRAM_DIGEST = s.TELEGRAM_DIGEST.strip().lower()
+    if s.TELEGRAM_DIGEST not in DIGEST_MODES:
+        raise ConfigError(f"TELEGRAM_DIGEST={s.TELEGRAM_DIGEST!r}: use one of {', '.join(DIGEST_MODES)}")
     return s
