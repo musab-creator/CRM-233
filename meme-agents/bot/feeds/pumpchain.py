@@ -210,7 +210,12 @@ class HeliusChain:
                 reached = True
                 break
             before = page[-1]["signature"]
-        ok = sorted((x for x in sigs if not x.get("err")), key=lambda x: (x.get("slot") or 0))
+        # The RPC lists signatures newest first, inside a slot too. Reverse them before the stable
+        # sort by slot so same-slot transactions keep block order: the create transaction first,
+        # then the snipers bundled with it. Sorting by slot alone left the launch transaction
+        # last in its slot, and a busy launch slot pushed it past `max_tx`.
+        ok = [x for x in reversed(sigs) if not x.get("err")]
+        ok.sort(key=lambda x: x.get("slot") or 0)
         if not ok:
             return {"trades": [], "reached_launch": reached, "transactions": 0}
         t0 = ok[0].get("blockTime") or 0
@@ -219,8 +224,10 @@ class HeliusChain:
             "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]) for x in pick],
             return_exceptions=True)
         trades: list[dict] = []
-        for tx in txs:
+        for seq, tx in enumerate(txs):  # seq: block order, the tiebreaker inside a slot
             if isinstance(tx, dict):
-                trades.extend(trades_from_tx(tx, mint, curve_key))
-        trades.sort(key=lambda t: (t["slot"] or 0, t["ts"] or 0))
+                for t in trades_from_tx(tx, mint, curve_key):
+                    t["seq"] = seq
+                    trades.append(t)
+        trades.sort(key=lambda t: (t["slot"] or 0, t["seq"]))
         return {"trades": trades, "reached_launch": reached, "transactions": len(pick)}

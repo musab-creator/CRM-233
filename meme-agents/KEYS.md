@@ -9,7 +9,7 @@ so check the linked page before you pay for anything.
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | **Required** | The three agents (Scout, Hunter, Analyst) | Pay per token. The bot stops evaluating at `LLM_DAILY_BUDGET_USD` (default $5/day). |
 | `HELIUS_API_KEY` | **Required** | On-chain data: bonding-curve state, holders, the creator's wallet, and the live-mode RPC | Free plan: 1M credits/month, 10 RPC req/s, 2 DAS req/s. The bot paces itself under `HELIUS_MONTHLY_CREDITS`. |
-| `X_BEARER_TOKEN` | Optional | Scout searches X; Hunter reads the watchlist timelines | Pay per use: $0.005 per post read, $0.01 per user read. The bot stops at `X_MONTHLY_BUDGET_USD` (default $20/month). |
+| `X_BEARER_TOKEN` | Optional, **but without it the bot almost never buys** (see below) | Scout searches X; Hunter reads the watchlist timelines | Pay per use: $0.005 per post read, $0.01 per user read. The bot stops at `X_MONTHLY_BUDGET_USD` (default $20/month). |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional | Alerts for entries, exits, the daily summary and health | Free |
 | `JUPITER_API_KEY` | Optional, live mode only | Swaps for graduated tokens | Free plan: 1 req/s |
 | `PUMPPORTAL_API_KEY` | **Not needed** (see below) | Paid per-token trade stream, off by default | 0.01 SOL per 10,000 trades from a wallet you fund |
@@ -100,6 +100,18 @@ created the key.
    $0.01 per user read, which are the bot's defaults `X_POST_READ_USD` and `X_USER_READ_USD`.
 4. Your prepaid balance is a hard ceiling. The bot also stops calling X at
    `X_MONTHLY_BUDGET_USD`, stores every post id and never pays to read the same post twice.
+
+**Why it matters.** Hunter's job is to confirm a live catalyst from the watchlist accounts
+(`WATCHLIST_HANDLES`, default @elonmusk and @realDonaldTrump), and Scout's is to judge organic
+attention on X. Without a token, Hunter only has crypto news RSS, which almost never explains a
+five-minute-old meme coin, so it votes PASS, and the gate needs all three BUY. In the
+60-minute live run without X, all 17 decisions were PASS. The bot still runs, learns and
+reports without X; it just will not enter.
+
+**What it costs.** Scout spends up to $0.10 per candidate (2 searches × `X_SEARCH_MAX_RESULTS`
+10 posts) and Hunter's watchlist reads are cached across candidates. At the ~40 candidates a
+day the $5 LLM budget allows, that is about $4 a day, so the default `X_MONTHLY_BUDGET_USD=20`
+lasts about five days a month. Raise it, or lower `X_SEARCH_MAX_RESULTS`, to have X all month.
 
 ### Telegram alerts (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), optional, free
 

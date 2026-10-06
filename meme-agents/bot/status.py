@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from .budget import utc_day, utc_month
+from .budget import pace_released, utc_day, utc_month
 from .config import Settings
 from .db import Database
 from .paper import mark_to_market
@@ -44,6 +44,9 @@ async def health(db: Database, s: Settings, now: float | None = None) -> tuple[s
         return "BLIND", (f"no PumpPortal message for {_ago(hb.get('last_msg_at'), now)} "
                          f"(reconnects {hb.get('reconnects')}, stalls {hb.get('stalls')})")
     extra = f", {hb['crashes']} loop restart(s)" if hb.get("crashes") else ""
+    if hb.get("helius_exhausted"):
+        return "PAUSED", (f"Helius credits for the month are spent ({hb.get('helius_credits_month')}): no chain "
+                          f"reads until the 1st; raise HELIUS_MONTHLY_CREDITS or upgrade the Helius plan{extra}")
     # an expired or revoked ANTHROPIC_API_KEY keeps the bot alive but turns every vote into an error
     recent = await db.fetchall("SELECT error FROM votes ORDER BY id DESC LIMIT ?", [FAILING_VOTES])
     if len(recent) == FAILING_VOTES and all(r["error"] and "budget" not in r["error"] for r in recent):
@@ -74,10 +77,18 @@ async def build_status(db: Database, s: Settings) -> str:
     if kill_switch_active(s):
         lines.append(f"KILL SWITCH: {s.STOP_FILE} present, no new entries, positions closing")
 
-    llm = (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' AND day=?", [utc_day(now)]))["s"]
-    xs = (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='x' AND month=?", [utc_month(now)]))["s"]
-    lines.append(f"budgets: LLM ${llm:.2f} of ${s.LLM_DAILY_BUDGET_USD:.2f} today, X ${xs:.2f} of "
-                 f"${s.X_MONTHLY_BUDGET_USD:.2f} this month")
+    llm = (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' AND day=?",
+                             [utc_day(now)]))["s"]
+    xs = (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='x' AND month=?",
+                            [utc_month(now)]))["s"]
+    burst = s.LLM_BUDGET_BURST_HOURS if s.LLM_BUDGET_PACING else None
+    released = pace_released(s.LLM_DAILY_BUDGET_USD, burst, now)
+    paced = f" (${released:.2f} released so far, paced)" if released < s.LLM_DAILY_BUDGET_USD else ""
+    helius = (" (SPENT: chain reads stopped)" if hb.get("helius_exhausted") else
+              " (ahead of pace: reads slowed)" if hb.get("helius_over_pace") else "")
+    lines.append(f"budgets: LLM ${llm:.2f} of ${s.LLM_DAILY_BUDGET_USD:.2f} today{paced}, X ${xs:.2f} of "
+                 f"${s.X_MONTHLY_BUDGET_USD:.2f} this month, Helius credits {hb.get('helius_credits_month') or 0} of "
+                 f"{s.HELIUS_MONTHLY_CREDITS} this month{helius}")
 
     start = utc_midnight(now)
     f = {}

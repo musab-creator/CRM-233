@@ -23,19 +23,35 @@ def llm_cost_usd(input_tokens: int, output_tokens: int, cache_write: int, cache_
             + output_tokens * price_out) / 1_000_000
 
 
+def pace_released(limit: float, burst_h: float | None, ts: float | None = None) -> float:
+    """How much of a daily limit is released so far. Without pacing (burst_h None), all of it.
+    With pacing it grows linearly through the UTC day, starting at `burst_h` hours' worth and
+    reaching the full limit at midnight, so a busy first hour cannot leave the rest of the day
+    with no evaluations. The limit itself is never exceeded."""
+    if burst_h is None:
+        return limit
+    dt = datetime.fromtimestamp(ts if ts is not None else now_s(), timezone.utc)
+    hours = dt.hour + dt.minute / 60 + dt.second / 3600
+    return limit * min(1.0, (hours + burst_h) / 24)
+
+
 class BudgetExceeded(Exception):
     pass
 
 
 class Budget:
-    def __init__(self, db: Database, kind: str, limit_usd: float, period: str):
+    def __init__(self, db: Database, kind: str, limit_usd: float, period: str, burst_h: float | None = None):
         assert period in ("day", "month")
         self.db, self.kind, self.limit, self.period = db, kind, limit_usd, period
+        self.burst_h = burst_h if period == "day" else None  # pacing applies to daily budgets only
         self._lock = asyncio.Lock()
         self._reserved = 0.0  # in-flight worst-case reservations
 
     def _key(self) -> tuple[str, str]:
         return ("day", utc_day()) if self.period == "day" else ("month", utc_month())
+
+    def released(self) -> float:
+        return pace_released(self.limit, self.burst_h)
 
     async def spent(self) -> float:
         col, val = self._key()
@@ -44,7 +60,7 @@ class Budget:
         return float(r["s"]) if r else 0.0
 
     async def remaining(self) -> float:
-        return self.limit - await self.spent() - self._reserved
+        return self.released() - await self.spent() - self._reserved
 
     async def exhausted(self) -> bool:
         return await self.remaining() <= 0

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import statistics
 import time
 
 import httpx
@@ -14,6 +15,23 @@ from ..util import RateLimiter
 from .http import request_json
 
 WSOL = "So11111111111111111111111111111111111111112"
+STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",   # USDC
+           "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}   # USDT
+SOL_PAIR_MIN_LIQUIDITY_USD = 500_000
+
+
+def sol_usd_from_pairs(pairs: list[dict]) -> float | None:
+    """SOL/USD as the median over deep SOL/stablecoin pairs, so one pair reporting a wrong
+    price cannot move it. Falls back to the deepest wrapped-SOL pair of any kind."""
+    prices = sorted(_num(p.get("priceUsd")) for p in pairs or []
+                    if p.get("chainId") == "solana" and (p.get("baseToken") or {}).get("address") == WSOL
+                    and (p.get("quoteToken") or {}).get("address") in STABLES
+                    and ((p.get("liquidity") or {}).get("usd") or 0) >= SOL_PAIR_MIN_LIQUIDITY_USD
+                    and _num(p.get("priceUsd")))
+    if len(prices) >= 2:
+        return statistics.median(prices)
+    p = best_pair(pairs, WSOL)
+    return _num(p.get("priceUsd")) if p else None
 
 
 def best_pair(pairs: list[dict], mint: str) -> dict | None:
@@ -94,6 +112,10 @@ class DexScreener:
         self._boost_cache = (time.time(), rows)
         return rows
 
+    async def token_pairs(self, mint: str) -> list[dict]:
+        """Every pair DexScreener lists for one token, raw."""
+        data = await request_json(self.c, "GET", f"{self.base}/latest/dex/tokens/{mint}", limiter=self.lim)
+        return (data or {}).get("pairs") or []
+
     async def sol_usd(self) -> float | None:
-        p = (await self.tokens([WSOL])).get(WSOL)
-        return _num(p.get("priceUsd")) if p else None
+        return sol_usd_from_pairs(await self.token_pairs(WSOL))

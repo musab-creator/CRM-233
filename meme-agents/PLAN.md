@@ -118,8 +118,24 @@ Added after the build, when research showed a change in PumpPortal's data API:
     40-buyer rule is, if anything, stricter than the brief's. A token passes only after a
     fresh on-chain curve read; before it, the only inflow known is the dev's own launch buy.
 20. **Helius credits are budgeted** (`HELIUS_MONTHLY_CREDITS`, 1M on the free plan). Curve
-    reads are capped at `CURVE_POLL_CALLS_PER_MIN` (8) and slow to half speed if the month's
-    usage runs ahead of pace.
+    reads are capped at `CURVE_POLL_CALLS_PER_MIN` (8). If the month's usage runs more than 10%
+    ahead of pace, curve reads halve, holder counts refresh half as often and the launch-minute
+    backfill reads half as many transactions. If the budget is spent, chain reads stop until
+    the next month and the health check reports PAUSED. The first live hour used 4,362 credits
+    for 1,789 launches and 17 candidates.
+21. **SOL/USD is the median over deep SOL/USDC and SOL/USDT pairs on DexScreener,** and a
+    reading more than 20% from the last accepted one is held until it repeats three times
+    (three minutes). The live run saw one $166.66 reading between readings of $121.70; it sized
+    a shadow entry a third too small and would have inflated the curve-depth liquidity rule.
+22. **Launch-slot order.** `getSignaturesForAddress` lists signatures newest first, inside a
+    slot too. The launch-minute backfill reverses them before sorting by slot, so the create
+    transaction and the snipers bundled into its slot keep block order, and the create is never
+    pushed past `BACKFILL_MAX_TX`. The live probe's `launch_trade_matches_create` check
+    verifies this on every run.
+23. **The LLM budget is paced** (`LLM_BUDGET_PACING`, default on): the daily budget is released
+    evenly over the UTC day with `LLM_BUDGET_BURST_HOURS` (2) hours' worth up front, so the bot
+    evaluates throughout the day instead of spending it all in the first two hours. The brief's
+    cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`.
 
 ## File tree
 

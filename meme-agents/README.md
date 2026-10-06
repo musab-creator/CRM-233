@@ -210,14 +210,18 @@ Any sample under 30 is flagged as noise. Don't tune on it.
 - **LLM.** The bot tracks spend per UTC day from each response's `usage`, at $3 per million
   input tokens and $15 per million output tokens for `claude-sonnet-4-6`. When
   `LLM_DAILY_BUDGET_USD` is reached, it stops evaluating candidates; they are recorded as
-  `skipped_budget`.
+  `skipped_budget`. By default the day's budget is **paced** (`LLM_BUDGET_PACING`): it is
+  released evenly over the UTC day, with `LLM_BUDGET_BURST_HOURS` (2) hours' worth available up
+  front, so the bot evaluates around the clock. The first live hour cost $2.26 for 17
+  candidates; unpaced, a $5 day would be spent by 02:30 UTC. The cap itself is never exceeded.
 - **X.** The bot tracks spend per UTC month. Before each call it reserves the worst case
   (`max_results × $0.005`, or `$0.01` for a user lookup) and refuses the call if that doesn't
   fit in `X_MONTHLY_BUDGET_USD`. It stores every post id in `x_posts` and uses `since_id`, so
   no post is read twice. Watchlist timelines refresh at most every 10 minutes and are shared
   by all candidates.
+- **Helius.** Credits are counted per UTC month against `HELIUS_MONTHLY_CREDITS`; see below.
 
-Both budgets are stored in SQLite, so a restart does not reset them.
+All three budgets are stored in SQLite, so a restart does not reset them.
 
 ## Data sources and costs
 
@@ -232,10 +236,14 @@ Both budgets are stored in SQLite, so a restart does not reset them.
 
 With the defaults, curve reads make at most 8 calls a minute, the hot set included. That is at
 most about 0.35M credits a month. DAS holder reads, launch-minute backfills and the Analyst's
-Helius tools bring the expected total to about 0.6M of the free plan's 1M; the Analyst's
-`holders` tool reads the creator's recent wallet activity, at 100 credits per candidate. The
-bot records every credit against `HELIUS_MONTHLY_CREDITS`. If the month's usage runs ahead of
-pace, it halves the curve reads. `status` and the heartbeat show credits used this month.
+Helius tools (its `holders` tool reads the creator's recent wallet activity, at 100 credits per
+candidate) bring the total to about the free plan's 1M: the first live hour used 4,362 credits
+for 1,789 launches and 17 candidates, and the LLM budget caps evaluations at roughly 40 a day.
+The bot records every credit against `HELIUS_MONTHLY_CREDITS`. If the month's usage runs more
+than 10% ahead of pace, curve reads halve, holder counts refresh half as often and the
+backfill reads half as many transactions. If the budget is spent, chain reads stop until the
+1st and `status --check` reports PAUSED. `status` and the heartbeat show credits used this
+month.
 
 The paid stream is off by default. With `PUMPPORTAL_TRADE_STREAM=positions` or `all`, the
 bot counts every streamed trade per UTC day. When `PUMPPORTAL_DAILY_BUDGET_SOL` is reached,

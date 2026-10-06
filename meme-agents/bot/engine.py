@@ -52,6 +52,14 @@ class StartupError(Exception):
     pass
 
 
+def credit_pace(total: int, monthly: int, ts: float) -> tuple[bool, bool]:
+    """(over pace, exhausted) for this month's Helius credits. Over pace: more than 10% ahead of
+    a straight line through the month, the first day counting as a full day. Exhausted: the
+    monthly budget is spent."""
+    allowed = monthly * max(month_fraction(ts), 1 / 30)
+    return total > 1.1 * allowed, total >= monthly
+
+
 def month_fraction(ts: float) -> float:
     """Share of the current UTC month that has elapsed."""
     d = datetime.fromtimestamp(ts, timezone.utc)
@@ -68,7 +76,8 @@ class Engine:
         self.db = Database(s.path(s.DB_PATH))
         self.lock = InstanceLock(str(s.path(s.DB_PATH)) + ".lock")
         self.http = http or httpx.AsyncClient(timeout=20, headers={"User-Agent": "meme-agents/0.1"})
-        self.llm_budget = Budget(self.db, "llm", s.LLM_DAILY_BUDGET_USD, "day")
+        self.llm_budget = Budget(self.db, "llm", s.LLM_DAILY_BUDGET_USD, "day",
+                                 burst_h=s.LLM_BUDGET_BURST_HOURS if s.LLM_BUDGET_PACING else None)
         self.x_budget = Budget(self.db, "x", s.X_MONTHLY_BUDGET_USD, "month")
         self.ingest = Ingestor(s, self.db)
         self.feed = feed or PumpPortalFeed(s.pumpportal_ws(), self.ingest.handle, s.WS_MAX_BACKOFF_S,
@@ -98,7 +107,8 @@ class Engine:
         self._stream_blocked_day: str | None = None
         self._stream_saved = 0
         self._credits_saved = 0
-        self._credits_over_pace = False
+        self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
+        self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
         self.stop = asyncio.Event()
 
     # --- setup ---------------------------------------------------------------------
@@ -265,6 +275,9 @@ class Engine:
             await self.stop.wait()
             return
         while not self.stop.is_set():
+            if self._credits_exhausted:  # the month's Helius budget is spent; the heartbeat resets this next month
+                await self._sleep(300)
+                continue
             try:
                 await self.poll_curves_once()
             except EXTERNAL_ERRORS as e:
@@ -272,19 +285,26 @@ class Engine:
             await self._sleep(self._curve_tick_s())
 
     async def _record_credits(self) -> int:
-        """Persist this month's Helius credits and slow the curve reads if ahead of pace."""
+        """Persist this month's Helius credits and keep the chain reads inside the monthly budget.
+
+        Ahead of pace: curve reads run at half speed, holder counts refresh half as often and the
+        launch-minute backfill reads half as many transactions. Budget spent: chain reads stop
+        until next month and `status` reports PAUSED, instead of hammering a rate-limited key."""
         used = getattr(self.helius, "credits", 0)
         delta, self._credits_saved = used - self._credits_saved, used
         key = f"helius_credits:{utc_month()}"
         total = int(await self.db.kv_get(key) or 0) + delta
         if delta:
             await self.db.kv_set(key, str(total))
-        allowed = self.s.HELIUS_MONTHLY_CREDITS * max(month_fraction(now_s()), 1 / 30)
-        over = total > 1.1 * allowed
-        if over != self._credits_over_pace:
-            log.warning("Helius credits %d this month vs %d on pace: curve reads %s", total, int(allowed),
+        over, exhausted = credit_pace(total, self.s.HELIUS_MONTHLY_CREDITS, now_s())
+        if exhausted != self._credits_exhausted:
+            log.warning("Helius credits %d this month vs HELIUS_MONTHLY_CREDITS=%d: chain reads %s", total,
+                        self.s.HELIUS_MONTHLY_CREDITS, "stopped until next month" if exhausted else "resumed")
+        elif over != self._credits_over_pace:
+            log.warning("Helius credits %d this month vs %d on pace: chain reads %s", total,
+                        int(self.s.HELIUS_MONTHLY_CREDITS * max(month_fraction(now_s()), 1 / 30)),
                         "slowed to half speed" if over else "back to full speed")
-        self._credits_over_pace = over
+        self._credits_over_pace, self._credits_exhausted = over, exhausted
         return total
 
     async def refresh_holders(self, st: MintState) -> None:
@@ -299,11 +319,13 @@ class Engine:
     def _needs_holders(self, st: MintState, now: float) -> bool:
         """Buyers are the only stage-1 rule still failing and the holder count is stale."""
         s = self.s
-        return (self.chain.enabled and not st.streamed and st.bonding_curve_key != ""
+        refresh_s = s.HOLDERS_REFRESH_S * (2 if self._credits_over_pace else 1)
+        return (self.chain.enabled and not self._credits_exhausted and not st.streamed
+                and st.bonding_curve_key != ""
                 and s.PF_MIN_AGE_MIN <= st.age_min(now) <= s.PF_MAX_AGE_MIN
                 and st.net_inflow_sol >= s.PF_MIN_NET_INFLOW_SOL
                 and st.unique_buyers < s.PF_MIN_UNIQUE_BUYERS
-                and now - (st.holders_at or 0) >= s.HOLDERS_REFRESH_S)
+                and now - (st.holders_at or 0) >= refresh_s)
 
     async def compute_flow(self, mint: str) -> dict:
         """Flow features for a mint: from the full stream if it was streamed since launch, else
@@ -318,11 +340,14 @@ class Engine:
         curve = (st.bonding_curve_key if st else "") or m.get("bonding_curve_key")
         if not curve or not self.chain.enabled:
             return {"source": "chain", "error": "no bonding-curve key or no Helius key: flow unavailable"}
+        if self._credits_exhausted:
+            return {"source": "chain", "error": "Helius monthly credit budget spent: flow unavailable until next month"}
         err = None
         early = self._early.get(mint)
         if early is None:
             try:
-                early = await self.chain.early_trades(mint, curve, self.s.BACKFILL_WINDOW_S, self.s.BACKFILL_MAX_TX)
+                max_tx = self.s.BACKFILL_MAX_TX // (2 if self._credits_over_pace else 1)
+                early = await self.chain.early_trades(mint, curve, self.s.BACKFILL_WINDOW_S, max_tx)
                 self._early[mint] = early
                 while len(self._early) > 500:
                     self._early.pop(next(iter(self._early)))
@@ -409,7 +434,10 @@ class Engine:
             await self._finish_mint(mint, "stale")
             return None
         if await self.llm_budget.exhausted():
-            return await self._skip_for_budget(cid, mint, "LLM daily budget exhausted")
+            released, limit = self.llm_budget.released(), self.llm_budget.limit
+            return await self._skip_for_budget(
+                cid, mint, "LLM daily budget exhausted" if released >= limit else
+                f"LLM budget pacing: ${released:.2f} of ${limit:.2f} released so far today, all spent")
         st = self.ingest.mints.get(mint)
         if st:  # refresh live stream metrics at evaluation time
             ctx_data["live"] = {"age_min": round(st.age_min(now_s()), 1), "unique_buyers": st.unique_buyers,
@@ -531,6 +559,7 @@ class Engine:
             "launches": st["creates"], "trades": st["trades"], "curve_reads": st["curve_reads"],
             "stream_trades": st["stream_trades"], "trade_stream": self.stream_mode,
             "stream_blocked": self._stream_blocked_day is not None, "helius_credits_month": credits,
+            "helius_over_pace": self._credits_over_pace, "helius_exhausted": self._credits_exhausted,
             "reconnects": getattr(self.feed, "reconnects", 0), "stalls": getattr(self.feed, "stalls", 0),
             "last_msg_at": getattr(self.feed, "last_msg_at", None), "queue": self.queue.qsize(),
             "cycles": self.cycles, "crashes": sum(self.crashes.values()), "paused": self.risk.paused_reason}))

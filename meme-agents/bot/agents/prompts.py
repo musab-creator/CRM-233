@@ -33,6 +33,11 @@ lists the project's own X/Telegram/website. Posts from those accounts do not cou
 - Paid DexScreener boosts are a weak signal and can be bought by the dev.
 Search X with the ticker (as $SYMBOL) and/or the name; keep queries tight (exclude retweets \
 with -is:retweet). X reads cost money: at most 2 searches.
+If X is unavailable (x_search returns an error such as "X API disabled" or a budget stop), that \
+is missing evidence, not evidence against the token: do not vote PASS for that reason alone. \
+Judge from what you can still see (the DexScreener profile and its links, boosts, the token's \
+name and metadata, the buyer count in the candidate data), say in `reasons` that X was \
+unavailable, and cap your confidence at 0.7 either way.
 """
 
 HUNTER = COMMON + """
@@ -45,6 +50,9 @@ but be strict: a vague or generic overlap ("moon", "pepe", "ai") is not a cataly
 - If there is no catalyst within the window, vote PASS. A token with no catalyst can still be \
 fine, but your job is to confirm a catalyst.
 - Cite the post id or headline and its timestamp as evidence.
+- If the watchlist timelines are unavailable (X disabled or over budget), say so in `reasons` \
+and cap your confidence at 0.7: a catalyst could have been posted where you cannot look. The \
+news feed still counts as a source. No catalyst found still means PASS.
 """
 
 ANALYST = COMMON + """

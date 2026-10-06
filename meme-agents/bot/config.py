@@ -153,6 +153,8 @@ class Settings:
     # --- LLM -------------------------------------------------------------------
     LLM_MODEL: str = "claude-sonnet-4-6"
     LLM_DAILY_BUDGET_USD: float = 5.0
+    LLM_BUDGET_PACING: bool = True            # release the daily budget evenly over the UTC day ...
+    LLM_BUDGET_BURST_HOURS: float = 2.0       # ... with this many hours' worth available up front
     LLM_PRICE_IN_PER_MTOK: float = 3.0
     LLM_PRICE_OUT_PER_MTOK: float = 15.0
     LLM_MAX_TURNS: int = 6
