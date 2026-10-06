@@ -160,6 +160,43 @@ class XClient:
             await self.db.kv_set(key, uid)
         return uid
 
+    async def users(self, ids: list[str]) -> dict:
+        """Profiles for up to 100 author ids: created_at, follower counts, verified. One user read
+        each against the X budget."""
+        ids = [str(i) for i in ids if str(i).strip()][:100]
+        if not self.enabled:
+            return {"error": "X API disabled (no X_BEARER_TOKEN)", "users": []}
+        if not ids:
+            return {"users": []}
+        worst = len(ids) * self.user_usd
+        try:
+            await self.budget.reserve(worst)
+        except BudgetExceeded as e:
+            return {"error": str(e), "users": []}
+        actual = 0.0
+        err = None
+        users: list[dict] = []
+        try:
+            data = await request_json(self.c, "GET", f"{self.base}/users", headers=self._h(), retries=1,
+                                      params={"ids": ",".join(ids),
+                                              "user.fields": "created_at,public_metrics,verified,description"}) or {}
+            for u in data.get("data") or []:
+                m = u.get("public_metrics") or {}
+                users.append({"id": u.get("id"), "username": u.get("username"), "created_at": u.get("created_at"),
+                              "followers": m.get("followers_count"), "following": m.get("following_count"),
+                              "posts": m.get("tweet_count"), "verified": bool(u.get("verified")),
+                              "description": (u.get("description") or "")[:160]})
+            actual = len(users) * self.user_usd
+        except HttpError as e:
+            err = str(e)
+            log.warning("x users failed: %s", e)
+        finally:
+            await self.budget.settle(worst, actual, f"users x{len(ids)}")
+        out: dict = {"users": users}
+        if err:
+            out["error"] = err
+        return out
+
     async def timeline(self, handle: str, window_min: float, refresh_min: float, max_results: int = 5) -> dict:
         """Posts by `handle` in the last `window_min` minutes. Refetches at most every `refresh_min`."""
         source = f"timeline:{handle.lower()}"

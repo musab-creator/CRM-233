@@ -302,6 +302,11 @@ class FakeX:
     async def timeline(self, handle, window_min, refresh_min, max_results=5):
         return {"posts": []}
 
+    async def users(self, ids):
+        return {"users": [{"id": i, "username": f"user{i}", "created_at": "2021-03-01T00:00:00Z",
+                           "followers": 300 + 10 * n, "following": 200, "posts": 1200, "verified": False}
+                          for n, i in enumerate(ids)]}
+
 
 class FakeNews:
     async def recent(self, window_min):

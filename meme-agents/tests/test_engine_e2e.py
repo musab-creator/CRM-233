@@ -57,9 +57,18 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
     assert r["evaluated"], "no candidate reached a gate decision"
     full = [c for c in r["evaluated"] if not (c["gate_reason"] or "").startswith("triage:")]
     assert full, "triage skipped every candidate"
+    core = {"scout", "hunter", "analyst"}
     for c in full:
-        vs = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] != "triage"]
+        vs = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] in core]
         assert sorted(v["agent"] for v in vs) == ["analyst", "hunter", "scout"]
+        vetoes = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] in ("forensics", "social")]
+        core_buy = all(v["vote"] == "BUY" for v in vs) and sum(v["confidence"] for v in vs) / 3 >= 0.65
+        if core_buy:  # the veto stage ran: both agents voted, and any veto turned the decision into PASS
+            assert sorted(v["agent"] for v in vetoes) == ["forensics", "social"]
+            if c["decision"] == "PASS":
+                assert c["gate_reason"].startswith("veto from")
+        else:
+            assert vetoes == []
         tri = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] == "triage"]
         assert len(tri) == 1 and tri[0]["error"] is None
         assert tri[0]["vote"] == "BUY" or tri[0]["confidence"] < s.TRIAGE_MIN_CONFIDENCE  # let through

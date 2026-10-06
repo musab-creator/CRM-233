@@ -254,7 +254,7 @@ def render_text(r: dict) -> str:
     ]
     if not r["agents"]:
         lines.append("no votes recorded yet")
-    for name in ("triage", "scout", "hunter", "analyst"):
+    for name in ("triage", "scout", "hunter", "analyst", "forensics", "social"):
         a = r["agents"].get(name)
         if not a:
             continue

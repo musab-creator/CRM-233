@@ -125,10 +125,16 @@ class Helius:
             out.append({
                 "signature": t.get("signature"), "timestamp": t.get("timestamp"), "type": t.get("type"),
                 "source": t.get("source"), "description": (t.get("description") or "")[:200],
+                "fee_payer": t.get("feePayer"),
                 "token_transfers": [
                     {"mint": x.get("mint"), "from": x.get("fromUserAccount"), "to": x.get("toUserAccount"),
                      "amount": x.get("tokenAmount")}
                     for x in (t.get("tokenTransfers") or [])[:6]
+                ],
+                "native_transfers": [
+                    {"from": x.get("fromUserAccount"), "to": x.get("toUserAccount"),
+                     "sol": round((x.get("amount") or 0) / 1e9, 6)}
+                    for x in (t.get("nativeTransfers") or [])[:8]
                 ],
             })
         return out

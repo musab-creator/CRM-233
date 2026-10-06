@@ -171,6 +171,10 @@ class Settings:
     TRIAGE_PRICE_OUT_PER_MTOK: float = 5.0
     TRIAGE_MAX_TOKENS: int = 600
     TRIAGE_MIN_CONFIDENCE: float = 0.7        # a triage PASS below this still goes to the committee
+    VETO_ENABLED: bool = True                 # after a unanimous BUY, the forensics and social agents may still block
+    VETO_MIN_CONFIDENCE: float = 0.7          # a veto needs this confidence and grounded tool evidence
+    FORENSICS_HOLDER_WALLETS: int = 8         # top holders whose funding the forensics agent traces (100 credits each)
+    SOCIAL_MAX_AUTHORS: int = 10              # X author profiles the social agent may look up ($0.01 each)
 
     # --- X ---------------------------------------------------------------------
     X_MONTHLY_BUDGET_USD: float = 20.0

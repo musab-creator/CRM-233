@@ -15,12 +15,12 @@ import anthropic
 import httpx
 
 from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
-from .agents.tools import ToolContext, build_specs
+from .agents.tools import ToolContext, build_specs, build_veto_specs
 from .agents.triage import run_triage, triage_first_call_usd, triage_skips
 from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
 from .config import Settings
-from .consensus import gate
+from .consensus import apply_vetoes, gate
 from .db import Database
 from .digest import hour_start, hourly_digest
 from .feeds.dexscreener import DexScreener, summarize_pair
@@ -500,15 +500,26 @@ class Engine:
         for v in votes:
             await self._record_vote(cid, mint, v)
         result = gate(votes, self.s)
-        spent = sum(v.cost_usd for v in votes) + (triage.cost_usd if triage else 0.0)
+        vetoes: list[Vote] = []
+        if result.decision == "BUY" and self.s.VETO_ENABLED and self.llm is not None:
+            # the second stage: wallet forensics and the social graph, only on the rare BUY
+            vetoes = list(await asyncio.gather(*[run_agent(self.llm, self.s, sp, context, self.llm_budget,
+                                                           subject_ids={mint}) for sp in build_veto_specs(tctx)]))
+            for v in vetoes:
+                await self._record_vote(cid, mint, v)
+            before = result
+            result = apply_vetoes(result, vetoes, self.s)
+            if result.decision != before.decision:
+                log.info("VETO #%d %s %s: %s", cid, ctx_data.get("symbol"), mint, result.reason)
+        spent = sum(v.cost_usd for v in [*votes, *vetoes]) + (triage.cost_usd if triage else 0.0)
         await self.db.update("candidates", "id", cid, {
             "status": "evaluated", "decision": result.decision, "mean_confidence": result.mean_confidence,
             "gate_reason": result.reason, "llm_cost_usd": spent})
         self.cycles += 1
         log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f", cid,
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
-                 ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}" for v in votes),
-                 sum(v.cost_usd for v in votes))
+                 ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}"
+                           for v in [*votes, *vetoes]), spent)
         liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
         await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "", self.s.POSITION_MIN_USD, liq)
         if result.decision == "BUY":
@@ -521,9 +532,10 @@ class Engine:
                     await self.tg.send(
                         f"GATE BUY {ctx_data.get('symbol')} {mint}\nmean conf {result.mean_confidence:.2f}, "
                         f"size ${result.size_usd:.2f}\n" + "\n".join(
-                            f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}" for v in votes))
+                            f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
+                            for v in [*votes, *vetoes]))
         await self._finish_mint(mint, "evaluated")
-        return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in votes]}
+        return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in [*votes, *vetoes]]}
 
     async def _record_vote(self, cid: int, mint: str, v: Vote) -> None:
         await self.db.insert("votes", {"candidate_id": cid, "mint": mint, "agent": v.agent, "vote": v.vote,

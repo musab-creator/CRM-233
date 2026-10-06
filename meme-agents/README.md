@@ -144,6 +144,19 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 4. **Consensus gate.** The bot buys only if all three agents vote BUY and their mean confidence
    is at least 0.65. Every vote is stored in `votes`, including PASS votes, errors and costs.
    Every gate result is stored in `candidates`.
+
+   **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
+   so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a
+   PASS, never the reverse (`VETO_ENABLED`, default on):
+   - **Forensics (المحقق الجنائي):** `creator_history`, `holder_funding` (the top
+     `FORENSICS_HOLDER_WALLETS` holders' funders through Helius: shared funders, creator-funded
+     wallets, fresh wallets) and `sniper_wallets` (the launch-minute top-3 and their history).
+   - **Social (شبكة):** one `x_search`, then `x_authors` on up to `SOCIAL_MAX_AUTHORS` authors:
+     account age, followers, following, verified, posts per author, duplicate texts.
+
+   A veto counts only as a PASS with confidence at least `VETO_MIN_CONFIDENCE` (0.7), after a
+   successful tool call, with evidence grounded in that agent's own tool results. Anything
+   weaker is recorded and ignored. The gate reason then reads `veto from forensics: ...`.
 5. **Paper executor.** The entry fills at the next observed trade after the decision: the
    first curve read whose reserves moved (that means trades happened), or the next streamed
    trade with the paid stream. Modeled costs are:

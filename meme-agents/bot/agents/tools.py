@@ -1,4 +1,4 @@
-"""Tool definitions and implementations for the three agents."""
+"""Tool definitions and implementations for the three agents and the two veto agents."""
 from __future__ import annotations
 
 import time
@@ -10,7 +10,9 @@ from ..db import Database
 from ..feeds.dexscreener import summarize_pair
 from ..feeds.rugcheck import pool_accounts
 from .base import AgentSpec
+from .forensics import funding_graph, wallet_profile
 from .prompts import ROLE_PROMPTS
+from .social import author_stats
 
 
 def _tool(name: str, desc: str, props: dict | None = None, required: list[str] | None = None) -> dict:
@@ -34,22 +36,31 @@ class ToolContext:
     flow: Any = None  # async (mint) -> flow features (Engine.compute_flow)
 
 
+async def _x_search(ctx: ToolContext, a: dict) -> dict:
+    q = str(a.get("query", "")).strip()[:400]
+    if not q:
+        return {"error": "empty query"}
+    # only posts since an hour before launch: older ones are about another token with this ticker
+    res = await ctx.x.search(q, ctx.s.X_SEARCH_MAX_RESULTS, since_ts=ctx.candidate.get("since_ts"))
+    posts = res.get("posts") or []
+    authors = {p.get("author") for p in posts}
+    texts = [(p.get("text") or "").strip().lower() for p in posts]
+    dup = 1 - len(set(texts)) / len(texts) if texts else 0
+    return {"query": q, "error": res.get("error"), "post_count": len(posts),
+            "distinct_authors": len(authors), "duplicate_text_ratio": round(dup, 2),
+            "posts": [{"id": p["post_id"], "author_id": p.get("author"), "created_at": p.get("created_at"),
+                       "text": (p.get("text") or "")[:280], "metrics": p.get("metrics")} for p in posts[:25]]}
+
+
+X_SEARCH_TOOL = _tool("x_search", "Search recent X posts (last 7 days). Costs money; use at most twice. "
+                      "Query syntax is X API v2, e.g. '$WIF OR \"dogwifhat\" -is:retweet'.",
+                      {"query": {"type": "string"}}, ["query"])
+
+
 # --- Scout ----------------------------------------------------------------------------
 def scout_spec(ctx: ToolContext) -> AgentSpec:
     async def x_search(a: dict):
-        q = str(a.get("query", "")).strip()[:400]
-        if not q:
-            return {"error": "empty query"}
-        # only posts since an hour before launch: older ones are about another token with this ticker
-        res = await ctx.x.search(q, ctx.s.X_SEARCH_MAX_RESULTS, since_ts=ctx.candidate.get("since_ts"))
-        posts = res.get("posts") or []
-        authors = {p.get("author") for p in posts}
-        texts = [(p.get("text") or "").strip().lower() for p in posts]
-        dup = 1 - len(set(texts)) / len(texts) if texts else 0
-        return {"query": q, "error": res.get("error"), "post_count": len(posts),
-                "distinct_authors": len(authors), "duplicate_text_ratio": round(dup, 2),
-                "posts": [{"id": p["post_id"], "author_id": p.get("author"), "created_at": p.get("created_at"),
-                           "text": (p.get("text") or "")[:280], "metrics": p.get("metrics")} for p in posts[:25]]}
+        return await _x_search(ctx, a)
 
     async def dexscreener_profile(a: dict):
         mint = a.get("mint") or ctx.candidate["mint"]
@@ -72,9 +83,7 @@ def scout_spec(ctx: ToolContext) -> AgentSpec:
                                          for r in rows[:15]]}
 
     tools = [
-        _tool("x_search", "Search recent X posts (last 7 days). Costs money; use at most twice. "
-              "Query syntax is X API v2, e.g. '$WIF OR \"dogwifhat\" -is:retweet'.",
-              {"query": {"type": "string"}}, ["query"]),
+        X_SEARCH_TOOL,
         _tool("dexscreener_profile", "Project links and socials listed on DexScreener for a mint.", MINT_ARG),
         _tool("dexscreener_boosts", "Latest paid DexScreener boosts on Solana, and whether this token is boosted."),
     ]
@@ -201,3 +210,95 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
 
 def build_specs(ctx: ToolContext) -> list[AgentSpec]:
     return [scout_spec(ctx), hunter_spec(ctx), analyst_spec(ctx)]
+
+
+# --- Veto agents: run only after a unanimous BUY ----------------------------------------
+def forensics_spec(ctx: ToolContext) -> AgentSpec:
+    cand = ctx.candidate
+    limit = 20
+
+    async def profile(wallet: str) -> dict:
+        return wallet_profile(wallet, await ctx.helius.address_transactions(wallet, limit), time.time(), limit)
+
+    async def creator_history(a: dict):
+        creator = cand.get("creator")
+        if not creator:
+            return {"error": "creator wallet unknown"}
+        prof = await profile(creator)
+        prof["note"] = "oldest_seen_days is a lower bound on the wallet's age when history_truncated is true"
+        return prof
+
+    async def top_holder_wallets() -> list[str]:
+        exclude: set[str] = set()
+        if cand.get("bonding_curve_key"):
+            exclude.add(cand["bonding_curve_key"])
+        try:
+            exclude |= pool_accounts(await ctx.rug.report(cand["mint"]), None)
+        except Exception:
+            pass
+        out = await ctx.helius.holders(cand["mint"], exclude)
+        wallets = [h["owner"] for h in out.get("holders") or [] if h.get("owner") and not h.get("is_pool_or_curve")
+                   and h["owner"] != cand.get("creator")]
+        return wallets[:ctx.s.FORENSICS_HOLDER_WALLETS]
+
+    async def holder_funding(a: dict):
+        wallets = await top_holder_wallets()
+        if not wallets:
+            return {"error": "no holder wallets resolved"}
+        profiles = [await profile(w) for w in wallets]
+        return {"mint": cand["mint"], "graph": funding_graph(profiles, cand.get("creator")), "wallets": profiles}
+
+    async def sniper_wallets(a: dict):
+        flow = await ctx.flow(cand["mint"]) if ctx.flow else {}
+        snipers = [w for w in (flow or {}).get("sniper_wallets") or [] if w and w != cand.get("creator")][:3]
+        if not snipers:
+            return {"error": "no launch-minute sniper wallets known", "flow_keys": sorted((flow or {}).keys())[:12]}
+        profiles = [await profile(w) for w in snipers]
+        return {"snipers_still_holding": (flow or {}).get("snipers_still_holding"),
+                "graph": funding_graph(profiles, cand.get("creator")), "wallets": profiles}
+
+    tools = [
+        _tool("creator_history", "The creator wallet's recent transactions (Helius): age, funders, distinct "
+              "tokens touched, pump.fun transaction count, SOL sent out and to whom."),
+        _tool("holder_funding", f"The top {ctx.s.FORENSICS_HOLDER_WALLETS} holder wallets (pool and curve excluded): "
+              "who funded each, shared funders, creator-funded wallets, fresh wallets."),
+        _tool("sniper_wallets", "The launch-minute top-3 sniper wallets: their history and funding links."),
+    ]
+    return AgentSpec("forensics", ROLE_PROMPTS["forensics"], tools,
+                     {"creator_history": creator_history, "holder_funding": holder_funding,
+                      "sniper_wallets": sniper_wallets})
+
+
+def social_spec(ctx: ToolContext) -> AgentSpec:
+    seen_posts: list[dict] = []
+
+    async def x_search(a: dict):
+        res = await _x_search(ctx, a)
+        seen_posts.extend(res.get("posts") or [])
+        return res
+
+    async def x_authors(a: dict):
+        ids = [str(i) for i in (a.get("author_ids") or []) if str(i).strip()]
+        if not ids:
+            ids = list(dict.fromkeys(str(p.get("author_id")) for p in seen_posts if p.get("author_id")))
+        ids = ids[:ctx.s.SOCIAL_MAX_AUTHORS]
+        if not ids:
+            return {"error": "no author ids: run x_search first"}
+        res = await ctx.x.users(ids)
+        out = author_stats(res.get("users") or [], seen_posts, time.time())
+        if res.get("error"):
+            out["error"] = res["error"]
+        return out
+
+    tools = [
+        X_SEARCH_TOOL,
+        _tool("x_authors", f"Profiles of up to {ctx.s.SOCIAL_MAX_AUTHORS} post authors (account age, followers, "
+              "following, posts, verified) and aggregate bot-likeness stats. Defaults to the authors of your "
+              "x_search results.",
+              {"author_ids": {"type": "array", "items": {"type": "string"}}}),
+    ]
+    return AgentSpec("social", ROLE_PROMPTS["social"], tools, {"x_search": x_search, "x_authors": x_authors})
+
+
+def build_veto_specs(ctx: ToolContext) -> list[AgentSpec]:
+    return [forensics_spec(ctx), social_spec(ctx)]

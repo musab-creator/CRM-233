@@ -148,6 +148,13 @@ Added after the build, when research showed a change in PumpPortal's data API:
     a broken triage costs money, never coverage. Skipped candidates still get a shadow position
     and the triage vote is stored as agent `triage`, so the report measures whether its skips
     were right. The gate is unchanged: it still needs the three committee votes.
+26. **Veto agents run after a unanimous BUY, and can only block.** Forensics (Helius wallet
+    funding and history of the creator, top holders and snipers) and Social (X author profiles)
+    cost Helius credits and X reads, so they run only on the few candidates the committee
+    approves. A veto needs a PASS at `VETO_MIN_CONFIDENCE`, a successful tool call and evidence
+    grounded in that agent's tool results; otherwise it is stored and ignored, so a hallucinated
+    veto cannot silently stop all trading. The brief's gate still decides every BUY; the veto
+    stage only removes some of them.
 
 ## File tree
 
@@ -177,10 +184,12 @@ meme-agents/
     positions.py     position manager: mark-to-market, exits, shadows
     agents/
       base.py        tool loop, submit_vote schema, validation, cost
-      prompts.py     Triage / Scout / Hunter / Analyst role prompts
+      prompts.py     Triage / Scout / Hunter / Analyst / Forensics / Social role prompts
       triage.py      the cheap first screen (one small-model call, no tools)
+      forensics.py   wallet profiles and funding graph from Helius transactions (pure functions)
+      social.py      X author statistics (pure functions)
       tools.py       tool implementations per agent
-    consensus.py     unanimous BUY + mean confidence >= 0.65
+    consensus.py     unanimous BUY + mean confidence >= 0.65, then the veto stage
     live/
       guard.py       startup refusal checks
       executor.py    PumpPortal trade-local / Jupiter v2, sign, simulate

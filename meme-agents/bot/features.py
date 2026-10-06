@@ -113,6 +113,7 @@ def flow_features(trades: list[dict], creator: str | None, now: float, early_win
         "buyer_hhi": _r(hhi),
         "top5_buyer_share": _r(sum(shares[:5])),
         "sniper_top3_share": _r(sniper_share),
+        "sniper_wallets": [w for w, _ in top3_early],
         "snipers_still_holding": f"{snipers_holding}/{len(top3_early)}",
         "early_buy_share_first_60s": _r(sum(early.values()) / total_buy if total_buy else 0.0),
         "early_buyers_exited": f"{exited}/{len(first_n)}",
@@ -188,6 +189,7 @@ def chain_features(early: list[dict], reached_launch: bool, holders: dict | None
     top3 = sorted(spent.items(), key=lambda kv: kv[1], reverse=True)[:3]
     out["launch_minute_buy_sol"] = _r(early_sol, 3)
     out["sniper_top3_sol"] = _r(sum(v for _, v in top3), 3)
+    out["sniper_wallets"] = [w for w, _ in top3]
     out["sniper_top3_share_of_launch_minute"] = _r(sum(v for _, v in top3) / early_sol) if early_sol else None
     still = [held(w) for w, _ in top3]
     out["snipers_still_holding"] = (f"{sum(1 for (w, _), h in zip(top3, still) if h is not None and bought[w] and h >= 0.1 * bought[w])}"
