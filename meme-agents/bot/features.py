@@ -156,6 +156,7 @@ def chain_features(early: list[dict], reached_launch: bool, holders: dict | None
     (`feeds.pumpchain.holder_snapshot`). `snapshots`: (ts, price, real_sol) from curve reads,
     oldest first. Values that need data the bot does not have are None, never guessed.
     """
+    early = [t for t in early if t.get("ts") is not None]  # a transaction without blockTime can't be placed
     by_owner = (holders or {}).get("by_owner") or {}
     holders_complete = bool((holders or {}).get("complete"))
 

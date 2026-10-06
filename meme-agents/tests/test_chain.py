@@ -88,6 +88,8 @@ def test_chain_features_never_guess_missing_data():
     for k in ("snipers_still_holding", "early_buyer_retention", "dev_sold_pct_of_bought", "effective_holders",
               "net_flow_sol_5m", "price_change_5m_pct", "drawdown_from_peak_pct"):
         assert f[k] is None, k
+    assert chain_features(early + [{"ts": None, "slot": 9, "side": "buy", "trader": B, "sol": 1, "tokens": 1e6}],
+                          True, None, DEV, [], None, 400, 100)["launch_minute_trades"] == 2
     # an incomplete holder snapshot cannot say a missing wallet sold out
     f = chain_features(early, True, {"by_owner": {}, "complete": False, "creator_tokens": 0.0}, DEV, [], 3, 400, 100)
     assert f["early_buyer_retention"] is None and f["dev_sold_pct_of_bought"] == 100.0
