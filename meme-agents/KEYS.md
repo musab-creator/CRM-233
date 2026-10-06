@@ -123,7 +123,9 @@ lasts about five days a month. Raise it, or lower `X_SEARCH_MAX_RESULTS`, to hav
    place of `<TOKEN>`. In the reply, the number at `"chat":{"id":...}` is your
    `TELEGRAM_CHAT_ID`. For a group, add the bot to the group, post a message there and use
    the group's id, which is negative.
-4. Run `python -m bot preflight`. It calls `getMe` to confirm the token works.
+4. Run `python -m bot preflight`. It checks the token with `getMe`, then sends a test message to
+   your chat. `chat not found` means the id is wrong; `bot can't initiate conversation with a
+   user` means you have not sent the bot a message yet (step 2).
 
 ### Jupiter (`JUPITER_API_KEY`), optional, live mode only
 

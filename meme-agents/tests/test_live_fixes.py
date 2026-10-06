@@ -96,6 +96,43 @@ def test_status_reports_paused_when_the_helius_budget_is_spent(tmp_path):
     assert asyncio.run(go(False))[0] == "OK"
 
 
+def test_preflight_telegram_sends_a_real_test_message(tmp_path):
+    from bot.preflight import check_telegram
+
+    class Resp:
+        def __init__(self, code, body):
+            self.status_code, self._body = code, body
+
+        def json(self):
+            return self._body
+
+    class FakeHttp:
+        def __init__(self, send_resp):
+            self.send_resp, self.posts = send_resp, []
+
+        async def get(self, url, **kw):
+            assert url.endswith("/getMe")
+            return Resp(200, {"ok": True, "result": {"username": "meme_agents_bot"}})
+
+        async def post(self, url, json=None, **kw):
+            self.posts.append((url, json))
+            return self.send_resp
+
+    env = tmp_path / "none.env"
+    s = load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42"})
+    http = FakeHttp(Resp(200, {"ok": True}))
+    assert asyncio.run(check_telegram(s, http)) == ("pass", "@meme_agents_bot sent a test message to chat 42")
+    assert http.posts[0][1]["chat_id"] == "42" and "preflight" in http.posts[0][1]["text"]
+    # a wrong chat id, or a user who never messaged the bot: fail with Telegram's own description
+    bad = FakeHttp(Resp(400, {"ok": False, "description": "Bad Request: chat not found"}))
+    status, detail = asyncio.run(check_telegram(s, bad))
+    assert status == "fail" and "chat not found" in detail
+    # chat id missing is a warning, token missing a skip; neither sends anything
+    assert asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc"}),
+                                      FakeHttp(None)))[0] == "warn"
+    assert asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": ""}), FakeHttp(None)))[0] == "skip"
+
+
 def test_early_trades_keep_block_order_inside_the_launch_slot():
     # the RPC lists the launch slot's transactions newest first: the sniper bundled with the
     # create comes before the create itself

@@ -57,6 +57,35 @@ def _err(e: BaseException) -> str:
     return redact(f"{type(e).__name__}: {e}")[:300]
 
 
+async def check_telegram(s: Settings, http: httpx.AsyncClient) -> tuple[str, str]:
+    """Telegram alerts: the token via getMe, then a real test message, because getMe cannot tell
+    whether the chat id is right or whether the user has started the bot."""
+    if not s.TELEGRAM_BOT_TOKEN:
+        return "skip", "TELEGRAM_BOT_TOKEN not set (alerts off)"
+    base = f"https://api.telegram.org/bot{s.TELEGRAM_BOT_TOKEN}"
+    r = await http.get(f"{base}/getMe", timeout=10)
+    me = _json(r)
+    if r.status_code != 200 or not me.get("ok"):
+        return "fail", f"getMe HTTP {r.status_code}: the token is wrong or revoked (BotFather's /token shows it)"
+    name = (me.get("result") or {}).get("username")
+    if not s.TELEGRAM_CHAT_ID:
+        return "warn", f"token works (@{name}) but TELEGRAM_CHAT_ID is not set (KEYS.md shows how to find it)"
+    r = await http.post(f"{base}/sendMessage", timeout=10,
+                        json={"chat_id": s.TELEGRAM_CHAT_ID, "text": "meme-agents preflight: Telegram alerts work"})
+    body = _json(r)
+    if r.status_code == 200 and body.get("ok"):
+        return "pass", f"@{name} sent a test message to chat {s.TELEGRAM_CHAT_ID}"
+    return "fail", (f"@{name} cannot message chat {s.TELEGRAM_CHAT_ID}: "
+                    f"{body.get('description') or f'HTTP {r.status_code}'} (send the bot a message first, and check the id)")
+
+
+def _json(r) -> dict:
+    try:
+        return r.json() or {}
+    except ValueError:
+        return {}
+
+
 async def _check(name: str, required: bool, coro) -> Check:
     try:
         status, detail = await coro
@@ -128,14 +157,6 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
                            headers={"x-api-key": s.JUPITER_API_KEY}, timeout=15)
         return ("pass" if r.status_code == 200 else "fail"), f"order quote HTTP {r.status_code}"
 
-    async def telegram():
-        if not s.TELEGRAM_BOT_TOKEN:
-            return "skip", "TELEGRAM_BOT_TOKEN not set (alerts off)"
-        r = await http.get(f"https://api.telegram.org/bot{s.TELEGRAM_BOT_TOKEN}/getMe", timeout=10)
-        ok = r.status_code == 200 and (r.json() or {}).get("ok")
-        return ("pass" if ok and s.TELEGRAM_CHAT_ID else "warn"), \
-            f"getMe HTTP {r.status_code}" + ("" if s.TELEGRAM_CHAT_ID else ", TELEGRAM_CHAT_ID not set")
-
     async def x_api():  # any X read is billed, so only report configuration
         if not s.X_BEARER_TOKEN:
             return "warn", "X_BEARER_TOKEN not set: Scout and Hunter run without X"
@@ -159,7 +180,7 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
         _check("anthropic", need_llm, anthropic_key()),
         _check("news feeds", False, news()),
         _check("jupiter", False, jupiter()),
-        _check("telegram", False, telegram()),
+        _check("telegram", False, check_telegram(s, http)),
         _check("x api", False, x_api()),
         _check("pumpportal trade stream", s.PUMPPORTAL_TRADE_STREAM != "off", trade_stream()),
     ))
