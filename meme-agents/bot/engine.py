@@ -717,7 +717,7 @@ class Engine:
             **{f"evaluator{i}": self.evaluator for i in range(self.s.LLM_CONCURRENCY)},
         }
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
-            loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s).run(self.stop)
+            loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
         log.info("bot running in %s mode (model %s)", self.s.MODE, self.s.LLM_MODEL)
         sd_notify("READY=1")

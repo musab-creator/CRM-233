@@ -157,10 +157,12 @@ positions, candidates and today's totals (`TELEGRAM_DIGEST=all`; `wins` sends it
 with a winning trade; `off` disables it), the daily summary at midnight UTC, and health
 alerts from the cron check.
 
-What you can ask it: type `/status`, `/digest` (this hour so far), `/report`, `/stop` (kill
-switch on: no new entries, every position closed), `/resume` or `/help` in the chat and the bot
-answers within a few seconds. Only messages from `TELEGRAM_CHAT_ID` are answered; the `/`
-button in Telegram shows the menu. `TELEGRAM_COMMANDS=false` turns this off.
+What you can ask it: `/panel` shows buttons for everything; as commands they are `/status`,
+`/digest` (this hour so far), `/report`, `/trades`, `/log`, `/settings`, `/pause` (no new
+entries), `/resume`, `/stop` (kill switch: every position closed) and `/help`. The bot answers
+within a few seconds. Only messages from `TELEGRAM_CHAT_ID` are answered; the `/` button in
+Telegram shows the menu. Settings and keys cannot be changed from the chat.
+`TELEGRAM_COMMANDS=false` turns this off.
 
 ### Jupiter (`JUPITER_API_KEY`), optional, live mode only
 

@@ -137,10 +137,13 @@ Added after the build, when research showed a change in PumpPortal's data API:
     evaluates throughout the day instead of spending it all in the first two hours. The brief's
     cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`.
 24. **Telegram commands come only from `TELEGRAM_CHAT_ID`.** The bot long-polls `getUpdates`
-    (no inbound port, so the firewall stays closed) and answers `/status`, `/digest`, `/report`,
-    `/stop` and `/resume` from that chat alone; other chats are logged and ignored. `/stop` writes
-    the same STOP file as the kill switch, so the two paths cannot disagree. Nothing in the chat
-    can change a setting, unlock live mode or send a transaction.
+    (no inbound port, so the firewall stays closed) and answers `/panel`, `/status`, `/digest`,
+    `/report`, `/trades`, `/log`, `/settings`, `/pause`, `/resume` and `/stop` from that chat
+    alone; other chats are logged and ignored. `/stop` writes the same STOP file as the kill
+    switch, so the two paths cannot disagree; `/pause` sets the risk manager's pause in memory and
+    `/resume` clears only that pause, never the loss-cap pause. The panel is deliberately
+    read-and-pause only: nothing in the chat can change a setting, unlock live mode or send a
+    transaction, and the service runs with its code and `.env` read-only.
 25. **Triage before the committee** (`TRIAGE_ENABLED`, default on). The three agents cost about
     $0.13 per candidate; a Haiku call on the same data costs about $0.005. Triage can only skip
     a candidate on a confident PASS (`TRIAGE_MIN_CONFIDENCE` 0.7) backed by hard red flags in the

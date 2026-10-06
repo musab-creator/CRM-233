@@ -49,13 +49,14 @@ class Telegram:
     def _url(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self.token}/{method}"
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, reply_markup: dict | None = None) -> None:
         if not self.enabled:
             return
+        body: dict = {"chat_id": self.chat_id, "text": text[:MAX_MESSAGE], "disable_web_page_preview": True}
+        if reply_markup:
+            body["reply_markup"] = reply_markup
         try:
-            r = await self.c.post(self._url("sendMessage"),
-                                  json={"chat_id": self.chat_id, "text": text[:MAX_MESSAGE],
-                                        "disable_web_page_preview": True}, timeout=10)
+            r = await self.c.post(self._url("sendMessage"), json=body, timeout=10)
             if r.status_code != 200:
                 log.warning("telegram send failed: HTTP %s", r.status_code)
         except httpx.HTTPError as e:
@@ -69,7 +70,7 @@ class Telegram:
     async def get_updates(self, offset: int | None, timeout_s: int = 25) -> list[dict]:
         """Long-poll incoming messages. Raises TelegramConflict on HTTP 409, httpx.HTTPError
         on network trouble; other HTTP errors return an empty list after a log line."""
-        params: dict = {"timeout": timeout_s, "allowed_updates": '["message"]'}
+        params: dict = {"timeout": timeout_s, "allowed_updates": '["message","callback_query"]'}
         if offset is not None:
             params["offset"] = offset
         r = await self.c.get(self._url("getUpdates"), params=params, timeout=timeout_s + 10)
@@ -83,6 +84,16 @@ class Telegram:
         except ValueError:
             return []
         return body.get("result") or [] if body.get("ok") else []
+
+    async def answer_callback(self, callback_id: str | None, text: str = "") -> None:
+        """Dismiss a button's loading state (answerCallbackQuery). Best effort."""
+        if not callback_id:
+            return
+        try:
+            await self.c.post(self._url("answerCallbackQuery"), json={"callback_query_id": callback_id, "text": text},
+                              timeout=10)
+        except httpx.HTTPError as e:
+            log.warning("telegram answerCallbackQuery failed: %s", type(e).__name__)
 
     async def set_commands(self, commands: list[tuple[str, str]]) -> None:
         """The "/" menu in the chat (setMyCommands). Best effort."""

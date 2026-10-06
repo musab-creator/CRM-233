@@ -119,8 +119,9 @@ The bot now:
   Telegram is set up);
 - with Telegram set up, also messages you on every entry and exit, sends an hourly digest of
   trades and open positions, and the daily summary at midnight UTC.
-- answers `/status`, `/digest`, `/report`, `/stop`, `/resume` and `/help` typed into the Telegram
-  chat, so you can check on it from your phone without PowerShell.
+- gives you a control panel in the Telegram chat: `/panel` shows buttons for status, digest,
+  report, trades, log, settings, pause, resume and stop, so you can run it from your phone
+  without PowerShell. Changing a setting or a key still happens here, in `.env`.
 
 ## 9. Watch it
 
