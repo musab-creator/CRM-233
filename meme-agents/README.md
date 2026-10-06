@@ -96,9 +96,17 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    0 of 59). For those, the liquidity rule uses the curve's depth instead: 2 × its real SOL
    reserve × SOL/USD, or about 33 SOL in the curve for $8k at SOL = $120. Set
    `PF_CURVE_LIQUIDITY_FALLBACK=false` to trade graduated tokens only (PLAN.md, assumption 16).
-3. **Agents.** Three Claude calls run in parallel. Each has its own tools and must finish with
-   a strict `submit_vote` call: `{"vote","confidence","reasons","evidence"}`. The Analyst also
-   returns `size_usd`.
+3. **Agents.** A cheap **triage** screen runs first, then three Claude calls run in parallel.
+   Each has its own tools and must finish with a strict `submit_vote` call:
+   `{"vote","confidence","reasons","evidence"}`. The Analyst also returns `size_usd`.
+   - **Triage (الفارز):** one call to a small model (`TRIAGE_MODEL`, Haiku, about $0.005) with
+     the same candidate data and no tools. Its BUY means "worth the committee's budget"; a
+     PASS at `TRIAGE_MIN_CONFIDENCE` (0.7) or higher skips the three agents, which otherwise
+     cost about $0.13 per candidate. It may skip only on hard red flags already in the data
+     (dev sold half or more, snipers still holding a third of the inflow, bundled buys,
+     retention under 40%, momentum gone). Errors, budget stops and unsure votes let the
+     candidate through. Its vote is stored like the others, so the report scores its skips
+     against the shadow book. `TRIAGE_ENABLED=false` turns it off.
    - **Scout (المحقق):** `x_search`, `dexscreener_profile`, `dexscreener_boosts`. It judges
      organic attention against spam.
    - **Hunter (القناص):** `x_user_timeline` for the watchlist accounts, plus a Truth Social RSS

@@ -27,13 +27,18 @@ MAX_TOOL_RESULT_CHARS = 6000
 CHARS_PER_TOKEN = 3.0  # conservative for JSON-heavy prompts (real ratio is ~3.5-4)
 
 
-def worst_case_call_usd(s: Settings, system, tools, messages) -> float:
+def worst_case_call_usd(s: Settings, system, tools, messages, *, price_in: float | None = None,
+                        price_out: float | None = None, max_tokens: int | None = None) -> float:
     """Upper bound for one request: every input token billed as a cache write (1.25x input
     price) plus the full max_tokens of output. Reserved before the call, settled to the
-    actual `usage` after, so concurrent agents cannot overrun the daily budget."""
+    actual `usage` after, so concurrent agents cannot overrun the daily budget. The prices
+    default to the main model's; the triage model passes its own."""
     chars = len(json.dumps([system, tools, messages], default=str, ensure_ascii=False))
     in_tokens = chars / CHARS_PER_TOKEN
-    return (in_tokens * s.LLM_PRICE_IN_PER_MTOK * 1.25 + s.LLM_MAX_TOKENS * s.LLM_PRICE_OUT_PER_MTOK) / 1_000_000
+    pin = s.LLM_PRICE_IN_PER_MTOK if price_in is None else price_in
+    pout = s.LLM_PRICE_OUT_PER_MTOK if price_out is None else price_out
+    out_tokens = s.LLM_MAX_TOKENS if max_tokens is None else max_tokens
+    return (in_tokens * pin * 1.25 + out_tokens * pout) / 1_000_000
 
 
 @dataclass

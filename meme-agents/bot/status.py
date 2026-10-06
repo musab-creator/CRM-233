@@ -94,6 +94,8 @@ async def build_status(db: Database, s: Settings) -> str:
     f = {}
     for k, sql in (("candidates", "SELECT COUNT(*) c FROM candidates WHERE ts>=?"),
                    ("evaluated", "SELECT COUNT(*) c FROM candidates WHERE ts>=? AND decision IS NOT NULL"),
+                   ("triage skipped",
+                    "SELECT COUNT(*) c FROM candidates WHERE ts>=? AND gate_reason LIKE 'triage:%'"),
                    ("gate BUY", "SELECT COUNT(*) c FROM candidates WHERE ts>=? AND decision='BUY'"),
                    ("closed trades", "SELECT COUNT(*) c FROM positions WHERE kind='real' AND status='closed' AND closed_at>=?")):
         f[k] = (await db.fetchone(sql, [start]))["c"]

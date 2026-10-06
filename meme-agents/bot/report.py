@@ -93,7 +93,8 @@ async def _scored_candidates(db: Database) -> list[dict]:
         SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
         FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
         WHERE c.decision IS NOT NULL""")
-    votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes")
+    votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes "
+                              "WHERE agent IN ('scout', 'hunter', 'analyst')")
     by_c: dict[int, list[dict]] = {}
     for v in votes:
         by_c.setdefault(v["candidate_id"], []).append(v)
@@ -170,6 +171,8 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
                                         [day_start, day_end]))["c"],
         "gate_buy": (await db.fetchone("SELECT COUNT(*) c FROM candidates WHERE ts>=? AND ts<? AND decision='BUY'",
                                        [day_start, day_end]))["c"],
+        "triage_skipped": (await db.fetchone("SELECT COUNT(*) c FROM candidates WHERE ts>=? AND ts<? AND "
+                                             "gate_reason LIKE 'triage:%'", [day_start, day_end]))["c"],
     }
     spend = {
         "llm_usd_day": (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' AND day=?",
@@ -251,7 +254,7 @@ def render_text(r: dict) -> str:
     ]
     if not r["agents"]:
         lines.append("no votes recorded yet")
-    for name in ("scout", "hunter", "analyst"):
+    for name in ("triage", "scout", "hunter", "analyst"):
         a = r["agents"].get(name)
         if not a:
             continue

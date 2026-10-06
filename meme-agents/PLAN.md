@@ -141,6 +141,13 @@ Added after the build, when research showed a change in PumpPortal's data API:
     `/stop` and `/resume` from that chat alone; other chats are logged and ignored. `/stop` writes
     the same STOP file as the kill switch, so the two paths cannot disagree. Nothing in the chat
     can change a setting, unlock live mode or send a transaction.
+25. **Triage before the committee** (`TRIAGE_ENABLED`, default on). The three agents cost about
+    $0.13 per candidate; a Haiku call on the same data costs about $0.005. Triage can only skip
+    a candidate on a confident PASS (`TRIAGE_MIN_CONFIDENCE` 0.7) backed by hard red flags in the
+    deterministic data; an error, a budget stop or an unsure vote lets the candidate through, so
+    a broken triage costs money, never coverage. Skipped candidates still get a shadow position
+    and the triage vote is stored as agent `triage`, so the report measures whether its skips
+    were right. The gate is unchanged: it still needs the three committee votes.
 
 ## File tree
 
@@ -170,7 +177,8 @@ meme-agents/
     positions.py     position manager: mark-to-market, exits, shadows
     agents/
       base.py        tool loop, submit_vote schema, validation, cost
-      prompts.py     Scout / Hunter / Analyst role prompts
+      prompts.py     Triage / Scout / Hunter / Analyst role prompts
+      triage.py      the cheap first screen (one small-model call, no tools)
       tools.py       tool implementations per agent
     consensus.py     unanimous BUY + mean confidence >= 0.65
     live/

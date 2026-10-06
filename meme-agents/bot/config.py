@@ -165,6 +165,12 @@ class Settings:
     LLM_TIMEOUT_S: float = 120.0
     LLM_CONCURRENCY: int = 2
     AGENT_MIN_GROUNDING: float = 0.5
+    TRIAGE_ENABLED: bool = True               # a cheap first screen before the three agents (bot/agents/triage.py)
+    TRIAGE_MODEL: str = "claude-haiku-4-5"
+    TRIAGE_PRICE_IN_PER_MTOK: float = 1.0
+    TRIAGE_PRICE_OUT_PER_MTOK: float = 5.0
+    TRIAGE_MAX_TOKENS: int = 600
+    TRIAGE_MIN_CONFIDENCE: float = 0.7        # a triage PASS below this still goes to the committee
 
     # --- X ---------------------------------------------------------------------
     X_MONTHLY_BUDGET_USD: float = 20.0

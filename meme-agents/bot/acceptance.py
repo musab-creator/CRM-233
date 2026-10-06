@@ -128,7 +128,8 @@ async def first_full_cycle(db: Database, since: float, need_clean_votes: bool) -
     full, first = 0, None
     for c in rows:
         votes = await db.fetchall("SELECT agent, vote, raw_vote, confidence, reasons, evidence, error, guard, "
-                                  "cost_usd FROM votes WHERE candidate_id=? ORDER BY agent", [c["id"]])
+                                  "cost_usd FROM votes WHERE candidate_id=? AND agent IN ('scout', 'hunter', "
+                                  "'analyst') ORDER BY agent", [c["id"]])
         agents = tuple(sorted(v["agent"] for v in votes))
         if agents != AGENTS or not c["gate_reason"] or c["decision"] not in ("BUY", "PASS"):
             continue

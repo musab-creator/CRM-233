@@ -346,14 +346,14 @@ class FakeLLM:
         usage = SimpleNamespace(input_tokens=1500, output_tokens=150, cache_creation_input_tokens=0,
                                 cache_read_input_tokens=0)
         tool_names = [t["name"] for t in tools if t["name"] != "submit_vote"]
-        if len(messages) == 1:
+        if len(messages) == 1 and tool_names:
             name = tool_names[0]
             args = {"query": f"${data.get('symbol')} -is:retweet"} if name == "x_search" else \
                    {"handle": "elonmusk"} if name == "x_user_timeline" else {"mint": mint}
             block = SimpleNamespace(type="tool_use", id=f"tu_{self.calls}", name=name, input=args)
             return SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage)
         h = int(hashlib.sha1((mint + role).encode()).hexdigest(), 16)
-        buy = h % 100 < 70
+        buy = h % 100 < (85 if role == "triage" else 70)   # triage lets most through, as it should
         pf = data.get("prefilter") or {}
         evidence = [f"unique_buyers {pf.get('unique_buyers')}", f"net_inflow_sol {pf.get('net_inflow_sol')}"]
         fact = _tool_fact(messages)

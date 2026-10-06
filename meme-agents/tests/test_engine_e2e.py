@@ -55,9 +55,18 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
     assert not errors, [e.getMessage() for e in errors]
     assert not eng.crashes
     assert r["evaluated"], "no candidate reached a gate decision"
-    for c in r["evaluated"]:
-        vs = [v for v in r["votes"] if v["candidate_id"] == c["id"]]
+    full = [c for c in r["evaluated"] if not (c["gate_reason"] or "").startswith("triage:")]
+    assert full, "triage skipped every candidate"
+    for c in full:
+        vs = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] != "triage"]
         assert sorted(v["agent"] for v in vs) == ["analyst", "hunter", "scout"]
+        tri = [v for v in r["votes"] if v["candidate_id"] == c["id"] and v["agent"] == "triage"]
+        assert len(tri) == 1 and tri[0]["error"] is None
+        assert tri[0]["vote"] == "BUY" or tri[0]["confidence"] < s.TRIAGE_MIN_CONFIDENCE  # let through
+    for c in r["evaluated"]:
+        if (c["gate_reason"] or "").startswith("triage:"):
+            assert c["decision"] == "PASS"
+            assert [v["agent"] for v in r["votes"] if v["candidate_id"] == c["id"]] == ["triage"]
         assert all(v["error"] is None and v["tool_calls_ok"] >= 1 for v in vs)
         assert c["decision"] in ("BUY", "PASS") and c["gate_reason"]
         flow = json.loads(c["metrics"])["flow"]

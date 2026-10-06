@@ -16,6 +16,7 @@ import httpx
 
 from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs
+from .agents.triage import run_triage, triage_first_call_usd, triage_skips
 from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
 from .config import Settings
@@ -103,6 +104,7 @@ class Engine:
         self._stage2_at: dict[str, float] = {}
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
         self.cycles = 0
+        self.triage_skips = 0                   # candidates the triage screen kept from the agents
         self.crashes: dict[str, int] = {}       # background loops that raised (each is restarted)
         self.stream_mode = s.PUMPPORTAL_TRADE_STREAM
         self._stream_blocked_day: str | None = None
@@ -466,27 +468,42 @@ class Engine:
             first_calls = sum(worst_case_call_usd(self.s, [{"type": "text", "text": sp.system}],
                                                   [*sp.tools, vote_tool(sp.with_size)],
                                                   [{"role": "user", "content": context}]) for sp in specs)
+            if self.s.TRIAGE_ENABLED:
+                first_calls += triage_first_call_usd(self.s, context)
             left = await self.llm_budget.remaining()
             if left < first_calls:
                 return await self._skip_for_budget(
                     cid, mint, f"LLM daily budget: ${left:.4f} left < ${first_calls:.4f} for one evaluation")
+        triage = None
+        if self.llm is not None and self.s.TRIAGE_ENABLED:
+            # the cheap screen: a confident PASS here spends nothing on the three agents
+            triage = await run_triage(self.llm, self.s, context, self.llm_budget)
+            await self._record_vote(cid, mint, triage)
+            if triage_skips(triage, self.s):
+                reason = f"triage: {(triage.reasons or ['no reason given'])[0][:200]}"
+                await self.db.update("candidates", "id", cid, {
+                    "status": "evaluated", "decision": "PASS", "mean_confidence": 0.0,
+                    "gate_reason": reason, "llm_cost_usd": triage.cost_usd})
+                self.triage_skips += 1
+                log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f", cid, ctx_data.get("symbol"), mint,
+                         reason, triage.confidence, triage.cost_usd)
+                liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
+                await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "",
+                                            self.s.POSITION_MIN_USD, liq)
+                await self._finish_mint(mint, "evaluated")
+                return {"candidate_id": cid, "decision": "PASS", "votes": [triage.as_json()]}
         if self.llm is None:
             votes = [Vote(sp.name, error="ANTHROPIC_API_KEY not set") for sp in specs]
         else:
             votes = list(await asyncio.gather(*[run_agent(self.llm, self.s, sp, context, self.llm_budget,
                                                           subject_ids={mint}) for sp in specs]))
-        ts = now_s()
         for v in votes:
-            await self.db.insert("votes", {"candidate_id": cid, "mint": mint, "agent": v.agent, "vote": v.vote,
-                                           "confidence": v.confidence, "reasons": v.reasons,
-                                           "evidence": v.evidence, "size_usd": v.size_usd, "cost_usd": v.cost_usd,
-                                           "turns": v.turns, "error": v.error, "ts": ts, "raw_vote": v.raw_vote,
-                                           "grounding": v.grounding, "tool_calls_ok": v.tool_calls_ok,
-                                           "guard": v.guard})
+            await self._record_vote(cid, mint, v)
         result = gate(votes, self.s)
+        spent = sum(v.cost_usd for v in votes) + (triage.cost_usd if triage else 0.0)
         await self.db.update("candidates", "id", cid, {
             "status": "evaluated", "decision": result.decision, "mean_confidence": result.mean_confidence,
-            "gate_reason": result.reason, "llm_cost_usd": sum(v.cost_usd for v in votes)})
+            "gate_reason": result.reason, "llm_cost_usd": spent})
         self.cycles += 1
         log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f", cid,
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
@@ -507,6 +524,14 @@ class Engine:
                             f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}" for v in votes))
         await self._finish_mint(mint, "evaluated")
         return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in votes]}
+
+    async def _record_vote(self, cid: int, mint: str, v: Vote) -> None:
+        await self.db.insert("votes", {"candidate_id": cid, "mint": mint, "agent": v.agent, "vote": v.vote,
+                                       "confidence": v.confidence, "reasons": v.reasons,
+                                       "evidence": v.evidence, "size_usd": v.size_usd, "cost_usd": v.cost_usd,
+                                       "turns": v.turns, "error": v.error, "ts": now_s(), "raw_vote": v.raw_vote,
+                                       "grounding": v.grounding, "tool_calls_ok": v.tool_calls_ok,
+                                       "guard": v.guard})
 
     async def _skip_for_budget(self, cid: int, mint: str, reason: str) -> None:
         log.info("skipping candidate #%d: %s", cid, reason)
@@ -564,7 +589,8 @@ class Engine:
             "helius_over_pace": self._credits_over_pace, "helius_exhausted": self._credits_exhausted,
             "reconnects": getattr(self.feed, "reconnects", 0), "stalls": getattr(self.feed, "stalls", 0),
             "last_msg_at": getattr(self.feed, "last_msg_at", None), "queue": self.queue.qsize(),
-            "cycles": self.cycles, "crashes": sum(self.crashes.values()), "paused": self.risk.paused_reason}))
+            "cycles": self.cycles, "triage_skips": self.triage_skips, "crashes": sum(self.crashes.values()),
+            "paused": self.risk.paused_reason}))
         await self._hourly_digest()
         if utc_day() != day:
             text, path = await write_daily(self.db, self.s, day)
