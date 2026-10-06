@@ -23,9 +23,11 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog):
         out = {
             "evaluated": await db.fetchall("SELECT id, decision, gate_reason, metrics FROM candidates "
                                            "WHERE decision IS NOT NULL"),
-            "votes": await db.fetchall("SELECT candidate_id, agent, vote, confidence, tool_calls_ok, grounding, error "
-                                       "FROM votes"),
+            "votes": await db.fetchall("SELECT candidate_id, agent, vote, raw_vote, confidence, tool_calls_ok, "
+                                       "grounding, guard, error FROM votes"),
             "shadows": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='shadow'"),
+            "reals": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='real'"),
+            "blocks": (await db.fetchone("SELECT COUNT(*) c FROM events WHERE kind='risk_block'"))["c"],
             "trades": (await db.fetchone("SELECT COUNT(*) c FROM trades"))["c"],
         }
         await db.close()
@@ -44,3 +46,8 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog):
         assert '"flow"' in c["metrics"]
     assert {sh["candidate_id"] for sh in r["shadows"]} >= {c["id"] for c in r["evaluated"]}
     assert any("DECISION" in rec.getMessage() for rec in caplog.records)
+    # grounded BUYs must survive the guard (a guard that rejects everything would pass silently otherwise)
+    assert any(v["raw_vote"] == "BUY" and v["vote"] == "BUY" and v["guard"] is None for v in r["votes"])
+    # every gate BUY becomes a real entry unless the risk manager blocked it
+    buys = {c["id"] for c in r["evaluated"] if c["decision"] == "BUY"}
+    assert len({p["candidate_id"] for p in r["reals"]} & buys) + r["blocks"] >= len(buys)

@@ -232,8 +232,9 @@ class FakeHelius:
 
 class FakeX:
     async def search(self, query, max_results=10, since_ts=None):
-        return {"posts": [{"post_id": str(i), "author": f"a{i}", "text": f"{query} looks fun {i}",
-                           "created_at": "2026-01-01T00:00:00Z", "metrics": {}} for i in range(5)]}
+        return {"posts": [{"post_id": str(1843327776011239424 + i), "author": f"a{i}",
+                           "text": f"{query} looks fun {i}", "created_at": "2026-01-01T00:00:00Z", "metrics": {}}
+                          for i in range(5)]}
 
     async def timeline(self, handle, window_min, refresh_min, max_results=5):
         return {"posts": []}
@@ -247,8 +248,26 @@ class FakeNews:
         return await self.recent(60)
 
 
+def _tool_fact(messages: list[dict]) -> str | None:
+    """A citable fact (id or number) from the latest successful tool result, as a real agent
+    is instructed to quote; None if the tools returned nothing citable."""
+    from .agents.grounding import _salient
+    last = messages[-1]
+    if last["role"] != "user" or isinstance(last["content"], str):
+        return None
+    for block in last["content"]:
+        if isinstance(block, dict) and block.get("type") == "tool_result" and not block.get("is_error"):
+            ids, nums = _salient(block["content"])
+            if ids:
+                return f"id {sorted(ids)[0]}"
+            if nums:
+                return f"value {nums[0]}"
+    return None
+
+
 class FakeLLM:
-    """Stands in for anthropic.AsyncAnthropic: one tool call, then submit_vote."""
+    """Stands in for anthropic.AsyncAnthropic: one tool call, then submit_vote citing a fact
+    from that call's result (or nothing citable, which the grounding guard then rejects)."""
 
     def __init__(self):
         self.messages = self
@@ -273,9 +292,12 @@ class FakeLLM:
         h = int(hashlib.sha1((mint + role).encode()).hexdigest(), 16)
         buy = h % 100 < 70
         pf = data.get("prefilter") or {}
+        evidence = [f"unique_buyers {pf.get('unique_buyers')}", f"net_inflow_sol {pf.get('net_inflow_sol')}"]
+        fact = _tool_fact(messages)
+        if fact:
+            evidence.append(fact)
         vote = {"vote": "BUY" if buy else "PASS", "confidence": round(0.55 + (h % 40) / 100, 2),
-                "reasons": [f"sim {role} reasoning"],
-                "evidence": [f"unique_buyers {pf.get('unique_buyers')}", f"net_inflow_sol {pf.get('net_inflow_sol')}"]}
+                "reasons": [f"sim {role} reasoning"], "evidence": evidence}
         if any(t["name"] == "submit_vote" and "size_usd" in t["input_schema"]["properties"] for t in tools):
             vote["size_usd"] = 5 + (h % 6)
         block = SimpleNamespace(type="tool_use", id=f"tu_{self.calls}", name="submit_vote", input=vote)
