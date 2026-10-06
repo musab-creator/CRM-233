@@ -89,6 +89,20 @@ created the key.
    call costs 1 credit, a DAS call 10 and an Enhanced Transactions call 100
    ([credit table](https://www.helius.dev/docs/billing/credits)). The bot's defaults stay
    under these limits, and `python -m bot status` shows the credits used this month.
+4. **On a paid plan**, tell the bot its new limits so it paces itself against the right budget
+   and uses the extra speed. Developer ($49/month, 10M credits, 50 RPC req/s, 10 DAS req/s):
+   ```
+   HELIUS_MONTHLY_CREDITS=10000000
+   HELIUS_RPC_RPS=50
+   HELIUS_ENHANCED_RPS=10
+   CURVE_POLL_CALLS_PER_MIN=30     # fresher curve reads (default 8)
+   CURVE_HOT_POLL_S=5              # positions and candidates every 5 s (default 15)
+   CURVE_FIRST_POLL_S=30           # first read of a launch (default 60)
+   HOLDERS_REFRESH_S=120           # holder counts every 2 min (default 300)
+   BACKFILL_MAX_TX=200             # more of the launch minute (default 80)
+   ```
+   That uses roughly 3M credits a month. Business (100M, 200 RPC req/s, 50 DAS req/s) and
+   Professional (200M, 500, 100) follow the same pattern. Restart the bot after editing.
 
 ### X API (`X_BEARER_TOKEN`), optional, pay per use
 
