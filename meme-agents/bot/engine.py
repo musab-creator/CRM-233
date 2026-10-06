@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import anthropic
 import httpx
 
-from .agents.base import Vote, run_agent
+from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs
 from .budget import Budget, utc_day
 from .config import Settings
@@ -187,11 +187,7 @@ class Engine:
             await self._finish_mint(mint, "stale")
             return None
         if await self.llm_budget.exhausted():
-            log.warning("LLM daily budget exhausted; skipping candidate #%d", cid)
-            await self.db.update("candidates", "id", cid, {"status": "skipped_budget",
-                                                           "gate_reason": "LLM daily budget exhausted"})
-            await self._finish_mint(mint, "skipped_budget")
-            return None
+            return await self._skip_for_budget(cid, mint, "LLM daily budget exhausted")
         st = self.ingest.mints.get(mint)
         if st:  # refresh live stream metrics at evaluation time
             ctx_data["live"] = {"age_min": round(st.age_min(now_s()), 1), "unique_buyers": st.unique_buyers,
@@ -210,6 +206,16 @@ class Engine:
                             "bonding_curve_key": ctx_data.get("bonding_curve_key"),
                             "since_ts": launched - 3600})
         specs = build_specs(tctx)
+        if self.llm is not None:
+            # Running agents that cannot afford even their first call would only record three
+            # budget errors as a decision: stop evaluating instead (as the brief asks).
+            first_calls = sum(worst_case_call_usd(self.s, [{"type": "text", "text": sp.system}],
+                                                  [*sp.tools, vote_tool(sp.with_size)],
+                                                  [{"role": "user", "content": context}]) for sp in specs)
+            left = await self.llm_budget.remaining()
+            if left < first_calls:
+                return await self._skip_for_budget(
+                    cid, mint, f"LLM daily budget: ${left:.4f} left < ${first_calls:.4f} for one evaluation")
         if self.llm is None:
             votes = [Vote(sp.name, error="ANTHROPIC_API_KEY not set") for sp in specs]
         else:
@@ -247,6 +253,12 @@ class Engine:
                             f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}" for v in votes))
         await self._finish_mint(mint, "evaluated")
         return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in votes]}
+
+    async def _skip_for_budget(self, cid: int, mint: str, reason: str) -> None:
+        log.info("skipping candidate #%d: %s", cid, reason)
+        await self.db.update("candidates", "id", cid, {"status": "skipped_budget", "gate_reason": reason})
+        await self._finish_mint(mint, "skipped_budget")
+        return None
 
     async def _finish_mint(self, mint: str, status: str) -> None:
         st = self.ingest.mints.get(mint)
