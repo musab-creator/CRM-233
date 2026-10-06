@@ -15,6 +15,11 @@ or lets you add an SSH key.
   that is normal.
 - You can also use the dashboard's "Console" or "Web terminal" button.
 
+**Every command below runs on the server, not on your own computer.** Once you're
+connected, the prompt changes from something like `PS C:\Users\you>` (Windows) to
+`root@ubuntu:~#`. If you still see `PS C:\...`, you are not on the server yet: Windows
+PowerShell rejects `&&` and has no `nano`.
+
 ## 2. Create a user for the bot (don't run it as root)
 
 ```bash
@@ -53,7 +58,7 @@ If git asks for a username and password, the repository is private:
 ## 5. Install
 
 ```bash
-deploy/install.sh
+bash deploy/install.sh
 ```
 
 This creates `.venv`, installs the dependencies, creates `.env` (readable only by you) and
