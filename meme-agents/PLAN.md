@@ -65,8 +65,10 @@ Added by me (each one is a config value unless it says otherwise):
     - Watchlist timelines and the news feed are cached and refreshed every 10 and 5 minutes.
       They are shared across candidates, so their cost does not grow with the candidate count.
 13. **Live mode is dry run** in this build. It builds and signs the transaction and calls
-    `simulateTransaction` through Helius, but never sends. Sending exists in code behind
-    `LIVE_DRY_RUN=false` and the same startup checks.
+    `simulateTransaction` through Helius, but never sends. Sending exists in code behind an
+    explicit `LIVE_DRY_RUN=false` (booleans are parsed strictly) and the same startup checks.
+    Sent trades are reconciled against wallet balances after confirmation. Sells are
+    percentages of actual holdings, and retries check whether an earlier attempt already landed.
 14. **The pump.fun fee is fixed at 1%** (`PUMPFUN_FEE_PCT`) as the brief says, even though
     pump.fun's live fee schedule and the PumpSwap fee after graduation differ. You can change it.
 15. **Graduated tokens:** PumpPortal streams PumpSwap trades (after graduation) only to

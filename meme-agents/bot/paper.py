@@ -67,5 +67,5 @@ class PaperExecutor:
     async def buy(self, mint: str, sol_in: float, price: float) -> Fill:
         return entry_fill(sol_in, price, self.s)
 
-    async def sell(self, mint: str, tokens: float, price: float) -> Fill:
+    async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0) -> Fill:
         return exit_fill(tokens, price, self.s)

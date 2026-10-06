@@ -97,7 +97,7 @@ class ScriptedLLM:
         self.requests = []
 
     async def create(self, **kw):
-        self.requests.append(kw)
+        self.requests.append({**kw, "messages": list(kw["messages"])})  # snapshot: the loop keeps appending
         return self.responses.pop(0)
 
 

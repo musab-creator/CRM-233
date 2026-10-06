@@ -17,15 +17,23 @@ import anthropic
 
 from ..budget import Budget, BudgetExceeded, llm_cost_usd
 from ..config import Settings
-from .grounding import Corpus, grounding_ratio
+from .grounding import Corpus
 
 log = logging.getLogger("bot.agents")
 
 ToolFn = Callable[[dict], Awaitable[Any]]
 
-# Worst-case reservation per API call; settled to the real cost from `usage`.
-CALL_RESERVE_USD = 0.06
 MAX_TOOL_RESULT_CHARS = 6000
+CHARS_PER_TOKEN = 3.0  # conservative for JSON-heavy prompts (real ratio is ~3.5-4)
+
+
+def worst_case_call_usd(s: Settings, system, tools, messages) -> float:
+    """Upper bound for one request: every input token billed as a cache write (1.25x input
+    price) plus the full max_tokens of output. Reserved before the call, settled to the
+    actual `usage` after, so concurrent agents cannot overrun the daily budget."""
+    chars = len(json.dumps([system, tools, messages], default=str, ensure_ascii=False))
+    in_tokens = chars / CHARS_PER_TOKEN
+    return (in_tokens * s.LLM_PRICE_IN_PER_MTOK * 1.25 + s.LLM_MAX_TOKENS * s.LLM_PRICE_OUT_PER_MTOK) / 1_000_000
 
 
 @dataclass
@@ -93,16 +101,23 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
     return Vote(agent, v, float(c), [r[:400] for r in reasons][:10], [e[:400] for e in evidence][:15], size)
 
 
-def apply_grounding_guard(vote: Vote, corpus: Corpus, tool_calls_ok: int, min_ratio: float) -> Vote:
-    """A BUY must rest on data the agent actually looked at; otherwise it becomes PASS."""
+def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls_ok: int,
+                          min_ratio: float) -> Vote:
+    """A BUY must rest on data the agent actually looked at; otherwise it becomes PASS.
+
+    Evidence may cite the candidate context or tool results, but at least one item must come
+    from a tool result: the context alone is what every agent already gets for free."""
     vote.raw_vote = vote.vote
     vote.tool_calls_ok = tool_calls_ok
-    vote.grounding = round(grounding_ratio(vote.evidence, corpus), 3)
+    grounded = [e for e in vote.evidence if context.grounded(e) or tools.grounded(e)]
+    vote.grounding = round(len(grounded) / len(vote.evidence), 3) if vote.evidence else 0.0
     if vote.vote == "BUY":
         if tool_calls_ok < 1:
             vote.vote, vote.guard = "PASS", "BUY without any successful tool call"
         elif vote.grounding < min_ratio:
             vote.vote, vote.guard = "PASS", f"BUY evidence grounding {vote.grounding:.2f} < {min_ratio}"
+        elif not any(tools.grounded(e) for e in vote.evidence):
+            vote.vote, vote.guard = "PASS", "BUY evidence cites nothing from tool results"
     return vote
 
 
@@ -126,26 +141,30 @@ def _append_user_text(messages: list[dict], text: str) -> None:
         lastmsg["content"].append({"type": "text", "text": text})
 
 
-async def _run_tool(fn: ToolFn | None, name: str, args: dict) -> tuple[str, bool]:
+async def _run_tool(fn: ToolFn | None, name: str, args: dict) -> tuple[str, bool, bool]:
+    """(result text, hard error, soft error). A soft error is a result that came back but
+    reports a problem (e.g. {"error": "X API disabled"}): it is shown to the model as data, but
+    it does not count as a successful lookup for the grounding guard."""
     if fn is None:
-        return f"unknown tool {name}", True
+        return f"unknown tool {name}", True, True
     try:
         res = await asyncio.wait_for(fn(args), timeout=45)
+        soft = isinstance(res, dict) and bool(res.get("error"))
         text = json.dumps(res, default=str, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
             text = text[:MAX_TOOL_RESULT_CHARS] + "...[truncated]"
-        return text, False
+        return text, False, soft
     except asyncio.TimeoutError:
-        return f"{name} timed out", True
+        return f"{name} timed out", True, True
     except Exception as e:
-        return f"{name} failed: {type(e).__name__}: {e}"[:500], True
+        return f"{name} failed: {type(e).__name__}: {e}"[:500], True, True
 
 
 async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSpec, context: str,
                     budget: Budget, subject_ids: set[str] | None = None) -> Vote:
     vt = vote_tool(spec.with_size)
-    corpus = Corpus(subject_ids)
-    corpus.add(context)
+    ctx_corpus, tool_corpus = Corpus(subject_ids), Corpus(subject_ids)
+    ctx_corpus.add(context)
     tool_calls_ok = 0
     tools = [*spec.tools, vt]
     system = [{"type": "text", "text": spec.system, "cache_control": {"type": "ephemeral"}}]
@@ -157,8 +176,9 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
             last = turn == s.LLM_MAX_TURNS - 1
             if last and turn > 0:
                 _append_user_text(messages, "Final turn: call submit_vote now with what you have.")
+            reserve = worst_case_call_usd(s, system, tools, messages)
             try:
-                await budget.reserve(CALL_RESERVE_USD)
+                await budget.reserve(reserve)
             except BudgetExceeded as e:
                 return Vote(spec.name, cost_usd=total_cost, turns=turns, error=f"llm budget: {e}")
             cost = 0.0
@@ -175,30 +195,37 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                                     getattr(u, "cache_read_input_tokens", 0) or 0,
                                     s.LLM_PRICE_IN_PER_MTOK, s.LLM_PRICE_OUT_PER_MTOK)
             finally:
-                await budget.settle(CALL_RESERVE_USD, cost, f"{spec.name} turn {turn}")
+                await budget.settle(reserve, cost, f"{spec.name} turn {turn}")
             total_cost += cost
             turns += 1
             if resp.stop_reason == "refusal":
                 return Vote(spec.name, cost_usd=total_cost, turns=turns, error="model refusal")
+            if resp.stop_reason == "max_tokens":
+                # a cut-off turn can carry a truncated (but schema-valid looking) submit_vote:
+                # drop the whole turn and ask again, briefly
+                _append_user_text(messages, "Your last reply was cut off by the length limit. Be brief: "
+                                            "either one tool call or submit_vote with short items.")
+                continue
             messages.append({"role": "assistant", "content": resp.content})
             uses = [b for b in resp.content if b.type == "tool_use"]
             for b in uses:
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)
                     vote.cost_usd, vote.turns = total_cost, turns
-                    return apply_grounding_guard(vote, corpus, tool_calls_ok, s.AGENT_MIN_GROUNDING)
+                    return apply_grounding_guard(vote, ctx_corpus, tool_corpus, tool_calls_ok,
+                                                 s.AGENT_MIN_GROUNDING)
             if not uses:
                 messages.append({"role": "user", "content": "Call submit_vote to give your decision."})
                 continue
             results = await asyncio.gather(*[_run_tool(spec.impl.get(b.name), b.name, dict(b.input or {}))
                                              for b in uses])
-            for text, err in results:
+            for text, err, soft in results:
                 if not err:
-                    tool_calls_ok += 1
-                    corpus.add(text)
+                    tool_corpus.add(text)
+                    tool_calls_ok += 0 if soft else 1
             messages.append({"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": b.id, "content": text, **({"is_error": True} if err else {})}
-                for b, (text, err) in zip(uses, results)
+                for b, (text, err, _soft) in zip(uses, results)
             ]})
         return Vote(spec.name, cost_usd=total_cost, turns=turns, error="no vote after max turns")
     except ValueError as e:

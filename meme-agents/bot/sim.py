@@ -231,7 +231,7 @@ class FakeHelius:
 
 
 class FakeX:
-    async def search(self, query, max_results=10):
+    async def search(self, query, max_results=10, since_ts=None):
         return {"posts": [{"post_id": str(i), "author": f"a{i}", "text": f"{query} looks fun {i}",
                            "created_at": "2026-01-01T00:00:00Z", "metrics": {}} for i in range(5)]}
 

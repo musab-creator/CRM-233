@@ -130,9 +130,14 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
 
     cmd = a.cmd or "run"
+    from .config import ConfigError
     from .sim import SIM_OVERRIDES
     sim = cmd == "simulate" or getattr(a, "sim", False)
-    s = load_settings(overrides=SIM_OVERRIDES if sim else None)
+    try:
+        s = load_settings(overrides=SIM_OVERRIDES if sim else None)
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
     # only long-running commands write the log file
     setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE) if s.LOG_FILE and cmd in ("run", "simulate") else None)
     if cmd == "run":

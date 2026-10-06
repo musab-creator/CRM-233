@@ -202,6 +202,23 @@ With `LIVE_DRY_RUN=true` (the default in this build), each transaction is simula
 Helius (`simulateTransaction`) instead of being sent. Every signature, dry-run or sent, goes
 into the `live_tx` table. The private key is never logged.
 
+Boolean settings are parsed strictly. Only `true/false/1/0/yes/no/on/off` are accepted, and
+anything else stops the bot at startup. A typo such as `LIVE_DRY_RUN=ture` can therefore never
+turn on real sends.
+
+If you ever set `LIVE_DRY_RUN=false`, sending is built not to trust a model of what happened:
+- **Fills are reconciled against the wallet.** After each send the bot waits for the
+  signature to confirm (`LIVE_CONFIRM_TIMEOUT_S`). It then records the tokens and SOL that
+  actually moved, read from wallet balances before and after the trade.
+- **Sells are a percentage of what the wallet holds**: `"100%"` on a full exit, `"50%"` on
+  take-profit. A position can't get stuck because the real fill differed from the model.
+- **Retries check before selling again.** If the wallet already shows that an earlier
+  attempt landed, that attempt is recorded as the fill instead of selling twice.
+- **Failed exits back off** at 5 s, 10 s, 20 s and so on, up to 5 minutes, and keep retrying.
+  After 3 failures a Telegram alert asks you to check the wallet.
+- **Live trades run in the background**, one at a time per position. Waiting for a
+  confirmation never stalls the trade stream or the other positions.
+
 ## Data
 
 Everything is in `data/bot.db` (SQLite, WAL mode):

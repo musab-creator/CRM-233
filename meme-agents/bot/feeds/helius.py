@@ -37,7 +37,33 @@ class Helius:
 
     async def balance_sol(self, pubkey: str) -> float:
         res = await self.rpc("getBalance", [pubkey, {"commitment": "confirmed"}])
-        return (res or {}).get("value", 0) / LAMPORTS
+        if not isinstance(res, dict) or not isinstance(res.get("value"), int):
+            # fail closed: the live guard must never read a missing balance as 0 SOL
+            raise RpcError(f"getBalance: unexpected result {str(res)[:100]}")
+        return res["value"] / LAMPORTS
+
+    async def token_balance(self, owner: str, mint: str) -> tuple[int, float]:
+        """(raw units, UI units) of `mint` held by `owner`, summed over its token accounts."""
+        res = await self.rpc("getTokenAccountsByOwner",
+                             [owner, {"mint": mint}, {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        if not isinstance(res, dict) or not isinstance(res.get("value"), list):
+            raise RpcError(f"getTokenAccountsByOwner: unexpected result {str(res)[:100]}")
+        raw, ui = 0, 0.0
+        for acc in res["value"]:
+            amt = acc["account"]["data"]["parsed"]["info"]["tokenAmount"]
+            raw += int(amt["amount"])
+            ui += float(amt.get("uiAmount") or 0)
+        return raw, ui
+
+    async def signature_status(self, sig: str) -> str:
+        """'ok' (confirmed without error), 'failed' (landed with an error) or 'pending' (not seen yet)."""
+        res = await self.rpc("getSignatureStatuses", [[sig], {"searchTransactionHistory": True}])
+        st = ((res or {}).get("value") or [None])[0]
+        if not st:
+            return "pending"
+        if st.get("err"):
+            return "failed"
+        return "ok" if st.get("confirmationStatus") in ("confirmed", "finalized") else "pending"
 
     async def holders(self, mint: str, exclude: set[str] | None = None) -> dict:
         """Top-20 token accounts resolved to owner wallets, with % of supply."""

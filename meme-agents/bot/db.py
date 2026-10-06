@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_liq_usd REAL, last_liq_usd REAL,
     proceeds_sol REAL DEFAULT 0, pnl_sol REAL, pnl_usd REAL,
     sol_usd_entry REAL, sol_usd_exit REAL, exit_reason TEXT,
-    pending_exit TEXT, pending_exit_fraction REAL, pending_exit_at REAL
+    pending_exit TEXT, pending_exit_fraction REAL, pending_exit_at REAL,
+    exit_attempts INTEGER DEFAULT 0, next_exit_at REAL
 );
 CREATE INDEX IF NOT EXISTS ix_pos_status ON positions(status, kind);
 
@@ -96,6 +97,9 @@ CREATE INDEX IF NOT EXISTS ix_ledger ON ledger(kind, day, month);
 CREATE TABLE IF NOT EXISTS x_posts (
     post_id TEXT PRIMARY KEY, source TEXT, author TEXT, text TEXT, created_at TEXT,
     metrics TEXT, fetched_at REAL
+);
+CREATE TABLE IF NOT EXISTS x_post_sources (
+    source TEXT, post_id TEXT, PRIMARY KEY (source, post_id)
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 
@@ -114,6 +118,8 @@ MIGRATIONS = [
     ("votes", "tool_calls_ok", "INTEGER"),
     ("votes", "guard", "TEXT"),
     ("positions", "pending_exit_fraction", "REAL"),
+    ("positions", "exit_attempts", "INTEGER DEFAULT 0"),
+    ("positions", "next_exit_at", "REAL"),
 ]
 
 MINT_COLS = (

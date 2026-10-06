@@ -40,7 +40,8 @@ def scout_spec(ctx: ToolContext) -> AgentSpec:
         q = str(a.get("query", "")).strip()[:400]
         if not q:
             return {"error": "empty query"}
-        res = await ctx.x.search(q, ctx.s.X_SEARCH_MAX_RESULTS)
+        # only posts since an hour before launch: older ones are about another token with this ticker
+        res = await ctx.x.search(q, ctx.s.X_SEARCH_MAX_RESULTS, since_ts=ctx.candidate.get("since_ts"))
         posts = res.get("posts") or []
         authors = {p.get("author") for p in posts}
         texts = [(p.get("text") or "").strip().lower() for p in posts]

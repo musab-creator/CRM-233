@@ -110,6 +110,9 @@ class Settings:
     EXIT_SLIPPAGE_PCT: float = 5.0
     ENTRY_FILL_TIMEOUT_S: float = 300.0
     EXIT_FILL_TIMEOUT_S: float = 120.0
+    EXIT_RETRY_BASE_S: float = 5.0
+    EXIT_RETRY_MAX_S: float = 300.0
+    LIVE_CONFIRM_TIMEOUT_S: float = 60.0
 
     # --- exits -----------------------------------------------------------------
     STOP_LOSS_PCT: float = 40.0
@@ -176,9 +179,23 @@ class Settings:
         return self.HELIUS_RPC_URL.format(key=self.HELIUS_API_KEY)
 
 
-def _coerce(raw: str, current):
+class ConfigError(ValueError):
+    pass
+
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _coerce(raw: str, current, name: str = ""):
     if isinstance(current, bool):
-        return raw.strip().lower() in ("1", "true", "yes", "on")
+        v = raw.strip().lower()
+        if v in _TRUE:
+            return True
+        if v in _FALSE:
+            return False
+        # a typo must never silently flip a safety flag (e.g. LIVE_DRY_RUN=ture -> sends real trades)
+        raise ConfigError(f"{name}={raw!r} is not a boolean; use true/false")
     if isinstance(current, int):
         return int(float(raw))
     if isinstance(current, float):
@@ -196,5 +213,10 @@ def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None
     s = Settings()
     for f in fields(s):
         if f.name in values and values[f.name] != "":
-            setattr(s, f.name, _coerce(values[f.name], getattr(s, f.name)))
+            try:
+                setattr(s, f.name, _coerce(values[f.name], getattr(s, f.name), f.name))
+            except ConfigError:
+                raise
+            except ValueError as e:
+                raise ConfigError(f"{f.name}={values[f.name]!r}: {e}") from None
     return s

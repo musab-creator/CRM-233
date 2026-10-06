@@ -58,6 +58,8 @@ class Position:
     pending_exit: str | None = None
     pending_exit_fraction: float | None = None
     pending_exit_at: float | None = None
+    exit_attempts: int = 0
+    next_exit_at: float | None = None   # backoff: no exit attempt before this time
 
     def row(self) -> dict:
         d = asdict(self)
@@ -102,6 +104,9 @@ class PositionManager:
         self.watch_account = watch_account
         self.positions: dict[int, Position] = {}
         self.lock = asyncio.Lock()
+        # live trades run off the tick path, one in flight per position
+        self._inflight: set[int] = set()
+        self._tasks: set[asyncio.Task] = set()
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._kill_handled = False
@@ -178,16 +183,64 @@ class PositionManager:
         log.info("%s entry queued #%d %s $%.2f (%.4f SOL)", kind, p.id, mint, size_usd, sol_in)
         return p
 
+    def _is_live(self, p: Position) -> bool:
+        return p.kind == "real" and getattr(self.executor, "mode", "paper") == "live"
+
+    def _spawn(self, p: Position, coro) -> None:
+        self._inflight.add(p.id)
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _cancel_entry(self, p: Position, reason: str, ts: float) -> None:
+        p.status, p.exit_reason, p.closed_at = "cancelled", reason[:200], ts
+        await self._save(p)
+        await self._release(p)
+
     async def _fill_entry(self, p: Position, price: float, ts: float) -> None:
+        """Caller holds the lock."""
+        if p.id in self._inflight:
+            return
+        if p.kind == "real":
+            # the world may have changed between the decision and this first trade
+            if kill_switch_active(self.s):
+                await self._cancel_entry(p, "kill switch before fill", ts)
+                return
+            if self.risk.paused_reason:
+                await self._cancel_entry(p, f"paused before fill: {self.risk.paused_reason}", ts)
+                return
+        if self._is_live(p):
+            self._spawn(p, self._live_entry(p, price))
+            return
         ex = self.executor if p.kind == "real" else self.shadow_exec
         try:
             f = await ex.buy(p.mint, p.sol_in, price)
         except Exception as e:
             log.error("entry failed #%s %s: %s", p.id, p.mint, e)
-            p.status, p.exit_reason, p.closed_at = "cancelled", f"entry_error: {e}"[:200], ts
-            await self._save(p)
-            await self._release(p)
+            await self._cancel_entry(p, f"entry_error: {e}", ts)
             return
+        await self._apply_entry(p, f, price, ts)
+
+    async def _live_entry(self, p: Position, price: float) -> None:
+        try:
+            try:
+                f = await self.executor.buy(p.mint, p.sol_in, price)
+            except Exception as e:
+                log.error("live entry failed #%s %s: %s", p.id, p.mint, e)
+                async with self.lock:
+                    await self._cancel_entry(p, f"entry_error: {e}", now_s())
+                if self.notify:
+                    await self.notify(f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}")
+                return
+            async with self.lock:
+                await self._apply_entry(p, f, price, now_s())
+        finally:
+            self._inflight.discard(p.id)
+
+    async def _apply_entry(self, p: Position, f: Fill, price: float, ts: float) -> None:
+        if p.status != "pending":
+            log.error("fill for #%s arrived in state %s; recording it anyway", p.id, p.status)
+            self.positions[p.id] = p
         p.status, p.opened_at = "open", ts
         p.entry_price = price
         p.peak_price = p.last_price = price
@@ -204,25 +257,68 @@ class PositionManager:
                 await self.notify(msg)
 
     # --- exits ---------------------------------------------------------------------
+    def _exit_allowed(self, p: Position, ts: float) -> bool:
+        return p.id not in self._inflight and (p.next_exit_at is None or ts >= p.next_exit_at)
+
     async def _exit(self, p: Position, fraction: float, price: float, ts: float, reason: str) -> None:
+        """Caller holds the lock."""
         tokens = p.tokens_remaining if fraction >= 0.999 else p.tokens_remaining * fraction
-        if tokens <= 0:
+        if tokens <= 0 or not self._exit_allowed(p, ts):
+            return
+        if self._is_live(p):
+            # record the intent first: if the process dies mid-trade the exit is retried on restart
+            if p.pending_exit != reason:
+                p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, ts
+                await self._save(p)
+            self._spawn(p, self._live_exit(p, fraction, tokens, price, reason))
             return
         ex = self.executor if p.kind == "real" else self.shadow_exec
         try:
-            f = await ex.sell(p.mint, tokens, price)
+            f = await ex.sell(p.mint, tokens, price, fraction)
         except Exception as e:
-            log.error("exit failed #%s %s (%s): %s; will retry", p.id, p.mint, reason, e)
-            p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, ts
-            await self._save(p)
+            await self._exit_failed(p, fraction, reason, e, ts)
             return
-        p.tokens_remaining -= tokens
+        await self._apply_exit(p, f, fraction, price, ts, reason)
+
+    async def _live_exit(self, p: Position, fraction: float, tokens: float, price: float, reason: str) -> None:
+        try:
+            try:
+                f = await self.executor.sell(p.mint, tokens, price, fraction)
+            except Exception as e:
+                async with self.lock:
+                    await self._exit_failed(p, fraction, reason, e, now_s())
+                return
+            async with self.lock:
+                await self._apply_exit(p, f, fraction, price, now_s(), reason)
+        finally:
+            self._inflight.discard(p.id)
+
+    async def _exit_failed(self, p: Position, fraction: float, reason: str, err: Exception, ts: float) -> None:
+        p.exit_attempts += 1
+        delay = min(self.s.EXIT_RETRY_MAX_S, self.s.EXIT_RETRY_BASE_S * 2 ** (p.exit_attempts - 1))
+        p.next_exit_at = ts + delay
+        p.pending_exit, p.pending_exit_fraction = reason, fraction
+        p.pending_exit_at = p.pending_exit_at or ts
+        await self._save(p)
+        log.error("exit failed #%s %s (%s), attempt %d: %s; retrying in %.0fs",
+                  p.id, p.mint, reason, p.exit_attempts, err, delay)
+        if p.kind == "real" and p.exit_attempts == 3 and self.notify:
+            await self.notify(f"EXIT FAILING #{p.id} {p.mint} ({reason}): {str(err)[:200]}\n"
+                              f"still retrying every <= {self.s.EXIT_RETRY_MAX_S:.0f}s; check the wallet")
+
+    async def _apply_exit(self, p: Position, f: Fill, fraction: float, price: float, ts: float,
+                          reason: str) -> None:
+        if p.status != "open":
+            return
+        full = fraction >= 0.999
+        p.tokens_remaining = 0.0 if full else max(0.0, p.tokens_remaining - f.tokens)
         p.proceeds_sol += f.sol
         if reason == "take_profit":
             p.tp_done = 1
         p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
+        p.exit_attempts, p.next_exit_at = 0, None
         await self._record_fill(p, f, reason, ts)
-        closed = p.tokens_remaining <= p.tokens_initial * 1e-9
+        closed = full or p.tokens_remaining <= p.tokens_initial * 1e-9
         if closed:
             p.tokens_remaining = 0.0
             p.status, p.closed_at, p.exit_reason = "closed", ts, reason
@@ -231,7 +327,7 @@ class PositionManager:
             p.pnl_usd = p.pnl_sol * (p.sol_usd_exit or 0)
         await self._save(p)
         if p.kind == "real":
-            txt = (f"EXIT [{p.mode}] {reason} {p.mint}\nsold {tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
+            txt = (f"EXIT [{p.mode}] {reason} {p.mint}\nsold {f.tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
                    + (f"\nclosed pnl {p.pnl_sol:+.4f} SOL (${p.pnl_usd:+.2f})" if closed else "")
                    + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(txt.replace("\n", " | "))
@@ -241,6 +337,11 @@ class PositionManager:
             await self._release(p)
             if p.kind == "real":
                 self.risk.register_realized(await self.realized_since(self.risk.loss_window_start(ts)))
+
+    async def drain(self, timeout: float = 90.0) -> None:
+        """Let in-flight live trades finish (on shutdown)."""
+        if self._tasks:
+            await asyncio.wait(set(self._tasks), timeout=timeout)
 
     async def _release(self, p: Position) -> None:
         still = [q for q in self.positions.values() if q.active and q.id != p.id]
@@ -281,6 +382,8 @@ class PositionManager:
             await self._exit(p, sig.fraction, price, ts, sig.reason)
 
     async def queue_exit(self, p: Position, reason: str, fraction: float = 1.0) -> None:
+        if p.id in self._inflight and p.status == "pending":
+            return  # a live buy is in flight: let it land, then the exit is queued on the open position
         if p.status == "pending":
             p.status, p.exit_reason, p.closed_at = "cancelled", reason, now_s()
             await self._save(p)
@@ -306,7 +409,8 @@ class PositionManager:
             else:
                 self._kill_handled = False
             for p in list(self.positions.values()):
-                if p.status == "pending" and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S:
+                if (p.status == "pending" and p.id not in self._inflight
+                        and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S):
                     p.status, p.exit_reason, p.closed_at = "cancelled", "no trade after decision", now
                     await self._save(p)
                     await self._release(p)
@@ -317,7 +421,11 @@ class PositionManager:
                     sig = check_exit(self._state(p), None, now, self.s)
                     if sig:
                         await self.queue_exit(p, sig.reason, sig.fraction)
-                if p.pending_exit and now - (p.pending_exit_at or now) > self.s.EXIT_FILL_TIMEOUT_S and p.last_price:
+                # a queued exit fills on the next tick; if the stream is quiet, at the last price.
+                # A failed exit retries here too, on its backoff schedule (see _exit_failed).
+                retry_due = p.exit_attempts > 0 and now >= (p.next_exit_at or 0)
+                waited = now - (p.pending_exit_at or now) > self.s.EXIT_FILL_TIMEOUT_S
+                if p.pending_exit and p.last_price and (retry_due or waited):
                     await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now, p.pending_exit)
         await self._poll_liquidity(now)
         await self._poll_rugcheck(now)

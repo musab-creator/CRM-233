@@ -90,4 +90,16 @@ class Rugcheck:
         report = await self.report(mint)
         out = normalise(summary, report, bonding_curve_key)
         self._cache[mint] = (time.time(), out)
+        self._prune()
         return out
+
+    def _prune(self, max_entries: int = 2000, max_age_s: float = 3600) -> None:
+        """Bound the cache in a long-running process: drop stale entries, then the oldest."""
+        if len(self._cache) <= max_entries:
+            return
+        cutoff = time.time() - max_age_s
+        for m in [m for m, (ts, _) in self._cache.items() if ts < cutoff]:
+            del self._cache[m]
+        if len(self._cache) > max_entries:
+            for m, _ in sorted(self._cache.items(), key=lambda kv: kv[1][0])[: len(self._cache) - max_entries]:
+                del self._cache[m]
