@@ -23,6 +23,8 @@ SIM_OVERRIDES = {
     "LOG_FILE": "logs/sim.log",
     "PF_MIN_AGE_MIN": "1", "PF_MAX_AGE_MIN": "30", "PF_MIN_UNIQUE_BUYERS": "15", "PF_MIN_NET_INFLOW_SOL": "3",
     "PF_MIN_LIQUIDITY_USD": "3000", "PF_SCAN_INTERVAL_S": "5", "TIME_STOP_HOURS": "0.25", "LIQ_POLL_S": "20",
+    "CURVE_FIRST_POLL_S": "20", "CURVE_POLL_SCALE": "0.25", "CURVE_POLL_CALLS_PER_MIN": "30", "CURVE_HOT_POLL_S": "5",
+    "HOLDERS_REFRESH_S": "30", "PUMPPORTAL_TRADE_STREAM": "off",
     "RUGCHECK_POLL_S": "60", "TELEGRAM_BOT_TOKEN": "", "ANTHROPIC_API_KEY": "", "X_BEARER_TOKEN": "",
     "HELIUS_API_KEY": "", "LIVE_CONFIRM": "", "WALLET_PRIVATE_KEY": "",
 }
@@ -49,6 +51,7 @@ class SimToken:
     v_tokens: float = 1_073_000_000.0
     holders: dict = field(default_factory=dict)
     dumped: bool = False
+    log: list = field(default_factory=list)   # every trade, for the fake chain's history reads
 
     def price(self) -> float:
         return self.v_sol / self.v_tokens
@@ -67,6 +70,15 @@ class SimFeed:
         self.account_keys: set[str] = set()
         self.reconnects = 0
         self.wallets = [addr(self.rng) for _ in range(600)]
+        self.t0 = time.time()
+
+    def slot(self, ts: float) -> int:
+        return 1000 + int((ts - self.t0) / 0.4)  # Solana: a slot every ~400 ms
+
+    def _record(self, t: SimToken, side: str, who: str, sol: float, tok: float, sig: str) -> None:
+        now = time.time()
+        t.log.append({"signature": sig, "slot": self.slot(now), "ts": now, "side": side, "trader": who,
+                      "sol": sol, "tokens": tok, "price_sol": sol / tok if tok else None})
 
     async def subscribe_tokens(self, mints):
         self.token_keys.update(mints)
@@ -89,7 +101,9 @@ class SimFeed:
         self.tokens[t.mint] = t
         initial = r.uniform(0.5, 2.0)
         out = self._buy(t, t.creator, initial)
-        return {"signature": addr(r), "mint": t.mint, "traderPublicKey": t.creator, "txType": "create",
+        sig = addr(r)
+        self._record(t, "buy", t.creator, initial, out, sig)
+        return {"signature": sig, "mint": t.mint, "traderPublicKey": t.creator, "txType": "create",
                 "initialBuy": out, "solAmount": initial, "bondingCurveKey": t.curve,
                 "vTokensInBondingCurve": t.v_tokens, "vSolInBondingCurve": t.v_sol,
                 "marketCapSol": t.price() * 1e9, "name": t.name, "symbol": t.symbol, "uri": "", "pool": "pump"}
@@ -143,7 +157,9 @@ class SimFeed:
             side = "sell"
         if tok <= 0:
             return None
-        return {"signature": addr(r), "mint": t.mint, "traderPublicKey": who, "txType": side,
+        sig = addr(r)
+        self._record(t, side, who, sol, tok, sig)
+        return {"signature": sig, "mint": t.mint, "traderPublicKey": who, "txType": side,
                 "tokenAmount": tok, "solAmount": sol, "newTokenBalance": t.holders.get(who, 0),
                 "bondingCurveKey": t.curve, "vTokensInBondingCurve": t.v_tokens, "vSolInBondingCurve": t.v_sol,
                 "marketCapSol": t.price() * 1e9, "pool": "pump"}
@@ -161,10 +177,10 @@ class SimFeed:
                     self.tokens.pop(t.mint)
                     continue
                 rate = {"pump": 1.2, "rug": 1.0, "rug_fast": 1.1, "dud": 0.15}[t.fate] * (1.0 if age_min < 15 else 0.4)
-                if self.rng.random() < rate * 0.25 and t.mint in self.token_keys:
-                    msg = self._trade(t)
-                    if msg:
-                        await self.on_message(msg)
+                if self.rng.random() < rate * 0.25:
+                    msg = self._trade(t)  # the market moves for every token ...
+                    if msg and t.mint in self.token_keys:
+                        await self.on_message(msg)  # ... but only stream subscribers see the trades
             await asyncio.sleep(0.25)
 
 
@@ -220,6 +236,11 @@ class FakeRug:
 
 
 class FakeHelius:
+    key = "sim"
+
+    def __init__(self):
+        self.credits = 0
+
     async def balance_sol(self, pubkey):
         return 0.1
 
@@ -228,6 +249,48 @@ class FakeHelius:
 
     async def address_transactions(self, address, limit=20):
         return []
+
+
+class FakeChain:
+    """`feeds.pumpchain.HeliusChain` answered from the simulator's ledger, with the same
+    credit costs (1 per curve batch and transaction, 10 per holder page)."""
+
+    enabled = True
+
+    def __init__(self, feed: SimFeed, helius: FakeHelius):
+        self.feed = feed
+        self.h = helius
+
+    def _by_curve(self, key: str) -> SimToken | None:
+        return next((t for t in self.feed.tokens.values() if t.curve == key), None)
+
+    async def curves(self, keys):
+        from .feeds.pumpchain import Curve
+        self.h.credits += (len(keys) + 99) // 100
+        out = {}
+        for k in keys:
+            t = self._by_curve(k)
+            out[k] = None if t is None else Curve(v_tokens=t.v_tokens, v_sol=t.v_sol,
+                                                  real_tokens=max(0.0, t.v_tokens - 279_900_000.0),
+                                                  real_sol=max(0.0, t.v_sol - 30.0), supply=1e9, complete=False,
+                                                  creator=t.creator)
+        return out
+
+    async def holders(self, mint, curve_key, creator, max_pages=3):
+        from .feeds.pumpchain import holder_snapshot
+        self.h.credits += 10
+        t = self.feed.tokens.get(mint)
+        rows = [{"owner": w, "amount": int(v * 1e6)} for w, v in (t.holders.items() if t else [])]
+        return holder_snapshot(rows, curve_key, creator)
+
+    async def early_trades(self, mint, curve_key, window_s=60.0, max_tx=80, max_pages=10):
+        t = self.feed.tokens.get(mint)
+        if not t or not t.log:
+            return {"trades": [], "reached_launch": True, "transactions": 0}
+        t0 = t.log[0]["ts"]
+        pick = [x for x in t.log if x["ts"] - t0 <= window_s][:max_tx]
+        self.h.credits += 1 + len(pick)
+        return {"trades": [dict(x) for x in pick], "reached_launch": True, "transactions": len(pick)}
 
 
 class FakeX:
@@ -312,6 +375,7 @@ def build_sim_engine(settings, seed: int = 7, launch_every_s: float = 20.0):
     eng.dex = FakeDex(feed)
     eng.rug = FakeRug(feed)
     eng.helius = FakeHelius()
+    eng.chain = FakeChain(feed, eng.helius)
     eng.x = FakeX()
     eng.news = FakeNews()
     from .feeds.prices import SolPrice

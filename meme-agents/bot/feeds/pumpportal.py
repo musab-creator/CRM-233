@@ -1,9 +1,10 @@
 """PumpPortal data WebSocket: one connection, re-subscribed after every reconnect.
 
 Messages sent (per PumpPortal's data API):
-  {"method": "subscribeNewToken"}
-  {"method": "subscribeTokenTrade",   "keys": [mint, ...]}
-  {"method": "subscribeAccountTrade", "keys": [wallet, ...]}
+  {"method": "subscribeNewToken"}                         free: every launch
+  {"method": "subscribeMigration"}                        free: every graduation
+  {"method": "subscribeTokenTrade",   "keys": [mint, ...]}   paid since May 1, 2026: API key with a
+  {"method": "subscribeAccountTrade", "keys": [wallet, ...]} funded wallet, 0.01 SOL per 10,000 trades
   {"method": "unsubscribeTokenTrade", "keys": [...]}   (and unsubscribeAccountTrade)
 """
 from __future__ import annotations
@@ -77,6 +78,7 @@ class PumpPortalFeed:
 
     async def _resubscribe(self) -> None:
         await self._send({"method": "subscribeNewToken"})
+        await self._send({"method": "subscribeMigration"})
         await self._bulk("subscribeTokenTrade", sorted(self.token_keys))
         await self._bulk("subscribeAccountTrade", sorted(self.account_keys))
 

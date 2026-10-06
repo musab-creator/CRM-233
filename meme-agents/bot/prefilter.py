@@ -1,6 +1,8 @@
 """Deterministic pre-filter. No LLM.
 
-Stage 1 (free, from the stream): age, unique buyers, net SOL inflow.
+Stage 1 (free or nearly): age, unique buyers, net SOL inflow. Inflow is the bonding curve's
+real SOL reserve read from chain; buyers are wallets with a token account (a lower bound), or
+the exact set when the paid PumpPortal trade stream covered the token since launch.
 Stage 2 (one Rugcheck + one DexScreener call, only for stage-1 survivors):
   no danger-level risk, mint & freeze authority null, top-10 holders < 35% (ex pools),
   DexScreener pair exists with liquidity >= $8,000.
@@ -34,7 +36,10 @@ def stage1(st: MintState, now: float, s: Settings) -> PrefilterResult:
     age = st.age_min(now)
     m = {"age_min": round(age, 2), "unique_buyers": st.unique_buyers,
          "net_inflow_sol": round(st.net_inflow_sol, 3), "progress": round(st.progress, 4),
-         "trade_count": st.trade_count, "graduated": st.graduated}
+         "trade_count": st.trade_count, "graduated": st.graduated,
+         "inflow_source": "curve" if st.real_sol is not None else "stream",
+         "buyers_source": "stream" if st.streamed else "token accounts" if st.wallets_ex_dev is not None else "none yet",
+         "holders_now_ex_dev": st.holders_now}
     r: list[str] = []
     if age < s.PF_MIN_AGE_MIN:
         r.append(f"too young ({age:.1f}m < {s.PF_MIN_AGE_MIN}m)")
@@ -48,10 +53,12 @@ def stage1(st: MintState, now: float, s: Settings) -> PrefilterResult:
 
 
 def curve_liquidity_usd(st: MintState, sol_usd: float | None) -> float | None:
-    """AMM-equivalent depth of a bonding curve: 2 x real SOL reserve (virtual SOL minus the 30 SOL seed)."""
-    if st.graduated or st.v_sol is None or not sol_usd:
+    """AMM-equivalent depth of a bonding curve: 2 x real SOL reserve (read from chain, or
+    virtual SOL minus the 30 SOL seed)."""
+    if st.graduated or not sol_usd:
         return None
-    return max(0.0, st.v_sol - 30.0) * 2 * sol_usd
+    real = st.real_sol if st.real_sol is not None else (st.v_sol - 30.0 if st.v_sol is not None else None)
+    return None if real is None else max(0.0, real) * 2 * sol_usd
 
 
 def stage2(rug: dict | None, pair: dict | None, s: Settings, curve_liq_usd: float | None = None) -> PrefilterResult:

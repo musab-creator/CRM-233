@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS mints (
     graduated INTEGER DEFAULT 0,
     status TEXT DEFAULT 'tracking',
     status_reason TEXT,
-    updated_at REAL
+    updated_at REAL,
+    real_sol REAL, curve_at REAL, wallets_ex_dev INTEGER, holders_now INTEGER, holders_at REAL
 );
 CREATE INDEX IF NOT EXISTS ix_mints_status ON mints(status, first_trade_at);
 CREATE INDEX IF NOT EXISTS ix_mints_creator ON mints(creator);
@@ -120,6 +121,11 @@ MIGRATIONS = [
     ("positions", "pending_exit_fraction", "REAL"),
     ("positions", "exit_attempts", "INTEGER DEFAULT 0"),
     ("positions", "next_exit_at", "REAL"),
+    ("mints", "real_sol", "REAL"),
+    ("mints", "curve_at", "REAL"),
+    ("mints", "wallets_ex_dev", "INTEGER"),
+    ("mints", "holders_now", "INTEGER"),
+    ("mints", "holders_at", "REAL"),
 ]
 
 MINT_COLS = (
@@ -128,6 +134,7 @@ MINT_COLS = (
     "unique_buyers", "buy_sol", "sell_sol", "net_inflow_sol", "creator_sold_sol",
     "v_sol", "v_tokens", "progress", "market_cap_sol", "last_price_sol", "pool",
     "graduated", "status", "status_reason", "updated_at",
+    "real_sol", "curve_at", "wallets_ex_dev", "holders_now", "holders_at",
 )
 
 

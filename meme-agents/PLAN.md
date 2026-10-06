@@ -16,15 +16,19 @@ Added by me (each one is a config value unless it says otherwise):
 
 1. **The project lives in `meme-agents/`.** This repo already holds two Node apps, so the
    bot gets its own directory. Run `python -m bot` from `meme-agents/`.
-2. **Prices are in SOL per token** and come from each PumpPortal trade, as
-   `solAmount / tokenAmount`. USD figures use a SOL/USD price that is refreshed every
-   60 s from DexScreener's wrapped-SOL pairs. The $50 bankroll is converted to SOL at startup.
+2. **Prices are in SOL per token.** They come from the bonding curve's virtual reserves,
+   `virtual_sol / virtual_tokens`, read from chain (assumption 18). With the paid stream on,
+   they come from each trade's `solAmount / tokenAmount` instead. USD figures use a SOL/USD
+   price that is refreshed every 60 s from DexScreener's wrapped-SOL pairs. The $50 bankroll
+   is converted to SOL at startup.
 3. **Exit triggers use the raw observed trade price** compared with the raw entry fill price,
    before costs. With costs counted, a position starts about 9% down: 3% entry slippage,
    1.5% fees each way and 5% exit slippage. If triggers used net PnL, the -40% stop
    would really fire at about -34% of price. PnL in reports is net of every modeled cost.
 4. **Paper fills:**
-   - Entries fill at the first trade observed after the decision.
+   - Entries fill at the first trade observed after the decision. Without the paid stream,
+     that is the first curve read whose reserves moved, because a move means trades happened.
+     It fills at the price the curve shows then.
    - Exits triggered by a trade fill at that trade's price.
    - Exits not triggered by a trade (time stop, emergency, kill switch) fill at the next
      trade. If no trade arrives within `EXIT_FILL_TIMEOUT_S` (120 s), they fill at the
@@ -34,7 +38,9 @@ Added by me (each one is a config value unless it says otherwise):
    - Exit: proceeds = `tokens × price × 0.95 × (1 − 1.5%) − 0.005`.
 6. **Bonding progress** is `(1,073,000,000 − vTokensInBondingCurve) / 793,100,000`, clamped
    to the range 0 to 1. These are pump.fun's initial virtual token reserves and its sellable
-   real reserves. A trade whose `pool` is not `pump` marks the mint as graduated.
+   real reserves. A mint counts as graduated when any of these happens: its curve reads
+   `complete`, PumpPortal sends a free `migrate` event, or a streamed trade's `pool` is not
+   `pump`.
 7. **Top-10 holder share** leaves out the bonding-curve account and any AMM pool or LP vault
    that Rugcheck lists in `markets`. Otherwise the curve itself (often 70% or more) would fail
    every token.
@@ -46,12 +52,12 @@ Added by me (each one is a config value unless it says otherwise):
 9. **The daily loss cap** counts realized losses since the later of UTC midnight and process
    start, so a restart clears the pause, as the brief asks. The LLM and X budgets are stored
    in SQLite, so a restart does not reset them.
-10. **Trade subscriptions:** each new mint is subscribed to `subscribeTokenTrade` when its
-    create event arrives. The subscription is dropped at 90 min of age unless the mint is a
-    candidate, a shadow or a position. The total is capped by `MAX_TRACKED_MINTS` (3000).
-    Raw trades are pruned after `TRADE_RETENTION_HOURS` (48) unless they belong to a
-    candidate. `subscribeAccountTrade` watches the creator wallets of open and shadow
-    positions, so a dev dump is caught even after the mint's own window has passed.
+10. **Tracking:** every launch is tracked from its create event until 90 min of age, unless
+    it is a candidate, a shadow or a position. A launch is dropped earlier if it is 15 min old
+    with under 1 SOL of inflow. The total is capped by `MAX_TRACKED_MINTS` (3000). Raw trades
+    are pruned after `TRADE_RETENTION_HOURS` (48) unless they belong to a candidate. With the
+    paid stream on, `subscribeAccountTrade` also watches the creator wallets of open and
+    shadow positions.
 11. **Agents** use the Anthropic Messages API in a manual tool loop of at most 6 turns. Each
     agent finishes by calling a strict `submit_vote` tool whose schema is the required JSON.
     Missing or invalid output counts as `PASS` with confidence 0. Cost is computed from
@@ -71,10 +77,9 @@ Added by me (each one is a config value unless it says otherwise):
     percentages of actual holdings, and retries check whether an earlier attempt already landed.
 14. **The pump.fun fee is fixed at 1%** (`PUMPFUN_FEE_PCT`) as the brief says, even though
     pump.fun's live fee schedule and the PumpSwap fee after graduation differ. You can change it.
-15. **Graduated tokens:** PumpPortal streams PumpSwap trades (after graduation) only to
-    connections that use an API key. `PUMPPORTAL_API_KEY` is optional. If a position's stream
-    goes quiet for longer than `LIQ_POLL_S`, DexScreener's `priceNative` is used as the mark,
-    so stops and exits still fire.
+15. **Graduated tokens:** after graduation the price lives in the PumpSwap pool, not the
+    curve. If a position gets no tick for longer than `LIQ_POLL_S`, DexScreener's
+    `priceNative` is used as the mark, so stops and exits still fire.
 16. **DexScreener liquidity on the bonding curve is unverified.** I could not confirm, from
     this container, that DexScreener fills in `liquidity.usd` for pump.fun pairs that have not
     graduated. If it doesn't, those tokens are rejected with the reason
@@ -84,13 +89,41 @@ Added by me (each one is a config value unless it says otherwise):
 17. **No `.env` library:** `bot/config.py` parses `.env` itself, because the brief allows no
     extra framework.
 
+Added after the build, when research showed a change in PumpPortal's data API:
+
+18. **Per-token data comes from the chain, not PumpPortal's trade stream.** Since May 1, 2026,
+    PumpPortal streams `subscribeTokenTrade` and `subscribeAccountTrade` only to an API key
+    whose linked wallet holds at least 0.02 SOL. It charges 0.01 SOL per 10,000 trades.
+    pump.fun runs over a million trades a day, so following every launch, as the original
+    design did, would cost about 1 SOL a day against a $50 bankroll. Launches and graduations
+    are still free. The facts the pre-filter needs are read from chain through the Helius
+    free plan the brief already includes:
+    - **Net inflow** is the bonding curve's `real_sol_reserves`. Per pump.fun's program docs it
+      starts at 0 and moves by exactly the SOL of every buy and sell, and fees are paid
+      elsewhere. It is read with `getMultipleAccounts`, 100 curves for 1 credit.
+    - **Price and progress** come from the curve's virtual reserves.
+    - **Unique buyers** see assumption 19.
+    - **Flow features** for a candidate come from the launch minute's trades, rebuilt from its
+      first transactions by balance deltas (not by decoding pump.fun's events, whose layout
+      has changed before), plus current holder balances and the bot's own curve reads.
+    The paid stream remains as an option (`PUMPPORTAL_TRADE_STREAM=positions|all`) under a
+    daily SOL budget.
+19. **Unique buyers are wallets with a token account,** excluding the creator and the curve,
+    from Helius DAS `getTokenAccounts`, which includes emptied accounts. This is a lower bound
+    on distinct buyers: a wallet that sold out and closed its account is not counted. So the
+    40-buyer rule is, if anything, stricter than the brief's. A token passes only after a
+    fresh on-chain curve read; before it, the only inflow known is the dev's own launch buy.
+20. **Helius credits are budgeted** (`HELIUS_MONTHLY_CREDITS`, 1M on the free plan). Curve
+    reads are capped at `CURVE_POLL_CALLS_PER_MIN` (8) and slow to half speed if the month's
+    usage runs ahead of pace.
+
 ## File tree
 
 ```
 meme-agents/
   PLAN.md  README.md  .env.example  .gitignore  pyproject.toml  requirements.txt
   bot/
-    __main__.py      CLI: run | report | simulate | live-check
+    __main__.py      CLI: run | report | simulate | status | preflight | acceptance | live-check
     config.py        .env loader + typed Settings, every threshold
     db.py            aiosqlite schema + queries (WAL, batched writes)
     util.py          logging, token-bucket rate limiter, backoff
@@ -99,7 +132,8 @@ meme-agents/
       pumpportal.py  one WS, subscribe/unsubscribe, reconnect w/ backoff
       dexscreener.py tokens (30/call, 300 rpm), search, boosts (60 rpm)
       rugcheck.py    summary + full report, normalised
-      helius.py      RPC (10 rps) + Enhanced Tx (2 rps): holders, balance, simulate, send
+      helius.py      RPC (10 rps) + DAS/Enhanced (2 rps), credit metering: holders, balance, simulate, send
+      pumpchain.py   bonding-curve decode, trades rebuilt from transactions, holder snapshots
       xapi.py        recent search, user timeline; budget + post-id cache
       news.py        CryptoPanic + RSS (incl. Truth Social mirror)
       prices.py      SOL/USD
@@ -118,12 +152,19 @@ meme-agents/
       guard.py       startup refusal checks
       executor.py    PumpPortal trade-local / Jupiter v2, sign, simulate
     report.py        metrics + reports/daily-YYYY-MM-DD.md
+    status.py        live status and the health check for cron
+    preflight.py     API/key checks and the live-data probe
+    acceptance.py    the brief's "Done when" test, automated
     telegram.py      optional alerts
     engine.py        wires everything together
     sim.py           offline synthetic feed for smoke runs (no network, no keys)
   tests/  test_prefilter.py test_consensus.py test_paper.py test_exits.py
           test_live_guard.py test_ingest.py test_budget.py test_agents.py
+  deploy/ install.sh  meme-agents.service  healthcheck.sh
+  KEYS.md            where to get each API key, where to store it
+.github/workflows/meme-agents-live.yml   paper run on a GitHub runner (probe / 60-min acceptance)
 ```
+(The test file names above were the plan; the suite has since grown, see `tests/`.)
 
 ## Build order
 

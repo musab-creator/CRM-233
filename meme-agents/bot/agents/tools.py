@@ -9,7 +9,6 @@ from ..config import Settings
 from ..db import Database
 from ..feeds.dexscreener import summarize_pair
 from ..feeds.rugcheck import pool_accounts
-from ..features import flow_features
 from .base import AgentSpec
 from .prompts import ROLE_PROMPTS
 
@@ -32,6 +31,7 @@ class ToolContext:
     x: Any
     news: Any
     candidate: dict  # mint, creator, bonding_curve_key, ...
+    flow: Any = None  # async (mint) -> flow features (Engine.compute_flow)
 
 
 # --- Scout ----------------------------------------------------------------------------
@@ -164,12 +164,13 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
         sells = [r for r in rows if r["side"] == "sell"]
         sizes = [round(r["sol"], 3) for r in buys]
         repeated = max((sizes.count(x) for x in set(sizes)), default=0)
+        flow = await ctx.flow(mint) if ctx.flow and mint == cand["mint"] else {"error": "flow features are computed for the candidate only"}
         return {
             "mint": mint, "creator": creator,
-            "flow_features": flow_features(await ctx.db.all_trades(mint), creator, time.time()),
-            "totals": {k: m.get(k) for k in ("trade_count", "buy_count", "sell_count", "unique_buyers", "buy_sol",
-                                             "sell_sol", "net_inflow_sol", "creator_sold_sol", "progress",
-                                             "graduated", "pool", "market_cap_sol")},
+            "flow_features": flow,
+            "totals": {k: m.get(k) for k in ("trade_count", "unique_buyers", "net_inflow_sol", "real_sol",
+                                             "wallets_ex_dev", "holders_now", "progress", "graduated", "pool",
+                                             "market_cap_sol")},
             "window": {"trades": len(rows), "buys": len(buys), "sells": len(sells),
                        "buy_sol": round(sum(r["sol"] for r in buys), 3),
                        "sell_sol": round(sum(r["sol"] for r in sells), 3),
@@ -187,9 +188,10 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
               "the creator's holdings and recent wallet activity.", MINT_ARG),
         _tool("dexscreener_pair", "Best DexScreener pair: price, liquidity, FDV, volume and buys/sells per "
               "5m/1h/6h/24h.", MINT_ARG),
-        _tool("recent_trades", "Recent trades for the mint from the bot's own PumpPortal stream, with per-mint "
-              "totals, creator flags and freshly computed flow_features (snipers, bundles, early-buyer "
-              "retention, dev selling, concentration, 5-minute momentum).",
+        _tool("recent_trades", "Trades the bot knows for the mint (the launch minute, rebuilt from chain; every "
+              "trade if the paid PumpPortal stream is on), per-mint totals, creator flags and freshly computed "
+              "flow_features (snipers, bundles, early-buyer retention, dev selling, holder concentration, "
+              "5-minute momentum).",
               {**MINT_ARG, "limit": {"type": "integer", "description": "10-200, default 80"}}),
     ]
     return AgentSpec("analyst", ROLE_PROMPTS["analyst"], tools,

@@ -124,6 +124,24 @@ class Settings:
     LIQ_POLL_S: float = 60.0
     RUGCHECK_POLL_S: float = 300.0
 
+    # --- data sources -----------------------------------------------------------
+    # PumpPortal streams per-token trades only to funded API keys since May 2026, at 0.01 SOL
+    # per 10,000 trades. off: read the chain through Helius instead (free plan, default).
+    # positions: also stream trades for candidates and open positions. all: stream every launch.
+    PUMPPORTAL_TRADE_STREAM: str = "off"
+    PUMPPORTAL_DAILY_BUDGET_SOL: float = 0.01
+    PUMPPORTAL_SOL_PER_TRADE: float = 0.000001
+    HELIUS_MONTHLY_CREDITS: int = 1_000_000
+    CURVE_POLL_CALLS_PER_MIN: float = 8.0     # getMultipleAccounts calls (100 curves, 1 credit each)
+    CURVE_HOT_POLL_S: float = 15.0            # candidates, open positions and shadows
+    CURVE_FIRST_POLL_S: float = 60.0          # first read of a launch (most are dead within a minute)
+    CURVE_POLL_SCALE: float = 1.0             # multiplies the 20/45/120/240 s read cadence of launches
+    CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
+    CURVE_DROP_BELOW_SOL: float = 1.0         # ... that has taken in less than this
+    HOLDERS_REFRESH_S: float = 300.0          # DAS holder count (10 credits) at most this often per mint
+    BACKFILL_WINDOW_S: float = 60.0           # rebuild a candidate's trades from its first minute ...
+    BACKFILL_MAX_TX: int = 80                 # ... reading at most this many transactions (1 credit each)
+
     # --- ingest ----------------------------------------------------------------
     MAX_TRACKED_MINTS: int = 3000
     TRADE_RETENTION_HOURS: float = 48.0
@@ -183,6 +201,9 @@ class ConfigError(ValueError):
     pass
 
 
+STREAM_MODES = ("off", "positions", "all")
+
+
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
 
@@ -219,4 +240,7 @@ def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None
                 raise
             except ValueError as e:
                 raise ConfigError(f"{f.name}={values[f.name]!r}: {e}") from None
+    s.PUMPPORTAL_TRADE_STREAM = s.PUMPPORTAL_TRADE_STREAM.strip().lower()
+    if s.PUMPPORTAL_TRADE_STREAM not in STREAM_MODES:
+        raise ConfigError(f"PUMPPORTAL_TRADE_STREAM={s.PUMPPORTAL_TRADE_STREAM!r}: use one of {', '.join(STREAM_MODES)}")
     return s

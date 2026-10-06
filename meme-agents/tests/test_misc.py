@@ -70,6 +70,16 @@ def test_env_example_parses_cleanly():
     assert s.PF_MIN_UNIQUE_BUYERS == 40 and s.LLM_MODEL == "claude-sonnet-4-6"
 
 
+def test_env_example_lists_every_setting():
+    from dataclasses import fields
+    from pathlib import Path
+
+    from bot.config import Settings
+    env = load_dotenv(Path(__file__).resolve().parent.parent / ".env.example")
+    names = {f.name for f in fields(Settings)}
+    assert names - set(env) == set() and set(env) - names == set()
+
+
 def test_rss_parse():
     xml = ("<rss><channel><item><title>Elon posts dog</title><link>https://x/1</link>"
            "<pubDate>Tue, 06 Oct 2026 03:00:00 GMT</pubDate></item></channel></rss>")

@@ -57,16 +57,20 @@ hold? Does the creator wallet show serial launches?
 - Flow: buy/sell ratio and SOL volume in recent trades, and whether the buyers are many small \
 wallets or a few large ones. Repeated same-size buys suggest bundling or bots.
 - Bonding-curve progress and graduation status, DexScreener liquidity depth versus FDV.
-The candidate context includes `flow`, deterministic features computed from every trade the \
-bot has seen for this mint (`recent_trades` recomputes them). Rough guides, not hard rules:
-- `sniper_top3_share` above 0.3 means three wallets bought a large slice in the first minute. \
+The candidate context includes `flow`, deterministic features (`recent_trades` recomputes \
+them). With `source` "chain" they come from the launch minute's trades rebuilt from chain, what \
+every wallet holds now, and the bot's bonding-curve reads; otherwise from every streamed trade. \
+A null value means the bot lacks that data; never guess it. Rough guides, not hard rules:
+- Snipers: `sniper_top3_share` (streamed) above 0.3, or `sniper_top3_sol` above about a third \
+of `net_inflow_sol` (chain), means three wallets bought a large slice in the first minute. \
 It is worse if `snipers_still_holding` shows they are still in, because they can dump on you.
-- `bundle_like_buy_share` above 0.2, or `max_same_size_cluster_wallets` of 5 or more, \
-suggests one actor split buys across wallets.
+- Bundling: `same_slot_as_launch_buyers` of 3 or more, `bundle_like_buy_share` or \
+`bundle_like_share_of_launch_minute` above 0.2, or `max_same_size_cluster_wallets` of 5 or \
+more suggests one actor split buys across wallets.
 - An `early_buyer_retention` below 0.4 means most early buyers already exited.
 - If `dev_sold_pct_of_bought` is above 50, the dev is cashing out.
-- `effective_buyers` below 10 means buying is concentrated, even if there are many \
-distinct buyers.
+- `effective_buyers` or `effective_holders` below 10 means ownership is concentrated, even \
+if there are many wallets.
 - Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum. A large \
 `drawdown_from_peak_pct` means the move may be over.
 Also propose `size_usd` between 5 and 10: 5 by default, more only for unusually clean \

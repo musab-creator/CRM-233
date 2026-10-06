@@ -1,12 +1,20 @@
-"""Turns the PumpPortal stream into per-mint aggregates and a tick stream.
+"""Per-mint state from three inputs, and the tick stream that drives fills and exits.
 
-Every create/buy/sell is written to `trades`; per-mint aggregates live in memory (the hot
-path) and are flushed to `mints` once a second. Unique buyers exclude the creator wallet.
+* PumpPortal `create` and `migrate` events (free): every launch, and every graduation.
+* Bonding-curve reads from the chain (`apply_curve`): net inflow, price, progress. A curve
+  that moved since the last read means trades happened, so it emits a tick.
+* Holder snapshots (`apply_holders`): wallets that bought, from the mint's token accounts.
+* Optionally, PumpPortal's paid per-token trade stream (`_on_trade`). Mints streamed since
+  launch (`streamed`) get exact buyer sets and full trade history.
+
+Trades are written to `trades`. Aggregates live in memory (the hot path) and are flushed to
+`mints` once a second. Buyer counts exclude the creator wallet.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -18,7 +26,9 @@ log = logging.getLogger("bot.ingest")
 
 # pump.fun bonding curve constants (UI units, 6 decimals already applied by PumpPortal)
 INITIAL_VIRTUAL_TOKENS = 1_073_000_000.0
+INITIAL_VIRTUAL_SOL = 30.0
 SELLABLE_TOKENS = 793_100_000.0
+SUPPLY = 1_000_000_000.0
 
 
 def bonding_progress(v_tokens: float | None) -> float:
@@ -68,14 +78,27 @@ class MintState:
     graduated: bool = False
     status: str = "tracking"
     status_reason: str = ""
+    # on-chain reads
+    real_sol: float | None = None       # curve real SOL reserves: the exact net inflow
+    curve_at: float = 0.0               # last curve read
+    next_poll_at: float = 0.0
+    wallets_ex_dev: int | None = None   # wallets with a token account (bought), excluding the dev
+    holders_now: int | None = None      # of those, still holding
+    holders_at: float = 0.0
+    streamed: bool = False              # every trade since launch came from the paid stream
+    snapshots: deque = field(default_factory=lambda: deque(maxlen=240), repr=False)  # (ts, price, real_sol)
 
     @property
     def net_inflow_sol(self) -> float:
+        """The curve's real SOL reserve when it has been read; else the sum of streamed trades."""
+        if self.real_sol is not None:
+            return self.real_sol
         return self.buy_sol - self.sell_sol
 
     @property
     def unique_buyers(self) -> int:
-        return len(self.buyers)
+        """Streamed buyers, or wallets seen on chain if more (a lower bound: closed accounts vanish)."""
+        return max(len(self.buyers), self.wallets_ex_dev or 0)
 
     def age_min(self, now: float) -> float:
         return (now - self.first_trade_at) / 60 if self.first_trade_at else 0.0
@@ -93,6 +116,8 @@ class MintState:
             "market_cap_sol": self.market_cap_sol, "last_price_sol": self.last_price_sol,
             "pool": self.pool, "graduated": int(self.graduated), "status": self.status,
             "status_reason": self.status_reason, "updated_at": now_s(),
+            "real_sol": self.real_sol, "curve_at": self.curve_at or None, "wallets_ex_dev": self.wallets_ex_dev,
+            "holders_now": self.holders_now, "holders_at": self.holders_at or None,
         }
 
 
@@ -110,7 +135,8 @@ class Ingestor:
         self.tick_handlers: list[TickHandler] = []
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
-        self.stats = {"creates": 0, "trades": 0}
+        self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
+        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "migrations": 0}
 
     # --- message handling -----------------------------------------------------
     async def handle(self, msg: dict, ts: float | None = None) -> None:
@@ -122,7 +148,10 @@ class Ingestor:
         if tx == "create":
             await self._on_create(msg, ts)
         elif tx in ("buy", "sell"):
+            self.stats["stream_trades"] += 1
             await self._on_trade(msg, ts)
+        elif tx == "migrate":
+            self._on_migrate(msg)
 
     async def _on_create(self, msg: dict, ts: float) -> None:
         mint = msg["mint"]
@@ -133,14 +162,24 @@ class Ingestor:
         st.creator = msg.get("traderPublicKey") or ""
         st.bonding_curve_key = msg.get("bondingCurveKey") or ""
         st.created_at = ts
+        st.next_poll_at = ts + self.s.CURVE_FIRST_POLL_S
         self.mints[mint] = st
         self.stats["creates"] += 1
         # The create carries the dev's initial buy: it is the first bonding-curve trade.
         sol = float(msg.get("solAmount") or 0)
         self._apply(st, "buy", st.creator, sol, float(msg.get("initialBuy") or 0), msg, ts)
         await self._evict_if_full()
-        if self.subscribe:
+        if self.stream_new_tokens and self.subscribe:
+            st.streamed = True
             await self.subscribe([mint])
+
+    def _on_migrate(self, msg: dict) -> None:
+        st = self.mints.get(msg["mint"])
+        self.stats["migrations"] += 1
+        if st:
+            st.graduated, st.progress = True, 1.0
+            st.pool = msg.get("pool") or "pump-amm"
+            self._dirty.add(st.mint)
 
     async def _on_trade(self, msg: dict, ts: float) -> None:
         mint = msg["mint"]
@@ -158,11 +197,60 @@ class Ingestor:
         self._apply(st, side, msg.get("traderPublicKey") or "", float(msg.get("solAmount") or 0),
                     float(msg.get("tokenAmount") or 0), msg, ts)
         if st.last_price_sol:
-            for h in self.tick_handlers:
-                try:
-                    await h(mint, st.last_price_sol, ts, msg)
-                except Exception:  # a broken handler must not stop ingestion
-                    log.exception("tick handler failed for %s", mint)
+            await self._tick(mint, st.last_price_sol, ts, msg)
+
+    async def _tick(self, mint: str, price: float, ts: float, msg: dict) -> None:
+        for h in self.tick_handlers:
+            try:
+                await h(mint, price, ts, msg)
+            except Exception:  # a broken handler must not stop ingestion
+                log.exception("tick handler failed for %s", mint)
+
+    # --- on-chain reads ---------------------------------------------------------
+    async def apply_curve(self, mint: str, c, ts: float) -> bool:
+        """Apply a bonding-curve read (`feeds.pumpchain.Curve`).
+
+        Returns True if the curve moved since the previous read. A move means trades happened,
+        so it emits a tick at the new price, which is what paper fills and exits act on.
+        """
+        st = self.mints.get(mint)
+        if st is None:
+            return False
+        self.stats["curve_reads"] += 1
+        first = not st.curve_at
+        st.curve_at = ts
+        if c.complete:
+            # graduated: the curve is emptied into the AMM pool, so keep the inflow it reached
+            st.graduated, st.progress = True, 1.0
+            st.real_sol = max(st.real_sol or 0.0, c.real_sol, c.v_sol - INITIAL_VIRTUAL_SOL)
+            self._dirty.add(mint)
+            return False
+        moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
+        st.real_sol = c.real_sol
+        st.v_sol, st.v_tokens = c.v_sol, c.v_tokens
+        st.progress = bonding_progress(c.v_tokens)
+        price = c.price_sol
+        if price:
+            st.last_price_sol = price
+            st.market_cap_sol = price * SUPPLY
+            st.snapshots.append((ts, price, c.real_sol))
+        if moved:
+            st.last_trade_at = ts
+        self._dirty.add(mint)
+        if moved and price:
+            await self._tick(mint, price, ts, {"txType": "curve", "pool": "pump", "vSolInBondingCurve": c.v_sol,
+                                               "vTokensInBondingCurve": c.v_tokens})
+        return moved
+
+    def apply_holders(self, mint: str, snap: dict, ts: float) -> None:
+        """Apply a holder snapshot (`feeds.pumpchain.holder_snapshot`)."""
+        st = self.mints.get(mint)
+        if st is None:
+            return
+        st.wallets_ex_dev = snap.get("wallets_ex_dev")
+        st.holders_now = snap.get("holders_ex_dev")
+        st.holders_at = ts
+        self._dirty.add(mint)
 
     def _apply(self, st: MintState, side: str, trader: str, sol: float, tokens: float, msg: dict, ts: float):
         if not st.first_trade_at:
@@ -227,6 +315,11 @@ class Ingestor:
         old = [m.mint for m in self.mints.values()
                if m.mint not in self.pinned and m.age_min(now) > self.s.PF_MAX_AGE_MIN]
         await self._drop(old, "aged_out")
+        # launches that never got going: stop reading their curves
+        dead = [m.mint for m in self.mints.values()
+                if m.mint not in self.pinned and m.status == "tracking" and m.real_sol is not None
+                and m.age_min(now) >= self.s.CURVE_DROP_AFTER_MIN and m.real_sol < self.s.CURVE_DROP_BELOW_SOL]
+        await self._drop(dead, "no traction")
         await self.db.prune_trades(now - self.s.TRADE_RETENTION_HOURS * 3600)
 
     async def flush(self) -> None:
@@ -259,7 +352,8 @@ class Ingestor:
             for k in ("name", "symbol", "uri", "creator", "bonding_curve_key", "created_at", "first_trade_at",
                       "last_trade_at", "trade_count", "buy_count", "sell_count", "buy_sol", "sell_sol",
                       "creator_sold_sol", "v_sol", "v_tokens", "progress", "market_cap_sol",
-                      "last_price_sol", "pool", "status", "status_reason"):
+                      "last_price_sol", "pool", "status", "status_reason", "real_sol", "curve_at",
+                      "wallets_ex_dev", "holders_now", "holders_at"):
                 if r.get(k) is not None:
                     setattr(st, k, r[k])
             st.graduated = bool(r.get("graduated"))

@@ -1,4 +1,9 @@
-"""Helius RPC (free plan: 10 req/s) and Enhanced Transactions API (2 req/s)."""
+"""Helius RPC (free plan: 10 req/s) and DAS / Enhanced Transactions API (2 req/s).
+
+Credits (helius.dev/docs/billing/credits): an RPC call costs 1, getProgramAccounts 10, a DAS
+call 10 and an Enhanced Transactions call 100. The free plan has 1M a month. `credits` counts
+what this client spent so the engine can record and pace it.
+"""
 from __future__ import annotations
 
 import itertools
@@ -25,15 +30,24 @@ class Helius:
         self.rpc_lim = RateLimiter(rpc_rps, burst=rpc_rps)
         self.enh_lim = RateLimiter(enhanced_rps, burst=1)
         self._ids = itertools.count(1)
+        self.credits = 0
 
-    async def rpc(self, method: str, params: list) -> dict | list | int | None:
+    async def _call(self, method: str, params, limiter: RateLimiter, credits: int):
         body = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params}
-        data = await request_json(self.c, "POST", self.rpc_url, json=body, limiter=self.rpc_lim)
+        self.credits += credits
+        data = await request_json(self.c, "POST", self.rpc_url, json=body, limiter=limiter)
         if data is None:
             raise RpcError(f"{method}: empty response")
         if data.get("error"):
             raise RpcError(f"{method}: {data['error']}")
         return data.get("result")
+
+    async def rpc(self, method: str, params: list) -> dict | list | int | None:
+        return await self._call(method, params, self.rpc_lim, 10 if method == "getProgramAccounts" else 1)
+
+    async def das(self, method: str, params: dict) -> dict | list | None:
+        """Digital Asset Standard methods (getTokenAccounts, getAsset, ...): 10 credits, 2 req/s."""
+        return await self._call(method, params, self.enh_lim, 10)
 
     async def balance_sol(self, pubkey: str) -> float:
         res = await self.rpc("getBalance", [pubkey, {"commitment": "confirmed"}])
@@ -100,6 +114,7 @@ class Helius:
     async def address_transactions(self, address: str, limit: int = 20) -> list[dict]:
         """Enhanced (parsed) transactions for a wallet, newest first."""
         url = f"{self.api_url}/addresses/{address}/transactions"
+        self.credits += 100
         try:
             data = await request_json(self.c, "GET", url, params={"api-key": self.key, "limit": limit},
                                       limiter=self.enh_lim)
