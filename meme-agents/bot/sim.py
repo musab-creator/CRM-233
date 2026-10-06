@@ -344,6 +344,12 @@ class FakeLLM:
     async def create(self, *, model, max_tokens, system, tools, messages, **kw):
         self.calls += 1
         await asyncio.sleep(0.05)
+        usage0 = SimpleNamespace(input_tokens=900, output_tokens=60, cache_creation_input_tokens=0,
+                                 cache_read_input_tokens=0)
+        if any(t["name"] == "submit_regime" for t in tools):
+            block = SimpleNamespace(type="tool_use", id=f"tu_{self.calls}", name="submit_regime",
+                                    input={"mode": "normal", "size_multiplier": 1.0, "reasons": ["sim: no stress"]})
+            return SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage0)
         first = messages[0]["content"]
         data = json.loads(first.split("\n", 1)[1])
         mint = data["mint"]

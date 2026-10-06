@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import deque
 
 log = logging.getLogger("bot.prices")
+
+HISTORY_S = 24 * 3600
 
 MAX_JUMP = 0.20     # a reading this far from the last accepted one ...
 CONFIRM_READS = 3   # ... is accepted only after this many such readings in a row
@@ -24,20 +28,43 @@ class SolPrice:
         self.max_jump, self.confirm_reads = max_jump, confirm_reads
         self.value: float | None = None
         self.outliers: list[float] = []  # consecutive readings held back so far
+        self.history: deque[tuple[float, float]] = deque()  # (ts, accepted value), last 24 h
 
     def get(self) -> float | None:
         return self.value
 
-    def accept(self, v: float) -> bool:
+    def _set(self, v: float, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self.value, self.outliers = v, []
+        self.history.append((now, v))
+        while self.history and self.history[0][0] < now - HISTORY_S:
+            self.history.popleft()
+
+    def at(self, ts: float) -> float | None:
+        """The accepted price in force at `ts` (the last reading at or before it), or None."""
+        best = None
+        for t, v in self.history:
+            if t <= ts:
+                best = v
+            else:
+                break
+        return best
+
+    def change_pct(self, seconds_ago: float, now: float | None = None) -> float | None:
+        now = time.time() if now is None else now
+        then = self.at(now - seconds_ago)
+        return round((self.value / then - 1) * 100, 2) if then and self.value else None
+
+    def accept(self, v: float, now: float | None = None) -> bool:
         """Apply one reading. False means it was held back as an outlier."""
         v = float(v)
         if self.value is None or abs(v / self.value - 1) <= self.max_jump:
-            self.value, self.outliers = v, []
+            self._set(v, now)
             return True
         self.outliers.append(v)
         if len(self.outliers) >= self.confirm_reads:  # it keeps coming back: the market really moved
             log.warning("SOL/USD moved from %.2f to %.2f over %d readings: accepted", self.value, v, len(self.outliers))
-            self.value, self.outliers = v, []
+            self._set(v, now)
             return True
         log.warning("SOL/USD reading %.2f is %+.0f%% from %.2f: ignored until it repeats (%d/%d)",
                     v, (v / self.value - 1) * 100, self.value, len(self.outliers), self.confirm_reads)

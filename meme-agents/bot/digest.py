@@ -2,6 +2,7 @@
 decisions and today's totals. Built from the database, so it matches `status` and `report`."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from .budget import utc_day, utc_month
@@ -73,6 +74,11 @@ async def hourly_digest(db: Database, s: Settings, since: float, until: float) -
     else:
         lines.append("open: none")
     lines.append(f"this hour: {cands['n']} candidates, {int(cands['buys'])} gate BUY")
+    hb_raw = await db.kv_get("heartbeat")
+    hb = json.loads(hb_raw) if hb_raw else {}
+    if hb.get("regime") and hb["regime"] != "normal":
+        lines.append(f"regime: {hb['regime']} x{hb.get('regime_multiplier', 0):g} · "
+                     + "; ".join(hb.get("regime_reasons") or [])[:160])
     lines.append(f"today: {today['n']} closed, {int(today['wins'])} wins, PnL {usd(float(today['pnl']))} · "
                  f"LLM ${llm:.2f}/{s.LLM_DAILY_BUDGET_USD:.0f} · X ${xs:.2f}/{s.X_MONTHLY_BUDGET_USD:.0f}")
     return "\n".join(lines), wins

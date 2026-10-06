@@ -175,6 +175,10 @@ class Settings:
     VETO_MIN_CONFIDENCE: float = 0.7          # a veto needs this confidence and grounded tool evidence
     FORENSICS_HOLDER_WALLETS: int = 8         # top holders whose funding the forensics agent traces (100 credits each)
     SOCIAL_MAX_AUTHORS: int = 10              # X author profiles the social agent may look up ($0.01 each)
+    REGIME_ENABLED: bool = True               # market regime agent: sizes entries down or pauses them (bot/regime.py)
+    REGIME_MODEL: str = "claude-haiku-4-5"
+    REGIME_REFRESH_MIN: float = 15.0          # how often the regime is re-assessed (one small call each time)
+    REGIME_MIN_MULTIPLIER: float = 0.25       # the smallest size multiplier the regime agent may set
 
     # --- X ---------------------------------------------------------------------
     X_MONTHLY_BUDGET_USD: float = 20.0

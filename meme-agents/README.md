@@ -157,6 +157,15 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    A veto counts only as a PASS with confidence at least `VETO_MIN_CONFIDENCE` (0.7), after a
    successful tool call, with evidence grounded in that agent's own tool results. Anything
    weaker is recorded and ignored. The gate reason then reads `veto from forensics: ...`.
+
+   **Market regime.** Every `REGIME_REFRESH_MIN` (15) minutes the bot builds a snapshot from
+   its own data (SOL change over 1 h and 6 h, launches and graduations per hour, candidates and
+   gate BUYs, the shadow book's last 6 hours, today's realised PnL) and the **Regime (الراصد)**
+   agent sets `normal`, `cautious` (entries scaled by 0.25 to 0.75) or `off` (no new entries
+   until the next check; exits keep running). A deterministic rule reads the same numbers and is
+   the fallback on any error, so a failing call never widens risk. Mode changes are logged,
+   stored as `events` and sent to Telegram; `status` and the hourly digest show a non-normal
+   regime. `REGIME_ENABLED=false` turns it off.
 5. **Paper executor.** The entry fills at the next observed trade after the decision: the
    first curve read whose reserves moved (that means trades happened), or the next streamed
    trade with the paid stream. Modeled costs are:

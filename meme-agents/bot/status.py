@@ -74,6 +74,9 @@ async def build_status(db: Database, s: Settings) -> str:
                      f"stalls {hb.get('stalls')}, candidate queue {hb.get('queue')}")
         if hb.get("paused"):
             lines.append(f"PAUSED: {hb['paused']}")
+        if hb.get("regime") and hb["regime"] != "normal":
+            lines.append(f"regime: {hb['regime']} x{hb.get('regime_multiplier', 0):g} ({hb.get('regime_source')}): "
+                         + "; ".join(hb.get("regime_reasons") or []))
     if kill_switch_active(s):
         lines.append(f"KILL SWITCH: {s.STOP_FILE} present, no new entries, positions closing")
 

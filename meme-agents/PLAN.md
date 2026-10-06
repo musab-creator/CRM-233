@@ -155,6 +155,12 @@ Added after the build, when research showed a change in PumpPortal's data API:
     grounded in that agent's tool results; otherwise it is stored and ignored, so a hallucinated
     veto cannot silently stop all trading. The brief's gate still decides every BUY; the veto
     stage only removes some of them.
+27. **The regime agent only shrinks or blocks entries.** It sees the market, not tokens: SOL
+    trend from the bot's own accepted price history, launch and graduation counts from `mints`,
+    the shadow book's recent outcomes and the day's realised PnL. `cautious` multiplies the
+    gate's size (never below `POSITION_MIN_USD`); `off` skips the entry and records a
+    `regime_off` event, the way the STOP file does. The rule in `rule_regime` gives the same three
+    answers deterministically and takes over whenever the model call fails.
 
 ## File tree
 
@@ -190,6 +196,7 @@ meme-agents/
       social.py      X author statistics (pure functions)
       tools.py       tool implementations per agent
     consensus.py     unanimous BUY + mean confidence >= 0.65, then the veto stage
+    regime.py        market regime agent: snapshot, deterministic rule, sizing multiplier
     live/
       guard.py       startup refusal checks
       executor.py    PumpPortal trade-local / Jupiter v2, sign, simulate

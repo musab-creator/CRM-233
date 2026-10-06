@@ -111,10 +111,11 @@ def test_engine_stops_evaluating_when_the_llm_budget_cannot_cover_an_evaluation(
         db = await Database(s.DB_PATH).open()
         out = (await db.fetchall("SELECT status, gate_reason FROM candidates"),
                (await db.fetchone("SELECT COUNT(*) c FROM votes"))["c"],
-               (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm'"))["s"])
+               (await db.fetchone("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' "
+                                  "AND detail != 'regime'"))["s"])
         await db.close()
         return out
     cands, n_votes, spent = asyncio.run(read())
     assert cands and all(c["status"] == "skipped_budget" for c in cands)
-    assert n_votes == 0 and spent == 0
+    assert n_votes == 0 and spent == 0  # only the 15-minute regime check may spend (a fraction of a cent)
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

@@ -38,6 +38,7 @@ from .live.guard import check_live_startup
 from .paper import PaperExecutor
 from .positions import PositionManager
 from .prefilter import curve_liquidity_usd, full_check, stage1
+from .regime import Regime, apply_regime_size, market_snapshot, run_regime
 from .report import write_daily
 from .risk import RiskManager, kill_switch_active
 from .telegram import Telegram
@@ -113,6 +114,8 @@ class Engine:
         self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
         self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
+        self.regime = Regime()                   # market regime: sizes entries down or pauses them
+        self._regime_at: float | None = None
         self.stop = asyncio.Event()
 
     # --- setup ---------------------------------------------------------------------
@@ -525,13 +528,20 @@ class Engine:
         if result.decision == "BUY":
             if kill_switch_active(self.s):
                 log.warning("gate said BUY for %s but STOP file is present; no entry", mint)
+            elif self.regime.mode == "off":
+                log.warning("gate said BUY for %s but the market regime is off (%s); no entry", mint,
+                            "; ".join(self.regime.reasons)[:200])
+                await self.db.event("regime_off", {"mint": mint, "candidate_id": cid, "reasons": self.regime.reasons},
+                                    now_s())
             else:
-                pos = await self.positions.create(mint, cid, "real", ctx_data.get("creator") or "",
-                                                  result.size_usd, liq)
+                size = apply_regime_size(result.size_usd, self.regime, self.s)
+                pos = await self.positions.create(mint, cid, "real", ctx_data.get("creator") or "", size, liq)
                 if pos and self.tg.enabled:
+                    scaled = (f" (regime {self.regime.mode} x{self.regime.multiplier:g}, from ${result.size_usd:.2f})"
+                              if size != result.size_usd else "")
                     await self.tg.send(
                         f"GATE BUY {ctx_data.get('symbol')} {mint}\nmean conf {result.mean_confidence:.2f}, "
-                        f"size ${result.size_usd:.2f}\n" + "\n".join(
+                        f"size ${size:.2f}{scaled}\n" + "\n".join(
                             f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
                             for v in [*votes, *vetoes]))
         await self._finish_mint(mint, "evaluated")
@@ -602,7 +612,9 @@ class Engine:
             "reconnects": getattr(self.feed, "reconnects", 0), "stalls": getattr(self.feed, "stalls", 0),
             "last_msg_at": getattr(self.feed, "last_msg_at", None), "queue": self.queue.qsize(),
             "cycles": self.cycles, "triage_skips": self.triage_skips, "crashes": sum(self.crashes.values()),
-            "paused": self.risk.paused_reason}))
+            "paused": self.risk.paused_reason, "regime": self.regime.mode, "regime_multiplier": self.regime.multiplier,
+            "regime_reasons": self.regime.reasons[:3], "regime_source": self.regime.source}))
+        await self._refresh_regime()
         await self._hourly_digest()
         if utc_day() != day:
             text, path = await write_daily(self.db, self.s, day)
@@ -610,6 +622,39 @@ class Engine:
             await self.tg.send(f"Daily summary {day}\n" + text[:3500])
             day = utc_day()
         return day
+
+    async def _refresh_regime(self) -> None:
+        """Every REGIME_REFRESH_MIN: rebuild the market snapshot and ask the regime agent (or the
+        rule, without a model). A change of mode is logged, recorded and sent to Telegram."""
+        if not self.s.REGIME_ENABLED:
+            return
+        now = now_s()
+        if self._regime_at is not None and now - self._regime_at < self.s.REGIME_REFRESH_MIN * 60:
+            return
+        self._regime_at = now
+        try:
+            snap = await market_snapshot(self.db, self.ingest.stats, self.sol_price, now,
+                                         len(self.positions.active("real")) if self.positions else 0,
+                                         self.risk.paused_reason)
+            new = await run_regime(self.llm, self.s, snap, self.llm_budget, now)
+        except Exception:
+            log.exception("regime assessment failed; keeping %s", self.regime.mode)
+            return
+        old = self.regime
+        self.regime = new
+        changed = (old.mode, old.multiplier) != (new.mode, new.multiplier)
+        keep = ("sol_usd", "sol_change_1h_pct", "launches_1h", "candidates_1h", "shadow_6h")
+        await self.db.event("regime", {**new.as_dict(), "changed": changed,
+                                       "snapshot": {k: snap.get(k) for k in keep}}, now)
+        if new.error:
+            log.warning("regime agent error (%s); using the rule: %s x%g", new.error, new.mode, new.multiplier)
+        if changed:
+            log.warning("REGIME %s -> %s x%g (%s): %s", old.mode, new.mode, new.multiplier, new.source,
+                        "; ".join(new.reasons)[:300])
+            if self.tg.enabled and (old.at is not None or new.mode != "normal"):
+                what = {"normal": "normal: full-size entries", "cautious": f"cautious: entries x{new.multiplier:g}",
+                        "off": "off: no new entries until the next check"}[new.mode]
+                await self.tg.send(f"REGIME {what}\n" + "\n".join(f"- {r}" for r in new.reasons[:3]))
 
     async def _hourly_digest(self) -> None:
         """At the top of each UTC hour, send the previous hour's trades to Telegram
