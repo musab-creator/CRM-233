@@ -93,6 +93,10 @@ def test_chain_features_never_guess_missing_data():
     # an incomplete holder snapshot cannot say a missing wallet sold out
     f = chain_features(early, True, {"by_owner": {}, "complete": False, "creator_tokens": 0.0}, DEV, [], 3, 400, 100)
     assert f["early_buyer_retention"] is None and f["dev_sold_pct_of_bought"] == 100.0
+    # percentages use the token's own supply (Mayhem Mode tokens have 2B)
+    h = {"by_owner": {DEV: 2e7}, "complete": True, "creator_tokens": 2e7}
+    assert chain_features(early, True, h, DEV, [], 3, 400, 100)["dev_holding_pct_supply"] == 2.0
+    assert chain_features(early, True, h, DEV, [], 3, 400, 100, supply=2e9)["dev_holding_pct_supply"] == 1.0
 
 
 def test_apply_curve_ticks_only_when_the_curve_moved(s):
@@ -126,6 +130,14 @@ def test_apply_curve_ticks_only_when_the_curve_moved(s):
         # PumpPortal also announces other launchpads' tokens: they are not pump.fun curves
         await ing.handle({"txType": "create", "mint": "B" * 44, "pool": "bonk", "bondingCurveKey": "X"}, ts=1300)
         assert "B" * 44 not in ing.mints and ing.stats["other_launchpads"] == 1
+        # ... and creates without a bonding curve (seen live) are not curve launches either
+        await ing.handle({"txType": "create", "mint": "C" * 44, "pool": "pump"}, ts=1300)
+        assert "C" * 44 not in ing.mints and ing.stats["other_launchpads"] == 2
+        await ing.handle({"txType": "create", "mint": "D" * 44, "pool": "pump", "bondingCurveKey": "K",
+                          "is_mayhem_mode": True, "solAmount": 0, "initialBuy": 0}, ts=1300)
+        assert ing.mints["D" * 44].mayhem
+        await ing.apply_curve("D" * 44, Curve(1.0e9, 32.19, 7.2e8, 2.19, 2e9, False), 1310)
+        assert ing.mints["D" * 44].supply == 2e9 and ing.mints["D" * 44].row()["mayhem"] == 1
         await db.close()
     asyncio.run(go())
 

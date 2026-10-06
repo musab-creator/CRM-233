@@ -209,7 +209,10 @@ async def capture_stream(url: str, seconds: float, trade_subs: int = 20) -> dict
 
 
 def summarize_stream(cap: dict) -> dict:
-    creates, trades = cap["creates"], cap["trades"]
+    trades = cap["trades"]
+    all_creates = cap["creates"]
+    # the bot tracks pump.fun bonding-curve launches only: check the fields on those
+    creates = [c for c in all_creates if (c.get("pool") or "pump") == "pump" and c.get("bondingCurveKey")]
     n = len(creates)
     create_keys = Counter(k for c in creates for k in c if not k.startswith("_"))
     products = sorted(float(c["vSolInBondingCurve"]) * float(c["vTokensInBondingCurve"]) / K for c in creates
@@ -217,10 +220,14 @@ def summarize_stream(cap: dict) -> dict:
     n_trades = sum(len(v) for v in trades.values())
     return {
         "launches": n,
+        "creates_skipped_not_pumpfun_curve": len(all_creates) - n,
+        "sample_skipped_create": next(({k: v for k, v in c.items() if k not in ("uri", "_seen")}
+                                       for c in all_creates if c not in creates), None),
+        "mayhem_launches": sum(1 for c in creates if c.get("is_mayhem_mode")),
         "launches_per_min": round(n / (cap["seconds"] / 60), 1) if cap["seconds"] else None,
         "create_fields_missing": [k for k in CREATE_FIELDS if create_keys[k] < n] if n else CREATE_FIELDS,
         "create_fields_seen": sorted(create_keys),
-        "create_pools": dict(Counter(c.get("pool") for c in creates)),
+        "create_pools": dict(Counter(c.get("pool") for c in all_creates)),
         "create_reserves_product_vs_k_median": round(products[len(products) // 2], 4) if products else None,
         "migrations": len(cap.get("migrations") or []),
         "sample_migration": (cap.get("migrations") or [None])[0],
@@ -437,7 +444,9 @@ def render(checks: list[Check], probe_out: dict | None) -> str:
                   f"stream: {st['launches']} launches ({st['launches_per_min']}/min), {st['migrations']} migrations, "
                   f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches",
                   f"missing create fields: {st['create_fields_missing'] or 'none'}; create pools: {st['create_pools']}",
-                  f"create fields: {st['create_fields_seen']}",
+                  f"create fields: {st['create_fields_seen']}; skipped creates: "
+                  f"{st['creates_skipped_not_pumpfun_curve']}, e.g. {json.dumps(st['sample_skipped_create'], default=str)}; "
+                  f"mayhem launches: {st['mayhem_launches']}",
                   f"sample migration: {json.dumps(st['sample_migration'], default=str)}",
                   f"notices: {sorted(set(json.dumps(n, default=str) for n in st['notices'])) or 'none'}"]
         for key in ("dexscreener_fresh_launches", "dexscreener_boosted_pump_tokens", "fresh_launches_without_pumpfun_pair",

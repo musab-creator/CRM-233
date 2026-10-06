@@ -86,6 +86,8 @@ class MintState:
     holders_now: int | None = None      # of those, still holding
     holders_at: float = 0.0
     streamed: bool = False              # every trade since launch came from the paid stream
+    mayhem: bool = False                # pump.fun Mayhem Mode: an AI agent trades it for 24 h
+    supply: float | None = None         # token_total_supply from the curve (Mayhem mints extra)
     snapshots: deque = field(default_factory=lambda: deque(maxlen=240), repr=False)  # (ts, price, real_sol)
 
     @property
@@ -117,7 +119,7 @@ class MintState:
             "pool": self.pool, "graduated": int(self.graduated), "status": self.status,
             "status_reason": self.status_reason, "updated_at": now_s(),
             "real_sol": self.real_sol, "curve_at": self.curve_at or None, "wallets_ex_dev": self.wallets_ex_dev,
-            "holders_now": self.holders_now, "holders_at": self.holders_at or None,
+            "holders_now": self.holders_now, "holders_at": self.holders_at or None, "mayhem": int(self.mayhem),
         }
 
 
@@ -155,8 +157,10 @@ class Ingestor:
             self._on_migrate(msg)
 
     async def _on_create(self, msg: dict, ts: float) -> None:
-        if (msg.get("pool") or "pump") != "pump":
-            self.stats["other_launchpads"] += 1  # not a pump.fun bonding curve: outside the universe
+        if (msg.get("pool") or "pump") != "pump" or not msg.get("bondingCurveKey"):
+            # PumpPortal also announces other launchpads' tokens ("bonk"), and the live probe saw
+            # creates without a curve key: neither is a pump.fun bonding-curve launch
+            self.stats["other_launchpads"] += 1
             return
         mint = msg["mint"]
         st = self.mints.get(mint) or MintState(mint=mint)
@@ -165,6 +169,7 @@ class Ingestor:
         st.uri = msg.get("uri") or ""
         st.creator = msg.get("traderPublicKey") or ""
         st.bonding_curve_key = msg.get("bondingCurveKey") or ""
+        st.mayhem = bool(msg.get("is_mayhem_mode"))
         st.created_at = ts
         st.next_poll_at = ts + self.s.CURVE_FIRST_POLL_S
         self.mints[mint] = st
@@ -232,11 +237,12 @@ class Ingestor:
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
         st.v_sol, st.v_tokens = c.v_sol, c.v_tokens
+        st.supply = c.supply or st.supply
         st.progress = bonding_progress(c.v_tokens)
         price = c.price_sol
         if price:
             st.last_price_sol = price
-            st.market_cap_sol = price * SUPPLY
+            st.market_cap_sol = price * (st.supply or SUPPLY)
             st.snapshots.append((ts, price, c.real_sol))
         if moved:
             st.last_trade_at = ts
@@ -361,6 +367,7 @@ class Ingestor:
                 if r.get(k) is not None:
                     setattr(st, k, r[k])
             st.graduated = bool(r.get("graduated"))
+            st.mayhem = bool(r.get("mayhem"))
             buyers = await self.db.fetchall(
                 "SELECT DISTINCT trader FROM trades WHERE mint=? AND side='buy' AND trader!=?",
                 [st.mint, st.creator or ""])

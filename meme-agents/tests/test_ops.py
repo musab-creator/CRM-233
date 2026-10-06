@@ -177,7 +177,10 @@ def test_probe_summaries():
     assert st["create_reserves_product_vs_k_median"] == 1.0
     assert st["trades_received"] == 0 and st["notices"][0]["message"].startswith("trade data")
     st = summarize_stream({**cap, "creates": [{"mint": "X"}]})
-    assert "bondingCurveKey" in st["create_fields_missing"]
+    assert "bondingCurveKey" in st["create_fields_missing"] and st["creates_skipped_not_pumpfun_curve"] == 1
+    st = summarize_stream({**cap, "creates": [create, {"mint": "Y", "pool": "bonk", "txType": "create"}]})
+    assert st["create_fields_missing"] == [] and st["create_pools"] == {None: 1, "bonk": 1}
+    assert st["sample_skipped_create"]["pool"] == "bonk"
     pairs = summarize_pairs({"A": {"dexId": "pumpfun", "liquidity": {"usd": 9000.4}, "txns": {"m5": {"buys": 3}}},
                              "B": {"dexId": "pumpfun"}, "C": None})
     assert pairs["pumpfun"]["pairs"] == 2 and pairs["pumpfun"]["liquidity_present"] == 1

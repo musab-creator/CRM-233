@@ -148,7 +148,8 @@ def _at_or_before(snaps: list[tuple[float, float, float]], ts: float) -> tuple[f
 
 def chain_features(early: list[dict], reached_launch: bool, holders: dict | None, creator: str | None,
                    snapshots: list[tuple[float, float, float]], net_inflow_sol: float | None, now: float,
-                   launched_at: float | None, early_buyers_n: int = 20, bundle_gap_s: float = 3.0) -> dict:
+                   launched_at: float | None, early_buyers_n: int = 20, bundle_gap_s: float = 3.0,
+                   supply: float | None = None) -> dict:
     """Flow features without the paid trade stream.
 
     `early`: the launch minute's trades rebuilt from chain (`reached_launch` False if the token
@@ -157,6 +158,7 @@ def chain_features(early: list[dict], reached_launch: bool, holders: dict | None
     oldest first. Values that need data the bot does not have are None, never guessed.
     """
     early = [t for t in early if t.get("ts") is not None]  # a transaction without blockTime can't be placed
+    supply = supply or SUPPLY  # Mayhem Mode tokens mint extra supply for pump.fun's trading agent
     by_owner = (holders or {}).get("by_owner") or {}
     holders_complete = bool((holders or {}).get("complete"))
 
@@ -208,7 +210,7 @@ def chain_features(early: list[dict], reached_launch: bool, holders: dict | None
     dev_bought = sum(t["tokens"] or 0 for t in early if t["side"] == "buy" and t["trader"] == creator)
     dev_now = (holders or {}).get("creator_tokens")
     out["dev_bought_tokens_at_launch"] = _r(dev_bought, 0)
-    out["dev_holding_pct_supply"] = _r(100 * dev_now / SUPPLY, 3) if dev_now is not None else None
+    out["dev_holding_pct_supply"] = _r(100 * dev_now / supply, 3) if dev_now is not None else None
     out["dev_sold_pct_of_bought"] = (_r(100 * max(0.0, 1 - dev_now / dev_bought), 2)
                                      if dev_now is not None and dev_bought else None)
 
@@ -223,7 +225,7 @@ def chain_features(early: list[dict], reached_launch: bool, holders: dict | None
     out["holder_hhi"] = _r(hhi) if shares else None
     out["top5_holder_share"] = _r(sum(shares[:5])) if shares else None
     all_held = sorted((a for a in by_owner.values() if a > 0), reverse=True)
-    out["top10_pct_supply_ex_curve"] = _r(100 * sum(all_held[:10]) / SUPPLY, 2) if all_held else None
+    out["top10_pct_supply_ex_curve"] = _r(100 * sum(all_held[:10]) / supply, 2) if all_held else None
 
     # momentum from the bot's own curve reads
     snaps = sorted(snapshots)

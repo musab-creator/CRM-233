@@ -73,6 +73,9 @@ more suggests one actor split buys across wallets.
 if there are many wallets.
 - Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum. A large \
 `drawdown_from_peak_pct` means the move may be over.
+- `mayhem_mode` true means the creator opted into pump.fun's Mayhem Mode: pump.fun's own AI \
+agent holds extra minted supply and trades the token for its first 24 hours, so early volume, \
+inflow and holder counts are partly that agent, not organic demand.
 Also propose `size_usd` between 5 and 10: 5 by default, more only for unusually clean \
 structure and deep liquidity.
 """

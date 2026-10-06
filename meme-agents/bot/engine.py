@@ -340,7 +340,8 @@ class Engine:
             err = (err + "; " if err else "") + f"holders: {e}"
         out = chain_features(early["trades"], early["reached_launch"], holders, creator,
                              list(st.snapshots) if st else [], st.net_inflow_sol if st else None, now,
-                             (st.first_trade_at if st else None) or m.get("first_trade_at"))
+                             (st.first_trade_at if st else None) or m.get("first_trade_at"),
+                             supply=st.supply if st else None)
         if err:
             out["error"] = str(err)[:300]
         return out
@@ -374,7 +375,8 @@ class Engine:
             st.status = "candidate"
             context = {"mint": st.mint, "name": st.name, "symbol": st.symbol, "uri": st.uri,
                        "creator": st.creator, "bonding_curve_key": st.bonding_curve_key,
-                       "prefilter": res.metrics, "rugcheck": res.rug, "pair": summarize_pair(res.pair)}
+                       "mayhem_mode": st.mayhem, "prefilter": res.metrics, "rugcheck": res.rug,
+                       "pair": summarize_pair(res.pair)}
             cid = await self.db.insert("candidates", {"mint": st.mint, "ts": now, "metrics": context,
                                                       "status": "pending"})
             self._pin(st.mint, True)
