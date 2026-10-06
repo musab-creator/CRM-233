@@ -1,5 +1,6 @@
 .env
 data/
+logs/
 reports/
 STOP
 STOP_SIM

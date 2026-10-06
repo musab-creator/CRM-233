@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Awaitable, Callable
 
 import websockets
@@ -23,10 +24,16 @@ CHUNK = 200  # keys per subscribe message
 
 
 class PumpPortalFeed:
-    def __init__(self, url: str, on_message: Callable[[dict], Awaitable[None]], max_backoff: float = 60.0):
+    def __init__(self, url: str, on_message: Callable[[dict], Awaitable[None]], max_backoff: float = 60.0,
+                 stall_s: float = 90.0):
         self.url = url
         self.on_message = on_message
         self.max_backoff = max_backoff
+        # pump.fun launches arrive every few seconds; this much silence means a dead stream
+        # even if the socket still answers pings
+        self.stall_s = stall_s
+        self.stalls = 0
+        self.last_msg_at = 0.0
         self.token_keys: set[str] = set()
         self.account_keys: set[str] = set()
         self._ws = None
@@ -85,9 +92,19 @@ class PumpPortalFeed:
                     log.info("pumpportal connected (%d tokens, %d accounts)",
                              len(self.token_keys), len(self.account_keys))
                     attempt = 0
-                    async for raw in ws:
-                        if stop.is_set():
-                            break
+                    last = time.monotonic()
+                    while not stop.is_set():
+                        try:
+                            # cancelling recv() is safe in websockets >= 13: no message is lost
+                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            if time.monotonic() - last > self.stall_s:
+                                self.stalls += 1
+                                log.warning("pumpportal: no data for %.0fs, forcing reconnect", self.stall_s)
+                                break
+                            continue
+                        last = time.monotonic()
+                        self.last_msg_at = time.time()
                         try:
                             msg = json.loads(raw)
                         except json.JSONDecodeError:

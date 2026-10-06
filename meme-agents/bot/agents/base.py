@@ -17,6 +17,7 @@ import anthropic
 
 from ..budget import Budget, BudgetExceeded, llm_cost_usd
 from ..config import Settings
+from .grounding import Corpus, grounding_ratio
 
 log = logging.getLogger("bot.agents")
 
@@ -38,6 +39,10 @@ class Vote:
     cost_usd: float = 0.0
     turns: int = 0
     error: str | None = None
+    raw_vote: str | None = None      # what the agent submitted, before the grounding guard
+    grounding: float | None = None   # share of evidence items found in data the agent saw
+    tool_calls_ok: int = 0
+    guard: str | None = None         # why a BUY was downgraded to PASS
 
     def as_json(self) -> dict:
         d = {"vote": self.vote, "confidence": self.confidence, "reasons": self.reasons, "evidence": self.evidence}
@@ -88,6 +93,19 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
     return Vote(agent, v, float(c), [r[:400] for r in reasons][:10], [e[:400] for e in evidence][:15], size)
 
 
+def apply_grounding_guard(vote: Vote, corpus: Corpus, tool_calls_ok: int, min_ratio: float) -> Vote:
+    """A BUY must rest on data the agent actually looked at; otherwise it becomes PASS."""
+    vote.raw_vote = vote.vote
+    vote.tool_calls_ok = tool_calls_ok
+    vote.grounding = round(grounding_ratio(vote.evidence, corpus), 3)
+    if vote.vote == "BUY":
+        if tool_calls_ok < 1:
+            vote.vote, vote.guard = "PASS", "BUY without any successful tool call"
+        elif vote.grounding < min_ratio:
+            vote.vote, vote.guard = "PASS", f"BUY evidence grounding {vote.grounding:.2f} < {min_ratio}"
+    return vote
+
+
 @dataclass
 class AgentSpec:
     name: str
@@ -124,8 +142,11 @@ async def _run_tool(fn: ToolFn | None, name: str, args: dict) -> tuple[str, bool
 
 
 async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSpec, context: str,
-                    budget: Budget) -> Vote:
+                    budget: Budget, subject_ids: set[str] | None = None) -> Vote:
     vt = vote_tool(spec.with_size)
+    corpus = Corpus(subject_ids)
+    corpus.add(context)
+    tool_calls_ok = 0
     tools = [*spec.tools, vt]
     system = [{"type": "text", "text": spec.system, "cache_control": {"type": "ephemeral"}}]
     messages: list[dict] = [{"role": "user", "content": context}]
@@ -165,12 +186,16 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)
                     vote.cost_usd, vote.turns = total_cost, turns
-                    return vote
+                    return apply_grounding_guard(vote, corpus, tool_calls_ok, s.AGENT_MIN_GROUNDING)
             if not uses:
                 messages.append({"role": "user", "content": "Call submit_vote to give your decision."})
                 continue
             results = await asyncio.gather(*[_run_tool(spec.impl.get(b.name), b.name, dict(b.input or {}))
                                              for b in uses])
+            for text, err in results:
+                if not err:
+                    tool_calls_ok += 1
+                    corpus.add(text)
             messages.append({"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": b.id, "content": text, **({"is_error": True} if err else {})}
                 for b, (text, err) in zip(uses, results)

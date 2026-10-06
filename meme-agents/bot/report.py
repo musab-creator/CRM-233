@@ -42,23 +42,32 @@ def trade_metrics(pnls_usd: list[float], pnls_sol: list[float], bankroll_usd: fl
 
 
 async def agent_accuracy(db: Database) -> dict:
-    """For each agent: how often its BUY vote preceded a winner (real outcome if traded, else shadow)."""
+    """Per agent: how often its BUY vote preceded a winner (real outcome if traded, else shadow),
+    how often PASS avoided a loser, the lift of its BUYs over the base win rate, and its Brier
+    score (P(win) = confidence for BUY, 1 - confidence for PASS; 0.25 = coin flip, lower = better)."""
     rows = await db.fetchall("""
-        SELECT v.agent, v.vote, v.error, v.candidate_id,
+        SELECT v.agent, v.vote, v.confidence, v.error, v.guard, v.candidate_id,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
                  AND p.status='closed' ORDER BY id LIMIT 1) AS real_pnl,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='shadow'
                  AND p.status='closed' ORDER BY id LIMIT 1) AS shadow_pnl
         FROM votes v""")
     out: dict[str, dict] = {}
+    outcomes: dict[int, bool] = {}
     for r in rows:
         a = out.setdefault(r["agent"], {"votes": 0, "buy_votes": 0, "buy_scored": 0, "buy_winners": 0,
-                                        "pass_scored": 0, "pass_losers": 0, "errors": 0})
+                                        "pass_scored": 0, "pass_losers": 0, "errors": 0, "guarded": 0,
+                                        "_brier": [], })
         a["votes"] += 1
+        a["guarded"] += int(bool(r.get("guard")))
         if r["error"]:
             a["errors"] += 1
             continue
         pnl = r["real_pnl"] if r["real_pnl"] is not None else r["shadow_pnl"]
+        if pnl is not None:
+            outcomes[r["candidate_id"]] = pnl > 0
+            p_win = r["confidence"] if r["vote"] == "BUY" else 1 - r["confidence"]
+            a["_brier"].append((p_win - (1.0 if pnl > 0 else 0.0)) ** 2)
         if r["vote"] == "BUY":
             a["buy_votes"] += 1
             if pnl is not None:
@@ -67,9 +76,76 @@ async def agent_accuracy(db: Database) -> dict:
         elif pnl is not None:
             a["pass_scored"] += 1
             a["pass_losers"] += int(pnl <= 0)
+    base = sum(outcomes.values()) / len(outcomes) if outcomes else None
     for a in out.values():
+        b = a.pop("_brier")
+        a["brier"] = sum(b) / len(b) if b else None
+        a["scored"] = len(b)
         a["buy_accuracy"] = a["buy_winners"] / a["buy_scored"] if a["buy_scored"] else None
         a["pass_accuracy"] = a["pass_losers"] / a["pass_scored"] if a["pass_scored"] else None
+        a["buy_lift"] = a["buy_accuracy"] / base if a["buy_accuracy"] is not None and base else None
+    return {"agents": out, "base_win_rate": base, "scored_candidates": len(outcomes)}
+
+
+async def _scored_candidates(db: Database) -> list[dict]:
+    """Evaluated candidates with a closed shadow position, their final votes, and stored metrics."""
+    cands = await db.fetchall("""
+        SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
+        FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
+        WHERE c.decision IS NOT NULL""")
+    votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes")
+    by_c: dict[int, list[dict]] = {}
+    for v in votes:
+        by_c.setdefault(v["candidate_id"], []).append(v)
+    out = []
+    for c in cands:
+        vs = by_c.get(c["id"], [])
+        if len(vs) != 3 or any(v["error"] for v in vs) or not c["cost_sol"]:
+            continue
+        try:
+            metrics = json.loads(c["metrics"] or "{}")
+        except json.JSONDecodeError:
+            metrics = {}
+        out.append({"buys": sum(v["vote"] == "BUY" for v in vs),
+                    "mean_conf": sum(v["confidence"] for v in vs) / 3,
+                    "ret": c["pnl_sol"] / c["cost_sol"], "pnl_usd": c["pnl_usd"] or 0.0,
+                    "win": c["pnl_sol"] > 0, "flow": metrics.get("flow") or {}})
+    return out
+
+
+def _bucket(rows: list[dict]) -> dict:
+    n = len(rows)
+    return {"n": n, "win_rate": sum(r["win"] for r in rows) / n if n else None,
+            "avg_return": sum(r["ret"] for r in rows) / n if n else None,
+            "pnl_usd": sum(r["pnl_usd"] for r in rows)}
+
+
+def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)) -> list[dict]:
+    """What the gate would have selected at other settings, judged on shadow outcomes."""
+    rows = [{"rule": "pre-filter only (no agents)", "threshold": None, **_bucket(scored)}]
+    for need, label in ((3, "unanimous BUY"), (2, "2 of 3 BUY")):
+        for t in thresholds:
+            sel = [r for r in scored if r["buys"] >= need and r["mean_conf"] >= t]
+            rows.append({"rule": label, "threshold": t, **_bucket(sel)})
+    return rows
+
+
+SIGNALS = ("sniper_top3_share", "bundle_like_buy_share", "early_buyer_retention", "effective_buyers",
+           "top5_buyer_share", "dev_sold_pct_of_bought", "net_flow_sol_5m", "drawdown_from_peak_pct")
+
+
+def signal_check(scored: list[dict]) -> list[dict]:
+    """For each flow feature: outcomes above vs at-or-below its median across scored candidates."""
+    out = []
+    for name in SIGNALS:
+        vals = [(r["flow"].get(name), r) for r in scored if isinstance(r["flow"].get(name), (int, float))]
+        if len(vals) < 4:
+            continue
+        xs = sorted(v for v, _ in vals)
+        med = xs[len(xs) // 2]
+        hi = [r for v, r in vals if v > med]
+        lo = [r for v, r in vals if v <= med]
+        out.append({"signal": name, "median": med, "above": _bucket(hi), "at_or_below": _bucket(lo)})
     return out
 
 
@@ -103,6 +179,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "llm_budget_day": s.LLM_DAILY_BUDGET_USD,
         "x_budget_month": s.X_MONTHLY_BUDGET_USD,
     }
+    scored = await _scored_candidates(db)
     exit_reasons: dict[str, int] = {}
     for p in closed:
         exit_reasons[p["exit_reason"] or "?"] = exit_reasons.get(p["exit_reason"] or "?", 0) + 1
@@ -116,7 +193,9 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
                                      [p["pnl_sol"] or 0 for p in closed_day], s.BANKROLL_USD),
         "shadow": trade_metrics([p["pnl_usd"] or 0 for p in shadows], [p["pnl_sol"] or 0 for p in shadows],
                                 s.BANKROLL_USD),
-        "agents": await agent_accuracy(db),
+        **_agent_section(await agent_accuracy(db)),
+        "gate_sweep": gate_sweep(scored),
+        "signals": signal_check(scored),
         "funnel_day": funnel,
         "spend": spend,
         "exit_reasons": exit_reasons,
@@ -130,6 +209,11 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
             "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL "
             "ORDER BY c.ts DESC LIMIT 15"),
     }
+
+
+def _agent_section(acc: dict) -> dict:
+    return {"agents": acc["agents"], "base_win_rate": acc["base_win_rate"],
+            "scored_candidates": acc["scored_candidates"]}
 
 
 def _iso(ts):
@@ -172,9 +256,30 @@ def render_text(r: dict) -> str:
         if not a:
             continue
         lines.append(f"{name:8s} votes {a['votes']:4d}  BUY {a['buy_votes']:3d}  BUY->winner "
-                     f"{a['buy_winners']}/{a['buy_scored']} ({_f(a['buy_accuracy'], '{:.0%}')})  "
+                     f"{a['buy_winners']}/{a['buy_scored']} ({_f(a['buy_accuracy'], '{:.0%}')}, "
+                     f"lift {_f(a['buy_lift'], '{:.2f}x')})  "
                      f"PASS->loser {a['pass_losers']}/{a['pass_scored']} ({_f(a['pass_accuracy'], '{:.0%}')})  "
-                     f"errors {a['errors']}")
+                     f"Brier {_f(a['brier'], '{:.3f}')}  guarded {a['guarded']}  errors {a['errors']}")
+    if r["agents"]:
+        lines.append(f"base win rate of scored candidates: {_f(r['base_win_rate'], '{:.0%}')} "
+                     f"over {r['scored_candidates']}  (lift > 1 = agent's BUYs beat the base rate; "
+                     "Brier 0.25 = coin flip, lower is better)")
+    small = "  (small sample: n < 30, treat as noise)" if r["scored_candidates"] < 30 else ""
+    lines += ["", "== Gate what-if on recorded votes (shadow outcomes, $5 each) ==" + small,
+              f"{'rule':28s} {'thresh':>6s} {'n':>4s} {'win':>6s} {'avg ret':>8s} {'PnL $':>8s}"]
+    for g in r["gate_sweep"]:
+        if g["rule"] != "pre-filter only (no agents)" and g["n"] == 0:
+            continue
+        lines.append(f"{g['rule']:28s} {_f(g['threshold'], '{:.2f}', '-'):>6s} {g['n']:>4d} "
+                     f"{_f(g['win_rate'], '{:.0%}'):>6s} {_f(g['avg_return'], '{:+.1%}'):>8s} {g['pnl_usd']:>+8.2f}")
+    if r["signals"]:
+        lines += ["", "== Signal check: shadow outcomes above vs at/below each feature's median =="]
+        for sg in r["signals"]:
+            a, b = sg["above"], sg["at_or_below"]
+            lines.append(f"{sg['signal']:26s} median {sg['median']:<9.4g} above: n {a['n']:>3d} win "
+                         f"{_f(a['win_rate'], '{:.0%}'):>4s} ret {_f(a['avg_return'], '{:+.1%}'):>7s}  |  "
+                         f"below: n {b['n']:>3d} win {_f(b['win_rate'], '{:.0%}'):>4s} "
+                         f"ret {_f(b['avg_return'], '{:+.1%}'):>7s}")
     sh = r["shadow"]
     lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
               f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]

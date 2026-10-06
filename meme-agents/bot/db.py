@@ -64,7 +64,8 @@ CREATE INDEX IF NOT EXISTS ix_cand_mint ON candidates(mint);
 CREATE TABLE IF NOT EXISTS votes (
     id INTEGER PRIMARY KEY, candidate_id INTEGER, mint TEXT, agent TEXT,
     vote TEXT, confidence REAL, reasons TEXT, evidence TEXT, size_usd REAL,
-    cost_usd REAL, turns INTEGER, error TEXT, ts REAL
+    cost_usd REAL, turns INTEGER, error TEXT, ts REAL,
+    raw_vote TEXT, grounding REAL, tool_calls_ok INTEGER, guard TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_votes_cand ON votes(candidate_id);
 
@@ -105,6 +106,16 @@ CREATE TABLE IF NOT EXISTS live_tx (
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, detail TEXT);
 """
 
+# Columns added after the first release: (table, column, type). Applied with ALTER TABLE when
+# an existing database lacks them, so upgrades keep their data.
+MIGRATIONS = [
+    ("votes", "raw_vote", "TEXT"),
+    ("votes", "grounding", "REAL"),
+    ("votes", "tool_calls_ok", "INTEGER"),
+    ("votes", "guard", "TEXT"),
+    ("positions", "pending_exit_fraction", "REAL"),
+]
+
 MINT_COLS = (
     "mint", "name", "symbol", "uri", "creator", "bonding_curve_key", "created_at",
     "first_trade_at", "last_trade_at", "trade_count", "buy_count", "sell_count",
@@ -125,8 +136,16 @@ class Database:
         self.conn = await aiosqlite.connect(self.path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        await self._migrate()
         await self.conn.commit()
         return self
+
+    async def _migrate(self) -> None:
+        for table, col, typ in MIGRATIONS:
+            async with self.conn.execute(f"PRAGMA table_info({table})") as cur:
+                have = {r[1] for r in await cur.fetchall()}
+            if col not in have:
+                await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     async def close(self) -> None:
         if self.conn:
@@ -199,6 +218,11 @@ class Database:
             "SELECT ts,side,trader,sol,tokens,price_sol,pool FROM trades WHERE mint=? ORDER BY ts DESC LIMIT ?",
             [mint, limit],
         )
+
+    async def all_trades(self, mint: str, limit: int = 50_000) -> list[dict]:
+        """Oldest first, for feature computation."""
+        return await self.fetchall(
+            "SELECT ts,side,trader,sol,tokens,price_sol FROM trades WHERE mint=? ORDER BY ts LIMIT ?", [mint, limit])
 
     async def prune_trades(self, before_ts: float) -> None:
         await self.execute(

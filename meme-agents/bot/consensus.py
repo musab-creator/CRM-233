@@ -30,7 +30,7 @@ def gate(votes: list[Vote], s: Settings) -> GateResult:
     errored = [v.agent for v in votes if v.error]
     if errored:
         return GateResult("PASS", mean, f"agent error: {', '.join(errored)}", None)
-    passes = [v.agent for v in votes if v.vote != "BUY"]
+    passes = [f"{v.agent}(guard: {v.guard})" if v.guard else v.agent for v in votes if v.vote != "BUY"]
     if passes:
         return GateResult("PASS", mean, f"PASS from {', '.join(passes)}", None)
     if mean < s.CONSENSUS_MIN_MEAN_CONFIDENCE:

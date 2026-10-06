@@ -116,13 +116,13 @@ def test_agent_loop_runs_tools_then_votes(s):
 
     async def lookup(a):
         calls.append(a)
-        return {"ok": True}
+        return {"ok": True, "liquidity_usd": 12345.678}
 
     spec = AgentSpec("scout", "sys", [{"name": "lookup", "description": "d",
                                        "input_schema": {"type": "object", "properties": {}}}], {"lookup": lookup})
     llm = ScriptedLLM(_resp(_tu("lookup", {"q": 1})),
                       _resp(_tu("submit_vote", {"vote": "BUY", "confidence": 0.8, "reasons": ["r"],
-                                                "evidence": ["e"]}, "t2")))
+                                                "evidence": ["liquidity $12.3k"]}, "t2")))
 
     async def go():
         db = await Database(s.DB_PATH).open()
@@ -132,9 +132,11 @@ def test_agent_loop_runs_tools_then_votes(s):
         return v, spent
     v, spent = asyncio.run(go())
     assert v.vote == "BUY" and v.confidence == 0.8 and v.turns == 2 and not v.error
+    assert v.raw_vote == "BUY" and v.grounding == 1.0 and v.tool_calls_ok == 1 and v.guard is None
     assert calls == [{"q": 1}]
     tool_result = llm.requests[1]["messages"][2]["content"][0]
-    assert tool_result["type"] == "tool_result" and json.loads(tool_result["content"]) == {"ok": True}
+    assert tool_result["type"] == "tool_result"
+    assert json.loads(tool_result["content"]) == {"ok": True, "liquidity_usd": 12345.678}
     assert spent == pytest.approx(2 * llm_cost_usd(1000, 100, 0, 0, 3, 15))
     assert llm.requests[0]["model"] == "claude-sonnet-4-6"
 
@@ -164,3 +166,85 @@ def test_agent_stops_when_budget_exhausted(s):
         return v
     v = asyncio.run(go())
     assert v.vote == "PASS" and "budget" in v.error and llm.requests == []
+
+
+def _run(s, llm, spec, context="ctx", subject=None):
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        v = await run_agent(llm, s, spec, context, Budget(db, "llm", 5, "day"), subject_ids=subject)
+        await db.close()
+        return v
+    return asyncio.run(go())
+
+
+def _lookup_spec(result):
+    async def lookup(a):
+        return result
+    return AgentSpec("analyst", "sys", [{"name": "lookup", "description": "d",
+                                         "input_schema": {"type": "object", "properties": {}}}],
+                     {"lookup": lookup}, with_size=True)
+
+
+def _vote(vote, evidence):
+    return {"vote": vote, "confidence": 0.9, "reasons": ["r"], "evidence": evidence, "size_usd": 7}
+
+
+def test_guard_downgrades_buy_with_fabricated_evidence(s):
+    spec = _lookup_spec({"top10_pct": 23.4, "holder": "So11111111111111111111111111111111111111112"})
+    llm = ScriptedLLM(_resp(_tu("lookup", {})),
+                      _resp(_tu("submit_vote", _vote("BUY", ["top10_pct 61.0", "whale 9xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"]), "t2")))
+    v = _run(s, llm, spec)
+    assert v.raw_vote == "BUY" and v.vote == "PASS" and v.grounding == 0.0 and "grounding" in v.guard
+
+
+def test_guard_keeps_buy_with_grounded_evidence(s):
+    spec = _lookup_spec({"top10_pct": 23.4, "holder": "So11111111111111111111111111111111111111112"})
+    llm = ScriptedLLM(_resp(_tu("lookup", {})),
+                      _resp(_tu("submit_vote", _vote("BUY", ["top10 23.4%", "holder So11111111111111111111111111111111111111112",
+                                                            "vibes are great"]), "t2")))
+    v = _run(s, llm, spec)
+    assert v.vote == "BUY" and v.grounding == 0.667 and v.guard is None and v.size_usd == 7
+
+
+def test_guard_requires_a_successful_tool_call(s):
+    # evidence matches the context, but the agent never looked anything up
+    llm = ScriptedLLM(_resp(_tu("submit_vote", _vote("BUY", ["unique_buyers 52"]))))
+    v = _run(s, llm, _lookup_spec({}), context='{"unique_buyers": 52}')
+    assert v.vote == "PASS" and "tool call" in v.guard
+
+    async def boom(a):
+        raise RuntimeError("down")
+    spec = AgentSpec("scout", "sys", [{"name": "lookup", "description": "d",
+                                       "input_schema": {"type": "object", "properties": {}}}], {"lookup": boom})
+    llm = ScriptedLLM(_resp(_tu("lookup", {})), _resp(_tu("submit_vote", _vote("BUY", ["unique_buyers 52"]), "t2")))
+    v = _run(s, llm, spec, context='{"unique_buyers": 52}')
+    assert v.vote == "PASS" and v.tool_calls_ok == 0
+
+
+def test_guard_ignores_the_subject_mint_and_leaves_pass_alone(s):
+    mint = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    spec = _lookup_spec({"mint": mint})
+    llm = ScriptedLLM(_resp(_tu("lookup", {})), _resp(_tu("submit_vote", _vote("BUY", [f"mint {mint}"]), "t2")))
+    assert _run(s, llm, spec, subject={mint}).vote == "PASS"
+    llm = ScriptedLLM(_resp(_tu("lookup", {})), _resp(_tu("submit_vote", _vote("PASS", []), "t2")))
+    v = _run(s, llm, spec, subject={mint})
+    assert v.vote == "PASS" and v.guard is None
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE votes (id INTEGER PRIMARY KEY, candidate_id INTEGER, mint TEXT, agent TEXT, vote TEXT,"
+                " confidence REAL, reasons TEXT, evidence TEXT, size_usd REAL, cost_usd REAL, turns INTEGER,"
+                " error TEXT, ts REAL)")
+    con.execute("INSERT INTO votes (agent, vote) VALUES ('scout', 'BUY')")
+    con.commit()
+    con.close()
+
+    async def go():
+        db = await Database(path).open()
+        row = await db.fetchone("SELECT agent, vote, grounding, guard FROM votes")
+        await db.close()
+        return row
+    assert asyncio.run(go()) == {"agent": "scout", "vote": "BUY", "grounding": None, "guard": None}

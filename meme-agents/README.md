@@ -50,6 +50,7 @@ User=bot
 | `python -m bot report [--day YYYY-MM-DD]` | Print closed trades, win rate, expectancy, profit factor, max drawdown, PnL in SOL and USD, and per-agent accuracy. Writes the daily markdown file. |
 | `python -m bot simulate [--minutes N]` | Offline end-to-end run with synthetic launches and fake APIs. Uses `data/sim.db`. |
 | `python -m bot report --sim` | Report on the simulation database |
+| `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
 
@@ -90,8 +91,26 @@ User=bot
      activity), `dexscreener_pair`, `recent_trades`. It reviews market structure and proposes
      a size.
 
+   All three agents also receive **flow features** that the bot computes exactly from every
+   trade it has seen for the mint (`bot/features.py`):
+   - sniper share: the top 3 wallets' share of buying in the first 60 s, and whether they still hold
+   - bundle-like buys: 3 or more wallets buying the same amount within 3 s
+   - early-buyer retention: how many of the first 20 buyers have already exited
+   - dev sold %
+   - buyer concentration: top-5 share, HHI and effective buyer count
+   - 5-minute flow and price momentum, and drawdown from the peak
+
+   The LLM weighs these numbers; it doesn't have to estimate them from raw trades.
+
    If a vote is invalid, an agent errors, or the budget stops it, that vote counts as PASS
    with confidence 0.
+
+   **Grounding guard.** A BUY counts only if the agent made at least one successful tool call
+   and at least half of its `evidence` items cite a number, address or post id found in the
+   data it received. The candidate's own mint address doesn't count. Otherwise the BUY becomes
+   a PASS, and the vote stores the agent's original vote, the grounding score and the reason
+   (`votes.raw_vote`, `grounding`, `guard`). This stops trades based on invented facts. It
+   cannot prove an argument is right: a number can match by coincidence.
 4. **Consensus gate.** The bot buys only if all three agents vote BUY and their mean confidence
    is at least 0.65. Every vote is stored in `votes`, including PASS votes, errors and costs.
    Every gate result is stored in `candidates`.
@@ -120,6 +139,36 @@ User=bot
 Every evaluated candidate also gets a **shadow position**: a $5 paper position with no bankroll
 that runs through the same exit rules. This gives every vote an outcome, even when the token
 was never traded, so the report can score each agent's BUY votes separately.
+
+## Is the LLM worth it? Reading the report
+
+`python -m bot report` answers that question from your own data. It does not re-run any
+model. Every evaluated candidate has a shadow outcome, so it can show:
+
+- **Per-agent accuracy, lift and Brier score.** Lift is an agent's BUY win rate divided by
+  the base win rate of all scored candidates. Above 1 means its BUYs pick winners better than
+  the pre-filter alone. The Brier score checks whether the agent's confidence is honest:
+  0.25 is a coin flip and lower is better.
+- **Gate what-if.** The recorded votes are replayed through the gate at mean-confidence
+  thresholds from 0.50 to 0.90, both unanimous and 2-of-3. A *pre-filter only* baseline row
+  sits on top. If no gate row beats the baseline over a few hundred candidates, the agents
+  are not earning their cost. That is the time to change prompts or thresholds.
+- **Signal check.** For each flow feature, it compares the outcomes of candidates above and
+  below the median, which shows which signals actually separate winners from losers in your
+  data.
+
+Any sample under 30 is flagged as noise. Don't tune on it.
+
+## Operations
+
+- Logs go to the console and to `logs/bot.log`, rotated at 20 MB with 5 files kept. Secrets
+  that appear in URLs are redacted.
+- **Stall watchdog.** If PumpPortal sends nothing for `WS_STALL_S` seconds (default 90),
+  the client reconnects and re-subscribes, even when the socket still answers pings.
+- The engine writes a heartbeat to the database every 60 s. `python -m bot status` reports
+  NOT RUNNING if the heartbeat is more than 3 minutes old. You can alert on that from cron.
+- **Restarts are safe.** Open positions, queued candidates and budgets all resume from
+  SQLite. Older databases are migrated in place.
 
 ## Budgets
 

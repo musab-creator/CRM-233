@@ -18,11 +18,16 @@ class RedactingFormatter(logging.Formatter):
         return _SECRET_RE.sub(lambda m: m.group(1) + "***", super().format(record))
 
 
-def setup_logging(level: str = "INFO", logfile: str | None = None) -> None:
+def setup_logging(level: str = "INFO", logfile=None) -> None:
+    """Console plus, if `logfile` is set, a rotating file (20 MB x 5). Secrets are redacted."""
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
     fmt = RedactingFormatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if logfile:
-        handlers.append(logging.FileHandler(logfile))
+        Path(logfile).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(logfile, maxBytes=20 * 1024 * 1024, backupCount=5))
     for h in handlers:
         h.setFormatter(fmt)
     root = logging.getLogger()

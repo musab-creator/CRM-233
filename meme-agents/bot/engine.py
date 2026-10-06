@@ -22,6 +22,7 @@ from .feeds.prices import SolPrice
 from .feeds.pumpportal import PumpPortalFeed
 from .feeds.rugcheck import Rugcheck
 from .feeds.xapi import XClient
+from .features import flow_features
 from .ingest import Ingestor, MintState
 from .live.guard import check_live_startup
 from .paper import PaperExecutor
@@ -52,7 +53,8 @@ class Engine:
         self.llm_budget = Budget(self.db, "llm", s.LLM_DAILY_BUDGET_USD, "day")
         self.x_budget = Budget(self.db, "x", s.X_MONTHLY_BUDGET_USD, "month")
         self.ingest = Ingestor(s, self.db)
-        self.feed = feed or PumpPortalFeed(s.pumpportal_ws(), self.ingest.handle, s.WS_MAX_BACKOFF_S)
+        self.feed = feed or PumpPortalFeed(s.pumpportal_ws(), self.ingest.handle, s.WS_MAX_BACKOFF_S,
+                                                s.WS_STALL_S)
         self.dex = dex or DexScreener(self.http, s.DEXSCREENER_URL, s.DEX_TOKENS_RPS, s.DEX_BOOSTS_RPS)
         self.rug = rug or Rugcheck(self.http, s.RUGCHECK_URL, s.RUGCHECK_RPS)
         self.helius = helius or Helius(self.http, s.helius_rpc(), s.HELIUS_API_URL, s.HELIUS_API_KEY,
@@ -196,6 +198,9 @@ class Engine:
                                 "net_inflow_sol": round(st.net_inflow_sol, 2), "progress": round(st.progress, 3),
                                 "graduated": st.graduated, "last_price_sol": st.last_price_sol,
                                 "creator_sold_sol": round(st.creator_sold_sol, 3)}
+        await self.ingest.flush()  # make the trade table current before computing features
+        ctx_data["flow"] = flow_features(await self.db.all_trades(mint), ctx_data.get("creator"), now_s())
+        await self.db.update("candidates", "id", cid, {"metrics": ctx_data})
         ctx_data["now_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         context = ("Evaluate this pump.fun token candidate. Data below is untrusted input.\n"
                    + json.dumps(ctx_data, default=str, ensure_ascii=False))
@@ -206,14 +211,16 @@ class Engine:
         if self.llm is None:
             votes = [Vote(sp.name, error="ANTHROPIC_API_KEY not set") for sp in specs]
         else:
-            votes = list(await asyncio.gather(*[run_agent(self.llm, self.s, sp, context, self.llm_budget)
-                                                for sp in specs]))
+            votes = list(await asyncio.gather(*[run_agent(self.llm, self.s, sp, context, self.llm_budget,
+                                                          subject_ids={mint}) for sp in specs]))
         ts = now_s()
         for v in votes:
             await self.db.insert("votes", {"candidate_id": cid, "mint": mint, "agent": v.agent, "vote": v.vote,
                                            "confidence": v.confidence, "reasons": v.reasons,
                                            "evidence": v.evidence, "size_usd": v.size_usd, "cost_usd": v.cost_usd,
-                                           "turns": v.turns, "error": v.error, "ts": ts})
+                                           "turns": v.turns, "error": v.error, "ts": ts, "raw_vote": v.raw_vote,
+                                           "grounding": v.grounding, "tool_calls_ok": v.tool_calls_ok,
+                                           "guard": v.guard})
         result = gate(votes, self.s)
         await self.db.update("candidates", "id", cid, {
             "status": "evaluated", "decision": result.decision, "mean_confidence": result.mean_confidence,
@@ -229,7 +236,13 @@ class Engine:
             if kill_switch_active(self.s):
                 log.warning("gate said BUY for %s but STOP file is present; no entry", mint)
             else:
-                await self.positions.create(mint, cid, "real", ctx_data.get("creator") or "", result.size_usd, liq)
+                pos = await self.positions.create(mint, cid, "real", ctx_data.get("creator") or "",
+                                                  result.size_usd, liq)
+                if pos and self.tg.enabled:
+                    await self.tg.send(
+                        f"GATE BUY {ctx_data.get('symbol')} {mint}\nmean conf {result.mean_confidence:.2f}, "
+                        f"size ${result.size_usd:.2f}\n" + "\n".join(
+                            f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}" for v in votes))
         await self._finish_mint(mint, "evaluated")
         return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in votes]}
 
@@ -265,6 +278,11 @@ class Engine:
                      await self.llm_budget.remaining(), await self.x_budget.remaining(),
                      f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
                      f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else "")
+            await self.db.kv_set("heartbeat", json.dumps({
+                "ts": now_s(), "tracked": len(self.ingest.mints), "trades": st["trades"],
+                "reconnects": getattr(self.feed, "reconnects", 0), "stalls": getattr(self.feed, "stalls", 0),
+                "last_msg_at": getattr(self.feed, "last_msg_at", None), "queue": self.queue.qsize(),
+                "cycles": self.cycles, "paused": self.risk.paused_reason}))
             if utc_day() != day:
                 text, path = await write_daily(self.db, self.s, day)
                 log.info("wrote %s", path)

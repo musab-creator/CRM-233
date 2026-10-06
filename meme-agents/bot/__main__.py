@@ -4,6 +4,7 @@
     python -m bot run [--minutes N]
     python -m bot report [--day YYYY-MM-DD]
     python -m bot simulate [--minutes N] [--seed S]
+    python -m bot status [--sim]  what the bot is doing right now
     python -m bot live-check      run the live-mode startup checks and exit
 """
 from __future__ import annotations
@@ -77,6 +78,21 @@ async def _report(day: str | None, sim: bool) -> int:
     return 0
 
 
+async def _status(s) -> int:
+    from .db import Database
+    from .status import build_status
+    path = s.path(s.DB_PATH)
+    if not path.exists():
+        print(f"no database at {path}; run the bot first", file=sys.stderr)
+        return 1
+    db = await Database(path).open()
+    try:
+        print(await build_status(db, s))
+    finally:
+        await db.close()
+    return 0
+
+
 async def _live_check() -> int:
     import httpx
 
@@ -109,11 +125,16 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--minutes", type=float, default=10)
     sm.add_argument("--seed", type=int, default=7)
     sub.add_parser("live-check", help="run live-mode startup checks")
+    st = sub.add_parser("status", help="what the bot is doing right now (safe while it runs)")
+    st.add_argument("--sim", action="store_true", help="status of the simulation database")
     a = p.parse_args(argv)
 
-    s = load_settings()
-    setup_logging(s.LOG_LEVEL)
     cmd = a.cmd or "run"
+    from .sim import SIM_OVERRIDES
+    sim = cmd == "simulate" or getattr(a, "sim", False)
+    s = load_settings(overrides=SIM_OVERRIDES if sim else None)
+    # only long-running commands write the log file
+    setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE) if s.LOG_FILE and cmd in ("run", "simulate") else None)
     if cmd == "run":
         return asyncio.run(_run(getattr(a, "minutes", None)))
     if cmd == "report":
@@ -122,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_simulate(a.minutes, a.seed))
     if cmd == "live-check":
         return asyncio.run(_live_check())
+    if cmd == "status":
+        return asyncio.run(_status(s))
     p.print_help()
     return 1
 

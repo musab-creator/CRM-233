@@ -62,6 +62,7 @@ class Settings:
     REPORTS_DIR: str = "reports"
     STOP_FILE: str = "STOP"
     LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = "logs/bot.log"
 
     # --- endpoints -------------------------------------------------------------
     PUMPPORTAL_WS: str = "wss://pumpportal.fun/api/data"
@@ -124,6 +125,7 @@ class Settings:
     MAX_TRACKED_MINTS: int = 3000
     TRADE_RETENTION_HOURS: float = 48.0
     WS_MAX_BACKOFF_S: float = 60.0
+    WS_STALL_S: float = 90.0
 
     # --- LLM -------------------------------------------------------------------
     LLM_MODEL: str = "claude-sonnet-4-6"
@@ -134,6 +136,7 @@ class Settings:
     LLM_MAX_TOKENS: int = 2048
     LLM_TIMEOUT_S: float = 120.0
     LLM_CONCURRENCY: int = 2
+    AGENT_MIN_GROUNDING: float = 0.5
 
     # --- X ---------------------------------------------------------------------
     X_MONTHLY_BUDGET_USD: float = 20.0

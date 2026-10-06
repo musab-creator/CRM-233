@@ -9,6 +9,7 @@ from ..config import Settings
 from ..db import Database
 from ..feeds.dexscreener import summarize_pair
 from ..feeds.rugcheck import pool_accounts
+from ..features import flow_features
 from .base import AgentSpec
 from .prompts import ROLE_PROMPTS
 
@@ -164,6 +165,7 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
         repeated = max((sizes.count(x) for x in set(sizes)), default=0)
         return {
             "mint": mint, "creator": creator,
+            "flow_features": flow_features(await ctx.db.all_trades(mint), creator, time.time()),
             "totals": {k: m.get(k) for k in ("trade_count", "buy_count", "sell_count", "unique_buyers", "buy_sol",
                                              "sell_sol", "net_inflow_sol", "creator_sold_sol", "progress",
                                              "graduated", "pool", "market_cap_sol")},
@@ -185,7 +187,8 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
         _tool("dexscreener_pair", "Best DexScreener pair: price, liquidity, FDV, volume and buys/sells per "
               "5m/1h/6h/24h.", MINT_ARG),
         _tool("recent_trades", "Recent trades for the mint from the bot's own PumpPortal stream, with per-mint "
-              "totals and creator flags.",
+              "totals, creator flags and freshly computed flow_features (snipers, bundles, early-buyer "
+              "retention, dev selling, concentration, 5-minute momentum).",
               {**MINT_ARG, "limit": {"type": "integer", "description": "10-200, default 80"}}),
     ]
     return AgentSpec("analyst", ROLE_PROMPTS["analyst"], tools,

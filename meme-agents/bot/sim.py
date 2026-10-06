@@ -20,6 +20,7 @@ from .feeds.rugcheck import normalise
 
 SIM_OVERRIDES = {
     "MODE": "paper", "DB_PATH": "data/sim.db", "REPORTS_DIR": "reports/sim", "STOP_FILE": "STOP_SIM",
+    "LOG_FILE": "logs/sim.log",
     "PF_MIN_AGE_MIN": "1", "PF_MAX_AGE_MIN": "30", "PF_MIN_UNIQUE_BUYERS": "15", "PF_MIN_NET_INFLOW_SOL": "3",
     "PF_MIN_LIQUIDITY_USD": "3000", "PF_SCAN_INTERVAL_S": "5", "TIME_STOP_HOURS": "0.25", "LIQ_POLL_S": "20",
     "RUGCHECK_POLL_S": "60", "TELEGRAM_BOT_TOKEN": "", "ANTHROPIC_API_KEY": "", "X_BEARER_TOKEN": "",
@@ -42,7 +43,7 @@ class SimToken:
     symbol: str
     creator: str
     curve: str
-    fate: str           # pump | rug | dud
+    fate: str           # pump | rug | rug_fast | dud
     born: float
     v_sol: float = 30.0
     v_tokens: float = 1_073_000_000.0
@@ -82,7 +83,7 @@ class SimFeed:
     def _launch(self) -> dict:
         r = self.rng
         sym = "".join(r.choice(string.ascii_uppercase) for _ in range(r.randint(3, 5)))
-        fate = r.choices(["pump", "rug", "dud"], weights=[0.35, 0.25, 0.4])[0]
+        fate = r.choices(["pump", "rug", "rug_fast", "dud"], weights=[0.3, 0.2, 0.15, 0.35])[0]
         t = SimToken(addr(r, "pump"), f"{sym.title()} Coin", sym, r.choice(self.wallets[:80]), addr(r), fate,
                      time.time())
         self.tokens[t.mint] = t
@@ -115,19 +116,22 @@ class SimFeed:
     def _trade(self, t: SimToken) -> dict | None:
         r = self.rng
         age = (time.time() - t.born) * self.speed / 60
+        dump_at = {"rug": 7.0, "rug_fast": 2.0}.get(t.fate)
         if t.fate == "dud":
             p_buy = 0.5
         elif t.fate == "pump":
             p_buy = 0.8 if age < 6 else (0.6 if age < 12 else 0.35)
+        elif t.fate == "rug_fast":
+            p_buy = 0.85 if age < 1.5 else 0.2
         else:
             p_buy = 0.8 if age < 4 else 0.3
-        if t.fate == "rug" and age > 7 and not t.dumped:
+        if dump_at is not None and age > dump_at and not t.dumped:
             t.dumped = True
             sol, tok = self._sell(t, t.creator, 1.0)
             who, side = t.creator, "sell"
         elif r.random() < p_buy:
             who = r.choice(self.wallets)
-            sol = r.uniform(0.05, 1.5)
+            sol = r.uniform(0.05, 1.0)
             tok = self._buy(t, who, sol)
             side = "buy"
         else:
@@ -156,7 +160,7 @@ class SimFeed:
                 if age_min > 40:
                     self.tokens.pop(t.mint)
                     continue
-                rate = {"pump": 1.2, "rug": 1.0, "dud": 0.15}[t.fate] * (1.0 if age_min < 15 else 0.4)
+                rate = {"pump": 1.2, "rug": 1.0, "rug_fast": 1.1, "dud": 0.15}[t.fate] * (1.0 if age_min < 15 else 0.4)
                 if self.rng.random() < rate * 0.25 and t.mint in self.token_keys:
                     msg = self._trade(t)
                     if msg:
@@ -268,18 +272,20 @@ class FakeLLM:
             return SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage)
         h = int(hashlib.sha1((mint + role).encode()).hexdigest(), 16)
         buy = h % 100 < 70
+        pf = data.get("prefilter") or {}
         vote = {"vote": "BUY" if buy else "PASS", "confidence": round(0.55 + (h % 40) / 100, 2),
-                "reasons": [f"sim {role} reasoning"], "evidence": [f"sim evidence for {mint[:8]}"]}
+                "reasons": [f"sim {role} reasoning"],
+                "evidence": [f"unique_buyers {pf.get('unique_buyers')}", f"net_inflow_sol {pf.get('net_inflow_sol')}"]}
         if any(t["name"] == "submit_vote" and "size_usd" in t["input_schema"]["properties"] for t in tools):
             vote["size_usd"] = 5 + (h % 6)
         block = SimpleNamespace(type="tool_use", id=f"tu_{self.calls}", name="submit_vote", input=vote)
         return SimpleNamespace(content=[block], stop_reason="tool_use", usage=usage)
 
 
-def build_sim_engine(settings, seed: int = 7):
+def build_sim_engine(settings, seed: int = 7, launch_every_s: float = 20.0):
     from .engine import Engine
     eng = Engine(settings, llm=FakeLLM())
-    feed = SimFeed(eng.ingest.handle, seed=seed)
+    feed = SimFeed(eng.ingest.handle, seed=seed, launch_every_s=launch_every_s)
     eng.feed = feed
     eng.dex = FakeDex(feed)
     eng.rug = FakeRug(feed)
