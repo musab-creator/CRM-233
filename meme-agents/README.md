@@ -200,6 +200,9 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   and answers `/status`, `/digest` (this hour so far), `/report`, `/stop` (writes the STOP file),
   `/resume` and `/help`, only from `TELEGRAM_CHAT_ID`. Commands from any other chat are logged
   and ignored; commands sent while the bot was down are not answered on restart.
+- **Updates.** `deploy/update.sh` pulls the tracked branch (fast-forward only), reinstalls and
+  restarts the service. `.github/workflows/meme-agents-deploy.yml` runs it over SSH after each
+  push once the `VPS_*` secrets exist; `deploy/VPS.md` has the details.
 - **systemd** (`deploy/meme-agents.service`) restarts the bot after a crash, and after a hang:
   the bot pings systemd's watchdog every 60 s. Configuration errors (exit 2) are not
   retried. The unit can write only `data/`, `logs/` and `reports/`.

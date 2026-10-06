@@ -187,7 +187,7 @@ meme-agents/
     sim.py           offline synthetic feed for smoke runs (no network, no keys)
   tests/  test_prefilter.py test_consensus.py test_paper.py test_exits.py
           test_live_guard.py test_ingest.py test_budget.py test_agents.py
-  deploy/ install.sh  meme-agents.service  healthcheck.sh
+  deploy/ install.sh  update.sh  set-env.sh  meme-agents.service  healthcheck.sh  VPS.md
   KEYS.md            where to get each API key, where to store it
 .github/workflows/meme-agents-live.yml   paper run on a GitHub runner (probe / 60-min acceptance)
 ```

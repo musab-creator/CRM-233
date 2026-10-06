@@ -130,6 +130,25 @@ The bot now:
 journalctl -u meme-agents -f       # the live log; Ctrl+C stops watching, not the bot
 ```
 
+## Automatic updates from GitHub
+
+`.github/workflows/meme-agents-deploy.yml` can update the server for you after every push to
+the branch it tracks. The workflow runs the unit tests on GitHub first, then connects to the
+server over SSH and runs `deploy/update.sh` there, which pulls, reinstalls and restarts the
+service. It needs five repository secrets (GitHub → the repo → **Settings** → **Secrets and
+variables** → **Actions**): `VPS_HOST`, `VPS_PORT`, `VPS_USER`, `VPS_KNOWN_HOSTS` and
+`VPS_SSH_KEY`. On the server side, the deploy key must be limited to `deploy/update.sh` and the
+bot user needs a passwordless sudo rule for the one command `systemctl restart meme-agents`.
+Until the secrets exist the workflow does nothing, and `deploy/update.sh` works by hand:
+
+```bash
+deploy/update.sh            # pull, reinstall, restart (does nothing when already up to date)
+deploy/update.sh --force    # reinstall and restart anyway
+```
+
+It only ever fast-forwards: a server with local edits or commits stops with an error instead
+of losing them.
+
 ## Everyday commands
 
 Run these from `~/CRM-233/meme-agents`.
@@ -140,7 +159,7 @@ Run these from `~/CRM-233/meme-agents`.
 | Start it | `sudo systemctl start meme-agents` |
 | Is it running? | `sudo systemctl status meme-agents` |
 | Kill switch: no new entries, close all positions | `touch STOP`. Remove it (`rm STOP`) to resume entries. |
-| Update to the latest code | `git pull && deploy/install.sh && sudo systemctl restart meme-agents` |
+| Update to the latest code | `deploy/update.sh` (pull, reinstall, restart) |
 | Change a setting without nano | `deploy/set-env.sh KEY=VALUE` (several at once is fine), then restart |
 | Health in one line | `.venv/bin/python -m bot status --check` |
 
