@@ -27,7 +27,20 @@ if [ -z "$PY" ]; then  # the first Python that is 3.12 or newer
   done
 fi
 if [ -z "$PY" ]; then
-  echo "Python 3.12 or newer not found. On Ubuntu 24.04: sudo apt install python3.12 python3.12-venv" >&2
+  echo "Python 3.12 or newer not found." >&2
+  os="$( (. /etc/os-release 2>/dev/null && echo "${ID:-}:${VERSION_ID:-}") || true)"
+  case "$os" in
+    ubuntu:24.*|ubuntu:2[5-9].*)   # 24.04 and 24.10 both package python3.12
+      echo "Install it with: sudo apt install -y python3.12 python3.12-venv" >&2 ;;
+    ubuntu:22.04)
+      echo "Ubuntu 22.04 ships Python 3.10. Add 3.12 from the deadsnakes PPA, then run this again:" >&2
+      echo "  sudo apt install -y software-properties-common" >&2
+      echo "  sudo add-apt-repository -y ppa:deadsnakes/ppa" >&2
+      echo "  sudo apt update && sudo apt install -y python3.12 python3.12-venv" >&2 ;;
+    *)
+      echo "This system (${os:-unknown}) has no Python 3.12 package. Easiest: reinstall the server as" >&2
+      echo "Ubuntu 24.04, or install Python 3.12+ yourself and run: PYTHON=/path/to/python3 bash deploy/install.sh" >&2 ;;
+  esac
   exit 1
 fi
 if [ ! -x .venv/bin/python ] && ! "$PY" -m venv .venv; then

@@ -36,6 +36,21 @@ sudo apt install -y git python3.12 python3.12-venv
 sudo ufw allow OpenSSH && sudo ufw --force enable    # the bot needs no open ports
 ```
 
+If apt says **`Unable to locate package python3.12`**, the server is not Ubuntu 24.04. Run
+`cat /etc/os-release` to see which version it is.
+
+- **Ubuntu 22.04:** add Python 3.12 from the deadsnakes PPA, then rerun the install line above:
+  ```bash
+  sudo apt install -y software-properties-common
+  sudo add-apt-repository -y ppa:deadsnakes/ppa
+  sudo apt update
+  ```
+- **Anything else:** reinstall the server as Ubuntu 24.04 from your provider's panel. On
+  RackNerd, that is nerdvm.racknerd.com → your VPS → **Reinstall**.
+
+Paste one line at a time. A command that asks questions, such as `adduser`, takes the next
+pasted lines as its answers.
+
 ## 4. Get the code
 
 ```bash
