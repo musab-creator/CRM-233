@@ -120,3 +120,21 @@ def test_full_check_end_to_end(s):
 
     r = asyncio.run(full_check(mint(), NOW, s, Rug(), Dex()))
     assert r.passed and r.metrics["liquidity_usd"] == 12_000
+
+
+def test_missing_liquidity_field_is_rejected_unless_fallback_enabled(s):
+    from bot.prefilter import curve_liquidity_usd
+    st = mint()
+    st.v_sol = 60.0  # 30 SOL real reserve
+    curve = curve_liquidity_usd(st, 150.0)
+    assert curve == 30 * 2 * 150  # $9,000
+    no_liq = {"dexId": "pumpfun", "pairAddress": "P"}
+    r = stage2(rug(), no_liq, s, curve)
+    assert not r.passed and "no liquidity" in r.reason
+    s.PF_CURVE_LIQUIDITY_FALLBACK = True
+    r = stage2(rug(), no_liq, s, curve)
+    assert r.passed and r.metrics["liquidity_source"] == "curve_estimate"
+    # a reported liquidity is never overridden by the estimate
+    assert not stage2(rug(), {"liquidity": {"usd": 100}}, s, curve).passed
+    st.graduated = True
+    assert curve_liquidity_usd(st, 150.0) is None

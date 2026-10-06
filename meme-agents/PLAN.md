@@ -73,7 +73,13 @@ Added by me (each one is a config value unless it says otherwise):
     connections that use an API key. `PUMPPORTAL_API_KEY` is optional. If a position's stream
     goes quiet for longer than `LIQ_POLL_S`, DexScreener's `priceNative` is used as the mark,
     so stops and exits still fire.
-16. **No `.env` library:** `bot/config.py` parses `.env` itself, because the brief allows no
+16. **DexScreener liquidity on the bonding curve is unverified.** I could not confirm, from
+    this container, that DexScreener fills in `liquidity.usd` for pump.fun pairs that have not
+    graduated. If it doesn't, those tokens are rejected with the reason
+    `dexscreener pair reports no liquidity`, which keeps to the brief. Setting
+    `PF_CURVE_LIQUIDITY_FALLBACK=true` substitutes 2 × the curve's real SOL reserve × SOL/USD
+    instead. The default is off.
+17. **No `.env` library:** `bot/config.py` parses `.env` itself, because the brief allows no
     extra framework.
 
 ## File tree

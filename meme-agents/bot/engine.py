@@ -135,13 +135,15 @@ class Engine:
     async def scan_once(self) -> int:
         now = now_s()
         found = 0
+        for m in [m for m, t in self._stage2_at.items() if now - t > 2 * 3600]:
+            del self._stage2_at[m]
         for st in list(self.ingest.mints.values()):
             if st.status != "tracking" or not stage1(st, now, self.s).passed:
                 continue
             if now - self._stage2_at.get(st.mint, 0) < STAGE2_RECHECK_S:
                 continue
             self._stage2_at[st.mint] = now
-            res = await full_check(st, now, self.s, self.rug, self.dex)
+            res = await full_check(st, now, self.s, self.rug, self.dex, self.sol_price.get())
             await self.db.insert("prefilter_results", {"mint": st.mint, "ts": now, "passed": int(res.passed),
                                                        "reason": res.reason, "metrics": res.metrics})
             if not res.passed:
@@ -159,7 +161,7 @@ class Engine:
             found += 1
             log.info("CANDIDATE #%d %s (%s) age %.1fm buyers %d inflow %.1f SOL liq $%s top10 %s%%",
                      cid, st.symbol, st.mint, res.metrics["age_min"], res.metrics["unique_buyers"],
-                     res.metrics["net_inflow_sol"], f"{res.metrics.get('liquidity_usd', 0):,.0f}",
+                     res.metrics["net_inflow_sol"], f"{res.metrics.get('liquidity_usd') or 0:,.0f}",
                      res.metrics.get("top10_pct"))
         return found
 
@@ -221,7 +223,7 @@ class Engine:
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
                  ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}" for v in votes),
                  sum(v.cost_usd for v in votes))
-        liq = ((ctx_data.get("pair") or {}).get("liquidity_usd"))
+        liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
         await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "", self.s.POSITION_MIN_USD, liq)
         if result.decision == "BUY":
             if kill_switch_active(self.s):

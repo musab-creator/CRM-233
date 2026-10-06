@@ -74,6 +74,10 @@ User=bot
    - a DexScreener pair with at least $8,000 of liquidity
 
    The Rugcheck and DexScreener lookups only run for mints that pass the stream checks.
+   During the first hour on the VPS, check `prefilter_results.reason`. If
+   `dexscreener pair reports no liquidity` dominates, DexScreener is not reporting liquidity
+   for bonding-curve pairs. You can then set `PF_CURVE_LIQUIDITY_FALLBACK=true` (see
+   PLAN.md, assumption 16).
 3. **Agents.** Three Claude calls run in parallel. Each has its own tools and must finish with
    a strict `submit_vote` call: `{"vote","confidence","reasons","evidence"}`. The Analyst also
    returns `size_usd`.

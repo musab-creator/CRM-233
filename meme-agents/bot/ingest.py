@@ -252,7 +252,8 @@ class Ingestor:
         """Rebuild in-memory state for mints still inside the window after a restart."""
         cutoff = now_s() - self.s.PF_MAX_AGE_MIN * 60
         rows = await self.db.fetchall(
-            "SELECT * FROM mints WHERE first_trade_at > ? OR status IN ('candidate','evaluated')", [cutoff])
+            "SELECT * FROM mints WHERE first_trade_at > ? OR mint IN "
+            "(SELECT mint FROM positions WHERE status IN ('pending','open'))", [cutoff])
         for r in rows:
             st = MintState(mint=r["mint"])
             for k in ("name", "symbol", "uri", "creator", "bonding_curve_key", "created_at", "first_trade_at",

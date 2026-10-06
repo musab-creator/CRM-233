@@ -47,7 +47,14 @@ def stage1(st: MintState, now: float, s: Settings) -> PrefilterResult:
     return PrefilterResult(not r, r, m)
 
 
-def stage2(rug: dict | None, pair: dict | None, s: Settings) -> PrefilterResult:
+def curve_liquidity_usd(st: MintState, sol_usd: float | None) -> float | None:
+    """AMM-equivalent depth of a bonding curve: 2 x real SOL reserve (virtual SOL minus the 30 SOL seed)."""
+    if st.graduated or st.v_sol is None or not sol_usd:
+        return None
+    return max(0.0, st.v_sol - 30.0) * 2 * sol_usd
+
+
+def stage2(rug: dict | None, pair: dict | None, s: Settings, curve_liq_usd: float | None = None) -> PrefilterResult:
     r: list[str] = []
     m: dict = {}
     if not rug or not rug.get("has_report"):
@@ -69,15 +76,21 @@ def stage2(rug: dict | None, pair: dict | None, s: Settings) -> PrefilterResult:
     if not pair:
         r.append("no dexscreener pair")
     else:
-        liq = (pair.get("liquidity") or {}).get("usd") or 0
-        m.update({"liquidity_usd": liq, "dex": pair.get("dexId"), "pair": pair.get("pairAddress"),
-                  "fdv": pair.get("fdv")})
-        if liq < s.PF_MIN_LIQUIDITY_USD:
+        liq = (pair.get("liquidity") or {}).get("usd")
+        source = "dexscreener"
+        if liq is None and s.PF_CURVE_LIQUIDITY_FALLBACK and curve_liq_usd is not None:
+            liq, source = curve_liq_usd, "curve_estimate"
+        m.update({"liquidity_usd": liq, "liquidity_source": source, "dex": pair.get("dexId"),
+                  "pair": pair.get("pairAddress"), "fdv": pair.get("fdv")})
+        if liq is None:
+            r.append("dexscreener pair reports no liquidity")
+        elif liq < s.PF_MIN_LIQUIDITY_USD:
             r.append(f"liquidity ${liq:,.0f} < ${s.PF_MIN_LIQUIDITY_USD:,.0f}")
     return PrefilterResult(not r, r, m)
 
 
-async def full_check(st: MintState, now: float, s: Settings, rugcheck, dex) -> PrefilterResult:
+async def full_check(st: MintState, now: float, s: Settings, rugcheck, dex,
+                     sol_usd: float | None = None) -> PrefilterResult:
     """Stage 1 then stage 2; stage-2 lookups run concurrently."""
     r1 = stage1(st, now, s)
     if not r1.passed:
@@ -98,6 +111,6 @@ async def full_check(st: MintState, now: float, s: Settings, rugcheck, dex) -> P
             return None
 
     rug, pair = await asyncio.gather(_rug(), _pair())
-    r2 = stage2(rug, pair, s)
+    r2 = stage2(rug, pair, s, curve_liquidity_usd(st, sol_usd))
     metrics = {**r1.metrics, **r2.metrics}
     return PrefilterResult(r2.passed, r2.reasons, metrics, rug, pair)
