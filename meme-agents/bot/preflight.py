@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -31,6 +32,7 @@ import websockets
 from .config import Settings
 from .feeds.dexscreener import WSOL, DexScreener
 from .feeds.helius import Helius
+from .feeds.http import HttpError
 from .feeds.news import NewsFeed
 from .feeds.pumpchain import INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, HeliusChain
 from .feeds.rugcheck import Rugcheck, normalise, pool_accounts, top10_pct
@@ -69,15 +71,36 @@ async def check_telegram(s: Settings, http: httpx.AsyncClient) -> tuple[str, str
         return "fail", (f"getMe HTTP {r.status_code}: the token is wrong or revoked "
                         "(BotFather's /token shows it)")
     name = (me.get("result") or {}).get("username")
-    if not s.TELEGRAM_CHAT_ID:
-        return "warn", f"token works (@{name}) but TELEGRAM_CHAT_ID is not set (KEYS.md shows how to find it)"
+    chat = s.TELEGRAM_CHAT_ID.strip()
+    if not re.fullmatch(r"-?\d+", chat):  # missing, or pasted as something other than the number
+        what = "TELEGRAM_CHAT_ID is not set" if not chat else f"TELEGRAM_CHAT_ID must be a number, not {chat[:40]!r}"
+        return ("warn" if not chat else "fail"), f"token works (@{name}); {what}. {await _telegram_chats_hint(http, base, name)}"
     r = await http.post(f"{base}/sendMessage", timeout=10,
-                        json={"chat_id": s.TELEGRAM_CHAT_ID, "text": "meme-agents preflight: Telegram alerts work"})
+                        json={"chat_id": chat, "text": "meme-agents preflight: Telegram alerts work"})
     body = _json(r)
     if r.status_code == 200 and body.get("ok"):
-        return "pass", f"@{name} sent a test message to chat {s.TELEGRAM_CHAT_ID}"
-    return "fail", (f"@{name} cannot message chat {s.TELEGRAM_CHAT_ID}: "
-                    f"{body.get('description') or f'HTTP {r.status_code}'} (send the bot a message first, and check the id)")
+        return "pass", f"@{name} sent a test message to chat {chat}"
+    return "fail", (f"@{name} cannot message chat {chat}: {body.get('description') or f'HTTP {r.status_code}'}. "
+                    + await _telegram_chats_hint(http, base, name))
+
+
+async def _telegram_chats_hint(http: httpx.AsyncClient, base: str, name: str | None) -> str:
+    """The chat ids that have written to the bot (getUpdates), so the user can copy the right one."""
+    try:
+        r = await http.get(f"{base}/getUpdates", timeout=10)
+        updates = _json(r).get("result") or []
+    except Exception:
+        updates = []
+    seen: dict[str, str] = {}
+    for u in updates:
+        msg = u.get("message") or u.get("edited_message") or u.get("channel_post") or u.get("my_chat_member") or {}
+        c = msg.get("chat") or {}
+        if c.get("id") is not None:
+            seen[str(c["id"])] = c.get("title") or c.get("username") or c.get("first_name") or c.get("type") or ""
+    if not seen:
+        return f"Nobody has messaged @{name} yet: open it in Telegram, press Start, then run preflight again"
+    return "Use one of the chat ids that have messaged the bot: " + ", ".join(
+        f"{cid} ({label})" if label else cid for cid, label in seen.items())
 
 
 def _json(r) -> dict:
@@ -146,8 +169,14 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
             return ("fail" if need_helius else "warn"), \
                 "HELIUS_API_KEY not set: net inflow, buyers and prices are read from the chain through Helius"
         h = _helius(s, http)
-        health = await h.rpc("getHealth", [])
-        slot = await h.rpc("getSlot", [])
+        try:
+            health = await h.rpc("getHealth", [])
+            slot = await h.rpc("getSlot", [])
+        except HttpError as e:
+            if e.status == 429:  # the key is accepted (a bad key gets 401); the running bot shares its 10 req/s
+                return "warn", ("HTTP 429 rate-limited right now, usually because the bot is running on the same "
+                                "key; the key itself is valid and the bot retries with backoff")
+            raise
         return "pass", f"getHealth={health}, slot {slot}"
 
     async def jupiter():

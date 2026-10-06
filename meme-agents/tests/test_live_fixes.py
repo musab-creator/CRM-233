@@ -111,8 +111,11 @@ def test_preflight_telegram_sends_a_real_test_message(tmp_path):
             self.send_resp, self.posts = send_resp, []
 
         async def get(self, url, **kw):
-            assert url.endswith("/getMe")
-            return Resp(200, {"ok": True, "result": {"username": "meme_agents_bot"}})
+            if url.endswith("/getMe"):
+                return Resp(200, {"ok": True, "result": {"username": "meme_agents_bot"}})
+            assert url.endswith("/getUpdates")
+            return Resp(200, {"ok": True, "result": [
+                {"update_id": 1, "message": {"chat": {"id": 987654321, "first_name": "Musab", "type": "private"}}}]})
 
         async def post(self, url, json=None, **kw):
             self.posts.append((url, json))
@@ -123,13 +126,20 @@ def test_preflight_telegram_sends_a_real_test_message(tmp_path):
     http = FakeHttp(Resp(200, {"ok": True}))
     assert asyncio.run(check_telegram(s, http)) == ("pass", "@meme_agents_bot sent a test message to chat 42")
     assert http.posts[0][1]["chat_id"] == "42" and "preflight" in http.posts[0][1]["text"]
-    # a wrong chat id, or a user who never messaged the bot: fail with Telegram's own description
+    # a wrong chat id: fail with Telegram's own description, plus the ids that have messaged the bot
     bad = FakeHttp(Resp(400, {"ok": False, "description": "Bad Request: chat not found"}))
     status, detail = asyncio.run(check_telegram(s, bad))
-    assert status == "fail" and "chat not found" in detail
-    # chat id missing is a warning, token missing a skip; neither sends anything
-    assert asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc"}),
-                                      FakeHttp(None)))[0] == "warn"
+    assert status == "fail" and "chat not found" in detail and "987654321 (Musab)" in detail
+    # the getUpdates address pasted instead of the number: fail, and nothing is sent
+    url_id = load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc",
+                                            "TELEGRAM_CHAT_ID": "https://api.telegram.org/bot123:abc/getUpdates"})
+    http = FakeHttp(None)
+    status, detail = asyncio.run(check_telegram(url_id, http))
+    assert status == "fail" and "must be a number" in detail and "987654321" in detail and not http.posts
+    # chat id missing is a warning that also lists the ids; token missing a skip
+    status, detail = asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc"}),
+                                                FakeHttp(None)))
+    assert status == "warn" and "987654321" in detail
     no_token = load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": ""})
     assert asyncio.run(check_telegram(no_token, FakeHttp(None)))[0] == "skip"
 
