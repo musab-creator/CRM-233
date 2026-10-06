@@ -104,6 +104,16 @@ created the key.
    That uses roughly 3M credits a month. Business (100M, 200 RPC req/s, 50 DAS req/s) and
    Professional (200M, 500, 100) follow the same pattern. Restart the bot after editing.
 
+   `deploy/set-env.sh` changes settings without an editor. Professional, in one line:
+   ```bash
+   deploy/set-env.sh HELIUS_MONTHLY_CREDITS=200000000 HELIUS_RPC_RPS=200 HELIUS_ENHANCED_RPS=50 \
+     CURVE_POLL_CALLS_PER_MIN=60 CURVE_POLL_SCALE=0.25 CURVE_HOT_POLL_S=2 CURVE_FIRST_POLL_S=15 \
+     HOLDERS_REFRESH_S=120 HOLDER_CHECKS_PER_SCAN=12 BACKFILL_MAX_TX=400
+   sudo systemctl restart meme-agents
+   ```
+   That reads positions every 2 seconds and every launch every 5-60 seconds, and uses roughly
+   10-15M of the plan's 200M credits a month.
+
 ### X API (`X_BEARER_TOKEN`), optional, pay per use
 
 1. Sign in at [console.x.com](https://console.x.com) with your X account and create an app.

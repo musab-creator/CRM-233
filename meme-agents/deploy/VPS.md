@@ -137,6 +137,7 @@ Run these from `~/CRM-233/meme-agents`.
 | Is it running? | `sudo systemctl status meme-agents` |
 | Kill switch: no new entries, close all positions | `touch STOP`. Remove it (`rm STOP`) to resume entries. |
 | Update to the latest code | `git pull && deploy/install.sh && sudo systemctl restart meme-agents` |
+| Change a setting without nano | `deploy/set-env.sh KEY=VALUE` (several at once is fine), then restart |
 | Health in one line | `.venv/bin/python -m bot status --check` |
 
 Don't also run `python -m bot` by hand while the service runs: the bot refuses to start a

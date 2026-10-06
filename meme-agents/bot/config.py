@@ -141,6 +141,7 @@ class Settings:
     CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
     CURVE_DROP_BELOW_SOL: float = 1.0         # ... that has taken in less than this
     HOLDERS_REFRESH_S: float = 300.0          # DAS holder count (10 credits) at most this often per mint
+    HOLDER_CHECKS_PER_SCAN: int = 4           # ... and at most this many per 20 s pre-filter scan
     BACKFILL_WINDOW_S: float = 60.0           # rebuild a candidate's trades from its first minute ...
     BACKFILL_MAX_TX: int = 80                 # ... reading at most this many transactions (1 credit each)
 

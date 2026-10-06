@@ -44,7 +44,6 @@ log = logging.getLogger("bot.engine")
 
 STAGE2_RECHECK_S = 300
 CANDIDATE_MAX_WAIT_S = 600
-HOLDER_CHECKS_PER_SCAN = 4     # DAS calls (10 credits each) per scan, at most
 EXTERNAL_ERRORS = (HttpError, RpcError, httpx.HTTPError, asyncio.TimeoutError)
 
 
@@ -383,7 +382,7 @@ class Engine:
                 continue
             if not st.streamed and not st.curve_at:
                 continue  # until its curve is read, the inflow is only the dev's own launch buy
-            if checks < HOLDER_CHECKS_PER_SCAN and self._needs_holders(st, now):
+            if checks < self.s.HOLDER_CHECKS_PER_SCAN and self._needs_holders(st, now):
                 checks += 1
                 await self.refresh_holders(st)
             if not stage1(st, now, self.s).passed:
