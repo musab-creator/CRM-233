@@ -80,12 +80,16 @@ Added by me (each one is a config value unless it says otherwise):
 15. **Graduated tokens:** after graduation the price lives in the PumpSwap pool, not the
     curve. If a position gets no tick for longer than `LIQ_POLL_S`, DexScreener's
     `priceNative` is used as the mark, so stops and exits still fire.
-16. **DexScreener liquidity on the bonding curve is unverified.** I could not confirm, from
-    this container, that DexScreener fills in `liquidity.usd` for pump.fun pairs that have not
-    graduated. If it doesn't, those tokens are rejected with the reason
-    `dexscreener pair reports no liquidity`, which keeps to the brief. Setting
-    `PF_CURVE_LIQUIDITY_FALLBACK=true` substitutes 2 × the curve's real SOL reserve × SOL/USD
-    instead. The default is off.
+16. **DexScreener reports no liquidity for bonding-curve pairs (verified).** The live probe on
+    6 Oct 2026 found `liquidity.usd` on 0 of 59 pump.fun curve pairs, and on 6 of 6 graduated
+    PumpSwap pairs. Applied literally, the brief's "DexScreener liquidity ≥ $8k" rule would
+    reject every token before graduation, although the brief's universe starts at the first
+    bonding-curve trade. So `PF_CURVE_LIQUIDITY_FALLBACK=true` is the default: when DexScreener
+    has a pair but no liquidity figure, the bot uses 2 × the curve's real SOL reserve (exact,
+    read from chain) × SOL/USD. That is the depth of an AMM pool holding the same SOL. At
+    SOL = $120 the $8k bar means about 33 SOL in the curve, which is stricter than the 15 SOL
+    inflow rule. A reported liquidity is never overridden. Set it to `false` to trade only
+    graduated tokens.
 17. **No `.env` library:** `bot/config.py` parses `.env` itself, because the brief allows no
     extra framework.
 

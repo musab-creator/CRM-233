@@ -220,6 +220,7 @@ def summarize_stream(cap: dict) -> dict:
         "launches_per_min": round(n / (cap["seconds"] / 60), 1) if cap["seconds"] else None,
         "create_fields_missing": [k for k in CREATE_FIELDS if create_keys[k] < n] if n else CREATE_FIELDS,
         "create_fields_seen": sorted(create_keys),
+        "create_pools": dict(Counter(c.get("pool") for c in creates)),
         "create_reserves_product_vs_k_median": round(products[len(products) // 2], 4) if products else None,
         "migrations": len(cap.get("migrations") or []),
         "sample_migration": (cap.get("migrations") or [None])[0],
@@ -363,8 +364,14 @@ async def probe(s: Settings, http: httpx.AsyncClient, seconds: float) -> dict:
         out["dexscreener_error"] = _err(e)
     # DexScreener's price vs the curve: vSol = sqrt(K x price) on an unfinished curve
     implied = []
+    out["fresh_launches_without_pumpfun_pair"] = [
+        {"mint": c["mint"], "pool": c.get("pool"), "dex": (fresh_pairs.get(c["mint"]) or {}).get("dexId"),
+         "liquidity_usd": ((fresh_pairs.get(c["mint"]) or {}).get("liquidity") or {}).get("usd")}
+        for c in creates if (fresh_pairs.get(c["mint"]) or {}).get("dexId") not in (None, "pumpfun")][:5]
     for c in creates:
         p = fresh_pairs.get(c["mint"])
+        if (p or {}).get("dexId") != "pumpfun":  # the curve formula only holds on the bonding curve
+            continue
         try:
             pn = float((p or {}).get("priceNative") or 0)
         except (TypeError, ValueError):
@@ -429,8 +436,11 @@ def render(checks: list[Check], probe_out: dict | None) -> str:
         lines += ["", "== live probe ==",
                   f"stream: {st['launches']} launches ({st['launches_per_min']}/min), {st['migrations']} migrations, "
                   f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches",
-                  f"missing create fields: {st['create_fields_missing'] or 'none'}; notices: {st['notices'] or 'none'}"]
-        for key in ("dexscreener_fresh_launches", "dexscreener_boosted_pump_tokens",
+                  f"missing create fields: {st['create_fields_missing'] or 'none'}; create pools: {st['create_pools']}",
+                  f"create fields: {st['create_fields_seen']}",
+                  f"sample migration: {json.dumps(st['sample_migration'], default=str)}",
+                  f"notices: {sorted(set(json.dumps(n, default=str) for n in st['notices'])) or 'none'}"]
+        for key in ("dexscreener_fresh_launches", "dexscreener_boosted_pump_tokens", "fresh_launches_without_pumpfun_pair",
                     "dexscreener_implied_net_inflow_sol_samples", "helius", "trade_local"):
             if key in probe_out:
                 lines.append(f"{key}: " + json.dumps(probe_out[key], default=str))

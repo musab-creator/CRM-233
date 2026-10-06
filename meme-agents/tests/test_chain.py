@@ -123,6 +123,9 @@ def test_apply_curve_ticks_only_when_the_curve_moved(s):
         assert st.unique_buyers == 52 and st.holders_now == 40
         await ing.handle({"txType": "migrate", "mint": MINT, "pool": "pump-amm"})
         assert st.pool == "pump-amm"
+        # PumpPortal also announces other launchpads' tokens: they are not pump.fun curves
+        await ing.handle({"txType": "create", "mint": "B" * 44, "pool": "bonk", "bondingCurveKey": "X"}, ts=1300)
+        assert "B" * 44 not in ing.mints and ing.stats["other_launchpads"] == 1
         await db.close()
     asyncio.run(go())
 

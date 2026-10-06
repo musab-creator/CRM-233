@@ -34,7 +34,7 @@ from .ingest import Ingestor, MintState
 from .live.guard import check_live_startup
 from .paper import PaperExecutor
 from .positions import PositionManager
-from .prefilter import full_check, stage1
+from .prefilter import curve_liquidity_usd, full_check, stage1
 from .report import write_daily
 from .risk import RiskManager, kill_switch_active
 from .telegram import Telegram
@@ -114,7 +114,8 @@ class Engine:
             log.warning("LIVE MODE wallet %s, dry_run=%s", self.executor.pubkey, self.executor.dry_run)
         self.positions = PositionManager(
             self.s, self.db, self.risk, self.executor, self.sol_price, dex=self.dex, rugcheck=self.rug,
-            notifier=self.tg.send if self.tg.enabled else None, pin=self._pin, watch_account=self._watch_account)
+            notifier=self.tg.send if self.tg.enabled else None, pin=self._pin, watch_account=self._watch_account,
+            curve_liquidity=self._curve_liquidity)
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
@@ -153,6 +154,11 @@ class Engine:
                  "the chain via Helius" if self.chain.enabled else "the trade stream", self.stream_mode)
         await self.db.event("startup", {"mode": self.s.MODE, "model": self.s.LLM_MODEL,
                                         "trade_stream": self.stream_mode}, now_s())
+
+    def _curve_liquidity(self, mint: str) -> float | None:
+        """A bonding-curve token's depth from the last curve read (None once graduated)."""
+        st = self.ingest.mints.get(mint)
+        return curve_liquidity_usd(st, self.sol_price.get()) if st and st.curve_at else None
 
     def _is_graduated(self, mint: str) -> bool:
         st = self.ingest.mints.get(mint)

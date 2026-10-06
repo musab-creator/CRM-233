@@ -90,7 +90,8 @@ class PositionManager:
     def __init__(self, settings: Settings, db: Database, risk: RiskManager, executor, sol_price,
                  dex=None, rugcheck=None, notifier: Notifier | None = None,
                  pin: Callable[[str, bool], None] | None = None,
-                 watch_account: Callable[[str, bool], Awaitable[None]] | None = None):
+                 watch_account: Callable[[str, bool], Awaitable[None]] | None = None,
+                 curve_liquidity: Callable[[str], float | None] | None = None):
         self.s = settings
         self.db = db
         self.risk = risk
@@ -102,6 +103,9 @@ class PositionManager:
         self.notify = notifier
         self.pin = pin or (lambda mint, on: None)
         self.watch_account = watch_account
+        # DexScreener has no liquidity for bonding-curve pairs: the curve's own depth stands in,
+        # the same measure the pre-filter recorded as entry liquidity
+        self.curve_liquidity = curve_liquidity
         self.positions: dict[int, Position] = {}
         self.lock = asyncio.Lock()
         # live trades run off the tick path, one in flight per position
@@ -451,9 +455,9 @@ class PositionManager:
         async with self.lock:
             for p in opened:
                 pair = pairs.get(p.mint)
-                if not pair:
-                    continue
-                liq = (pair.get("liquidity") or {}).get("usd")
+                liq = ((pair or {}).get("liquidity") or {}).get("usd")
+                if liq is None and self.curve_liquidity:
+                    liq = self.curve_liquidity(p.mint)
                 if liq is None:
                     continue
                 p.last_liq_usd = liq
@@ -466,7 +470,7 @@ class PositionManager:
                 # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key):
                 # use DexScreener's price as the mark so stops still work.
                 stale = now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S
-                native = _num(pair.get("priceNative"))
+                native = _num((pair or {}).get("priceNative"))
                 if stale and native and p.status == "open":
                     await self._on_price(p, native, now)
 

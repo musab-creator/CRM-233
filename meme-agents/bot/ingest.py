@@ -136,7 +136,8 @@ class Ingestor:
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
-        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "migrations": 0}
+        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "migrations": 0,
+                      "other_launchpads": 0}
 
     # --- message handling -----------------------------------------------------
     async def handle(self, msg: dict, ts: float | None = None) -> None:
@@ -154,6 +155,9 @@ class Ingestor:
             self._on_migrate(msg)
 
     async def _on_create(self, msg: dict, ts: float) -> None:
+        if (msg.get("pool") or "pump") != "pump":
+            self.stats["other_launchpads"] += 1  # not a pump.fun bonding curve: outside the universe
+            return
         mint = msg["mint"]
         st = self.mints.get(mint) or MintState(mint=mint)
         st.name = (msg.get("name") or "")[:64]

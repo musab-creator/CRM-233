@@ -88,10 +88,10 @@ where to get each API key and where to store it.
    The Rugcheck and DexScreener lookups only run for mints that pass the first three checks.
    Inflow must come from at least one on-chain curve read. Before that read, the only inflow
    the bot knows is the dev's own launch buy.
-   During the first hour on the VPS, check `prefilter_results.reason`. If
-   `dexscreener pair reports no liquidity` dominates, DexScreener is not reporting liquidity
-   for bonding-curve pairs. You can then set `PF_CURVE_LIQUIDITY_FALLBACK=true` (see
-   PLAN.md, assumption 16).
+   DexScreener reports no liquidity for pump.fun bonding-curve pairs (the live probe found it on
+   0 of 59). For those, the liquidity rule uses the curve's depth instead: 2 × its real SOL
+   reserve × SOL/USD, or about 33 SOL in the curve for $8k at SOL = $120. Set
+   `PF_CURVE_LIQUIDITY_FALLBACK=false` to trade graduated tokens only (PLAN.md, assumption 16).
 3. **Agents.** Three Claude calls run in parallel. Each has its own tools and must finish with
    a strict `submit_vote` call: `{"vote","confidence","reasons","evidence"}`. The Analyst also
    returns `size_usd`.
@@ -148,7 +148,8 @@ where to get each API key and where to store it.
    - at +60%, sell half, then put a 30% trailing stop on the rest
    - time stop at 6 hours
    - emergency exit if liquidity falls 50% (checked every 60 s) or Rugcheck turns to danger
-     (checked every 5 minutes)
+     (checked every 5 minutes). On the bonding curve, liquidity is the curve's own depth, the
+     same measure the pre-filter used, so a drained curve still triggers the exit.
 7. **Risk.**
    - at most 3 open positions
    - at most 1 position per creator wallet

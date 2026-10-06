@@ -117,9 +117,10 @@ jobs:
           {
             echo "## Preflight and live-data probe"
             echo '```'
-            for f in reports/preflight-*.txt; do [ -f "$f" ] && head -c 60000 "$f"; done
+            # `if`, not `[ ] &&`: an unmatched glob must not fail the step under bash -e
+            for f in reports/preflight-*.txt; do if [ -f "$f" ]; then head -c 60000 "$f"; fi; done
             echo '```'
-            for f in reports/acceptance-*.md; do [ -f "$f" ] && cat "$f"; done
+            for f in reports/acceptance-*.md; do if [ -f "$f" ]; then cat "$f"; fi; done
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload data, reports and logs

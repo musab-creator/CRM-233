@@ -96,7 +96,9 @@ class Settings:
     PF_MAX_TOP10_PCT: float = 35.0
     PF_MIN_LIQUIDITY_USD: float = 8000.0
     PF_REQUIRE_NULL_AUTHORITIES: bool = True
-    PF_CURVE_LIQUIDITY_FALLBACK: bool = False
+    # DexScreener reports no liquidity.usd for pump.fun bonding-curve pairs (live probe, Oct 2026:
+    # 0 of 59), only for AMM pools. Without this, no token could pass before graduation.
+    PF_CURVE_LIQUIDITY_FALLBACK: bool = True
     PF_SCAN_INTERVAL_S: float = 20.0
 
     # --- consensus -------------------------------------------------------------

@@ -170,3 +170,29 @@ def test_liquidity_drop_queues_emergency_exit(s):
         assert p.status == "closed" and p.exit_reason == "emergency_liquidity_drop"
         await db.close()
     asyncio.run(go())
+
+
+def test_curve_depth_drives_the_liquidity_exit_when_dexscreener_has_none(s):
+    """Bonding-curve pairs carry no DexScreener liquidity: a drained curve must still trigger
+    the emergency exit, measured the same way as the entry liquidity (2 x real SOL x SOL/USD)."""
+    class Dex:
+        async def tokens(self, mints):
+            return {m: {"dexId": "pumpfun", "priceNative": "1e-7"} for m in mints}  # no liquidity field
+
+    depth = {"M": 9_000.0}
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        await db.kv_set("bankroll_sol", "0.5")
+        pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), dex=Dex(),
+                             curve_liquidity=depth.get)
+        p = await pm.create("M", 1, "real", "C", 5.0, 9_000)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        await pm.periodic()
+        assert p.status == "open" and not p.pending_exit and p.last_liq_usd == 9_000
+        depth["M"] = 4_400.0  # the dev pulled more than half the SOL out of the curve
+        pm._last_liq_poll = 0
+        await pm.periodic()
+        assert p.pending_exit == "emergency_liquidity_drop"
+        await db.close()
+    asyncio.run(go())
