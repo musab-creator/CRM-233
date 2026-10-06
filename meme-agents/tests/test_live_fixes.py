@@ -130,7 +130,8 @@ def test_preflight_telegram_sends_a_real_test_message(tmp_path):
     # chat id missing is a warning, token missing a skip; neither sends anything
     assert asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": "123:abc"}),
                                       FakeHttp(None)))[0] == "warn"
-    assert asyncio.run(check_telegram(load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": ""}), FakeHttp(None)))[0] == "skip"
+    no_token = load_settings(env, overrides={"TELEGRAM_BOT_TOKEN": ""})
+    assert asyncio.run(check_telegram(no_token, FakeHttp(None)))[0] == "skip"
 
 
 def test_early_trades_keep_block_order_inside_the_launch_slot():

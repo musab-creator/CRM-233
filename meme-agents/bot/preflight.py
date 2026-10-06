@@ -66,7 +66,8 @@ async def check_telegram(s: Settings, http: httpx.AsyncClient) -> tuple[str, str
     r = await http.get(f"{base}/getMe", timeout=10)
     me = _json(r)
     if r.status_code != 200 or not me.get("ok"):
-        return "fail", f"getMe HTTP {r.status_code}: the token is wrong or revoked (BotFather's /token shows it)"
+        return "fail", (f"getMe HTTP {r.status_code}: the token is wrong or revoked "
+                        "(BotFather's /token shows it)")
     name = (me.get("result") or {}).get("username")
     if not s.TELEGRAM_CHAT_ID:
         return "warn", f"token works (@{name}) but TELEGRAM_CHAT_ID is not set (KEYS.md shows how to find it)"
