@@ -98,6 +98,7 @@ def test_other_branch_bad_command_and_force(server):
     r = run(srv, stubs, "--force")
     assert r.returncode == 0 and "nothing to do" not in r.stdout
     assert (srv / "log").read_text().count("install") == 2
+    assert "sudo systemctl restart meme-agents" in (srv / "log").read_text()   # by hand: sudo may prompt
     assert run(srv, stubs, "--bogus").returncode == 2
 
 

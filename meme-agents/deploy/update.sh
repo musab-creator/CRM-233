@@ -11,8 +11,10 @@ cd "$APP_DIR"
 FORCE=0
 want_branch=""
 want_sha=""
+SUDO="sudo"                                 # by hand: sudo may ask for your password
 
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  SUDO="sudo -n"                            # from GitHub: nobody can type one, so it needs the passwordless rule
   if [[ "$SSH_ORIGINAL_COMMAND" =~ ^deploy[[:space:]]+([A-Za-z0-9._/-]+)[[:space:]]+([0-9a-f]{7,40})$ ]]; then
     want_branch="${BASH_REMATCH[1]}"
     want_sha="${BASH_REMATCH[2]}"
@@ -52,7 +54,7 @@ fi
 echo "updating $branch: ${before:0:12} -> ${after:0:12}"
 git log --oneline --no-decorate "$before..$after" | head -n 20
 deploy/install.sh                       # venv, dependencies, tests
-sudo -n systemctl restart meme-agents   # needs a passwordless sudo rule for this one command
+$SUDO systemctl restart meme-agents
 sleep 5
 echo "service: $(systemctl is-active meme-agents 2>/dev/null || echo unknown)"
 .venv/bin/python -m bot status --check || true
