@@ -1,0 +1,7 @@
+anthropic>=1.11,<2
+httpx>=0.28,<1
+websockets>=15,<18
+solders>=0.26,<0.30
+solana>=0.41,<0.42
+aiosqlite>=0.21,<1
+pytest>=8

@@ -1,0 +1,389 @@
+"""Position lifecycle: pending entry -> open -> (partial) exits -> closed.
+
+* Entries fill at the first PumpPortal trade observed after the decision.
+* Every trade tick marks open positions to market and runs the exit rules; exits triggered
+  by a tick fill at that tick's price.
+* Time stops, emergencies and the kill switch queue an exit that fills on the next tick, or
+  at the last observed price after EXIT_FILL_TIMEOUT_S.
+* `shadow` positions run the same engine for every evaluated candidate (no bankroll) so the
+  report can score each agent's votes against an outcome.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import asdict, dataclass, fields
+from typing import Awaitable, Callable
+
+from .config import Settings
+from .db import Database
+from .exits import ExitState, check_exit
+from .paper import Fill, PaperExecutor, mark_to_market
+from .risk import RiskManager, kill_switch_active
+from .util import now_s
+
+log = logging.getLogger("bot.positions")
+
+
+@dataclass
+class Position:
+    id: int | None
+    mint: str
+    candidate_id: int | None
+    kind: str            # real | shadow
+    mode: str            # paper | live
+    creator: str
+    status: str          # pending | open | closed | cancelled
+    decided_at: float
+    size_usd: float
+    sol_in: float
+    opened_at: float | None = None
+    closed_at: float | None = None
+    cost_sol: float = 0.0
+    entry_price: float | None = None
+    tokens_initial: float = 0.0
+    tokens_remaining: float = 0.0
+    peak_price: float | None = None
+    last_price: float | None = None
+    last_tick_at: float | None = None
+    tp_done: int = 0
+    entry_liq_usd: float | None = None
+    last_liq_usd: float | None = None
+    proceeds_sol: float = 0.0
+    pnl_sol: float | None = None
+    pnl_usd: float | None = None
+    sol_usd_entry: float | None = None
+    sol_usd_exit: float | None = None
+    exit_reason: str | None = None
+    pending_exit: str | None = None
+    pending_exit_fraction: float | None = None
+    pending_exit_at: float | None = None
+
+    def row(self) -> dict:
+        d = asdict(self)
+        d.pop("id")
+        return d
+
+    @property
+    def active(self) -> bool:
+        return self.status in ("pending", "open")
+
+    def unrealized_sol(self, s: Settings) -> float:
+        if self.status != "open" or not self.last_price:
+            return 0.0
+        return self.proceeds_sol + mark_to_market(self.tokens_remaining, self.last_price, s) - self.cost_sol
+
+
+def _num(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+Notifier = Callable[[str], Awaitable[None]]
+
+
+class PositionManager:
+    def __init__(self, settings: Settings, db: Database, risk: RiskManager, executor, sol_price,
+                 dex=None, rugcheck=None, notifier: Notifier | None = None,
+                 pin: Callable[[str, bool], None] | None = None,
+                 watch_account: Callable[[str, bool], Awaitable[None]] | None = None):
+        self.s = settings
+        self.db = db
+        self.risk = risk
+        self.executor = executor
+        self.shadow_exec = PaperExecutor(settings)
+        self.sol_price = sol_price
+        self.dex = dex
+        self.rugcheck = rugcheck
+        self.notify = notifier
+        self.pin = pin or (lambda mint, on: None)
+        self.watch_account = watch_account
+        self.positions: dict[int, Position] = {}
+        self.lock = asyncio.Lock()
+        self._last_liq_poll = 0.0
+        self._last_rug_poll = 0.0
+        self._kill_handled = False
+
+    # --- queries ---------------------------------------------------------------
+    def active(self, kind: str | None = "real") -> list[Position]:
+        return [p for p in self.positions.values() if p.active and (kind is None or p.kind == kind)]
+
+    async def cash_sol(self) -> float:
+        """Paper bankroll: starting SOL + realized PnL - capital tied up in active positions."""
+        start = await self.db.kv_get("bankroll_sol")
+        start_sol = float(start) if start else 0.0
+        r = await self.db.fetchone(
+            "SELECT COALESCE(SUM(pnl_sol),0) s FROM positions WHERE kind='real' AND status='closed'")
+        tied = sum(p.cost_sol or p.sol_in + self.s.NETWORK_FEE_SOL for p in self.active("real"))
+        tied -= sum(p.proceeds_sol for p in self.active("real"))
+        return start_sol + float(r["s"]) - tied
+
+    async def realized_since(self, since: float) -> float:
+        r = await self.db.fetchone(
+            "SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND status='closed' AND closed_at>=?",
+            [since])
+        return float(r["s"])
+
+    # --- persistence -------------------------------------------------------------
+    async def load(self) -> None:
+        rows = await self.db.fetchall("SELECT * FROM positions WHERE status IN ('pending','open')")
+        names = {f.name for f in fields(Position)}
+        for r in rows:
+            p = Position(**{k: v for k, v in r.items() if k in names})
+            self.positions[p.id] = p
+            self.pin(p.mint, True)
+            if self.watch_account and p.creator:
+                await self.watch_account(p.creator, True)
+        if rows:
+            log.info("resumed %d active positions", len(rows))
+
+    async def _save(self, p: Position) -> None:
+        if p.id is None:
+            p.id = await self.db.insert("positions", p.row())
+            self.positions[p.id] = p
+        else:
+            await self.db.update("positions", "id", p.id, p.row())
+
+    async def _record_fill(self, p: Position, f: Fill, reason: str, ts: float) -> None:
+        await self.db.insert("fills", {"position_id": p.id, "ts": ts, "side": f.side, "reason": reason,
+                                       "price": f.price, "tokens": f.tokens, "sol": f.sol,
+                                       "fee_sol": f.fee_sol, "tx_sig": f.tx_sig})
+
+    # --- entry ---------------------------------------------------------------------
+    async def create(self, mint: str, candidate_id: int | None, kind: str, creator: str, size_usd: float,
+                     liq_usd: float | None) -> Position | None:
+        sol_usd = self.sol_price.get()
+        if not sol_usd:
+            log.warning("no SOL/USD price yet; cannot size %s position for %s", kind, mint)
+            return None
+        sol_in = size_usd / sol_usd
+        async with self.lock:
+            if kind == "real":
+                ok, why = self.risk.can_open(creator, [asdict(p) for p in self.active("real")],
+                                             await self.cash_sol(), sol_in + self.s.NETWORK_FEE_SOL)
+                if not ok:
+                    log.info("risk blocked entry %s: %s", mint, why)
+                    await self.db.event("risk_block", {"mint": mint, "reason": why}, now_s())
+                    return None
+            p = Position(id=None, mint=mint, candidate_id=candidate_id, kind=kind,
+                         mode=self.executor.mode if kind == "real" else "paper", creator=creator,
+                         status="pending", decided_at=now_s(), size_usd=size_usd, sol_in=sol_in,
+                         sol_usd_entry=sol_usd, entry_liq_usd=liq_usd, last_liq_usd=liq_usd)
+            await self._save(p)
+        self.pin(mint, True)
+        if self.watch_account and creator:
+            await self.watch_account(creator, True)
+        log.info("%s entry queued #%d %s $%.2f (%.4f SOL)", kind, p.id, mint, size_usd, sol_in)
+        return p
+
+    async def _fill_entry(self, p: Position, price: float, ts: float) -> None:
+        ex = self.executor if p.kind == "real" else self.shadow_exec
+        try:
+            f = await ex.buy(p.mint, p.sol_in, price)
+        except Exception as e:
+            log.error("entry failed #%s %s: %s", p.id, p.mint, e)
+            p.status, p.exit_reason, p.closed_at = "cancelled", f"entry_error: {e}"[:200], ts
+            await self._save(p)
+            await self._release(p)
+            return
+        p.status, p.opened_at = "open", ts
+        p.entry_price = price
+        p.peak_price = p.last_price = price
+        p.last_tick_at = ts
+        p.tokens_initial = p.tokens_remaining = f.tokens
+        p.cost_sol = f.sol
+        await self._save(p)
+        await self._record_fill(p, f, "entry", ts)
+        if p.kind == "real":
+            msg = (f"ENTRY [{p.mode}] {p.mint}\nsize ${p.size_usd:.2f} = {p.sol_in:.4f} SOL @ {price:.3e} SOL"
+                   f"\ntokens {f.tokens:,.0f}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
+            log.info(msg.replace("\n", " | "))
+            if self.notify:
+                await self.notify(msg)
+
+    # --- exits ---------------------------------------------------------------------
+    async def _exit(self, p: Position, fraction: float, price: float, ts: float, reason: str) -> None:
+        tokens = p.tokens_remaining if fraction >= 0.999 else p.tokens_remaining * fraction
+        if tokens <= 0:
+            return
+        ex = self.executor if p.kind == "real" else self.shadow_exec
+        try:
+            f = await ex.sell(p.mint, tokens, price)
+        except Exception as e:
+            log.error("exit failed #%s %s (%s): %s; will retry", p.id, p.mint, reason, e)
+            p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, ts
+            await self._save(p)
+            return
+        p.tokens_remaining -= tokens
+        p.proceeds_sol += f.sol
+        if reason == "take_profit":
+            p.tp_done = 1
+        p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
+        await self._record_fill(p, f, reason, ts)
+        closed = p.tokens_remaining <= p.tokens_initial * 1e-9
+        if closed:
+            p.tokens_remaining = 0.0
+            p.status, p.closed_at, p.exit_reason = "closed", ts, reason
+            p.sol_usd_exit = self.sol_price.get() or p.sol_usd_entry
+            p.pnl_sol = p.proceeds_sol - p.cost_sol
+            p.pnl_usd = p.pnl_sol * (p.sol_usd_exit or 0)
+        await self._save(p)
+        if p.kind == "real":
+            txt = (f"EXIT [{p.mode}] {reason} {p.mint}\nsold {tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
+                   + (f"\nclosed pnl {p.pnl_sol:+.4f} SOL (${p.pnl_usd:+.2f})" if closed else "")
+                   + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
+            log.info(txt.replace("\n", " | "))
+            if self.notify:
+                await self.notify(txt)
+        if closed:
+            await self._release(p)
+            if p.kind == "real":
+                self.risk.register_realized(await self.realized_since(self.risk.loss_window_start(ts)))
+
+    async def _release(self, p: Position) -> None:
+        still = [q for q in self.positions.values() if q.active and q.id != p.id]
+        if not any(q.mint == p.mint for q in still):
+            self.pin(p.mint, False)
+        if self.watch_account and p.creator and not any(q.creator == p.creator for q in still):
+            await self.watch_account(p.creator, False)
+        self.positions.pop(p.id, None)
+
+    def _state(self, p: Position) -> ExitState:
+        return ExitState(p.entry_price, p.peak_price or p.entry_price, bool(p.tp_done), p.opened_at,
+                         p.entry_liq_usd)
+
+    # --- event handlers ------------------------------------------------------------
+    async def on_tick(self, mint: str, price: float, ts: float, msg: dict) -> None:
+        targets = [p for p in self.positions.values() if p.mint == mint and p.active]
+        if not targets:
+            return
+        async with self.lock:
+            for p in targets:
+                if p.status == "pending":
+                    if ts > p.decided_at:
+                        await self._fill_entry(p, price, ts)
+                    continue
+                await self._on_price(p, price, ts)
+
+    async def _on_price(self, p: Position, price: float, ts: float) -> None:
+        """Mark to market and run the exit rules. Caller holds the lock."""
+        if p.status != "open":
+            return
+        p.last_price, p.last_tick_at = price, ts
+        p.peak_price = max(p.peak_price or price, price)
+        if p.pending_exit:
+            await self._exit(p, p.pending_exit_fraction or 1.0, price, ts, p.pending_exit)
+            return
+        sig = check_exit(self._state(p), price, ts, self.s)
+        if sig:
+            await self._exit(p, sig.fraction, price, ts, sig.reason)
+
+    async def queue_exit(self, p: Position, reason: str, fraction: float = 1.0) -> None:
+        if p.status == "pending":
+            p.status, p.exit_reason, p.closed_at = "cancelled", reason, now_s()
+            await self._save(p)
+            await self._release(p)
+            return
+        if not p.pending_exit:
+            p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
+            await self._save(p)
+            log.info("exit queued #%d %s: %s", p.id, p.mint, reason)
+
+    async def periodic(self) -> None:
+        """Timeouts, time stops, kill switch, liquidity + rugcheck polling."""
+        now = now_s()
+        async with self.lock:
+            if kill_switch_active(self.s):
+                if not self._kill_handled:
+                    log.warning("STOP file present: no new entries, closing all real positions")
+                    if self.notify:
+                        await self.notify("KILL SWITCH: STOP file found, closing all positions")
+                    self._kill_handled = True
+                for p in list(self.active("real")):
+                    await self.queue_exit(p, "kill_switch")
+            else:
+                self._kill_handled = False
+            for p in list(self.positions.values()):
+                if p.status == "pending" and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S:
+                    p.status, p.exit_reason, p.closed_at = "cancelled", "no trade after decision", now
+                    await self._save(p)
+                    await self._release(p)
+                    continue
+                if p.status != "open":
+                    continue
+                if not p.pending_exit:
+                    sig = check_exit(self._state(p), None, now, self.s)
+                    if sig:
+                        await self.queue_exit(p, sig.reason, sig.fraction)
+                if p.pending_exit and now - (p.pending_exit_at or now) > self.s.EXIT_FILL_TIMEOUT_S and p.last_price:
+                    await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now, p.pending_exit)
+        await self._poll_liquidity(now)
+        await self._poll_rugcheck(now)
+        # persist marks so a crash loses at most a few seconds of peak tracking
+        for p in list(self.positions.values()):
+            if p.status == "open" and p.id:
+                await self.db.update("positions", "id", p.id,
+                                     {"last_price": p.last_price, "peak_price": p.peak_price,
+                                      "last_tick_at": p.last_tick_at, "last_liq_usd": p.last_liq_usd})
+
+    async def _poll_liquidity(self, now: float) -> None:
+        if not self.dex or now - self._last_liq_poll < self.s.LIQ_POLL_S:
+            return
+        self._last_liq_poll = now
+        opened = [p for p in self.positions.values() if p.status == "open"]
+        if not opened:
+            return
+        try:
+            pairs = await self.dex.tokens(sorted({p.mint for p in opened}))
+        except Exception as e:
+            log.warning("liquidity poll failed: %s", e)
+            return
+        async with self.lock:
+            for p in opened:
+                pair = pairs.get(p.mint)
+                if not pair:
+                    continue
+                liq = (pair.get("liquidity") or {}).get("usd")
+                if liq is None:
+                    continue
+                p.last_liq_usd = liq
+                if p.entry_liq_usd is None:
+                    p.entry_liq_usd = liq
+                sig = check_exit(self._state(p), None, now, self.s, liq_usd=liq)
+                if sig and sig.reason.startswith("emergency") and p.status == "open":
+                    await self.queue_exit(p, sig.reason)
+                    continue
+                # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key):
+                # use DexScreener's price as the mark so stops still work.
+                stale = now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S
+                native = _num(pair.get("priceNative"))
+                if stale and native and p.status == "open":
+                    await self._on_price(p, native, now)
+
+    async def _poll_rugcheck(self, now: float) -> None:
+        if not self.rugcheck or now - self._last_rug_poll < self.s.RUGCHECK_POLL_S:
+            return
+        self._last_rug_poll = now
+        for p in [p for p in self.positions.values() if p.status == "open"]:
+            try:
+                rep = await self.rugcheck.check(p.mint, max_age_s=self.s.RUGCHECK_POLL_S / 2)
+            except Exception as e:
+                log.warning("rugcheck poll %s failed: %s", p.mint, e)
+                continue
+            if rep.get("danger"):
+                async with self.lock:
+                    if p.status == "open":
+                        await self.queue_exit(p, "emergency_rugcheck_danger")
+
+    async def run(self, stop: asyncio.Event, interval: float = 2.0) -> None:
+        while not stop.is_set():
+            try:
+                await self.periodic()
+            except Exception:
+                log.exception("position loop error")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass

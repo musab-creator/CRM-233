@@ -1,10 +1,12 @@
 # CRM-233
 
-Two apps live in this repo:
+Three apps live in this repo:
 
 - [`roofing-crm/`](./roofing-crm) — the Diversity Roofing CRM ([README](./roofing-crm/README.md))
 - [`xtract/`](./xtract) — Xtract Roof Reports: order-by-address roof measurement
   reports, generated and emailed automatically ([README](./xtract/README.md))
+- [`meme-agents/`](./meme-agents) — Solana meme-coin paper-trading bot gated by three
+  Claude agents ([README](./meme-agents/README.md))
 
 ---
 

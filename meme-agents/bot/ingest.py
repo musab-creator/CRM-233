@@ -1,0 +1,278 @@
+"""Turns the PumpPortal stream into per-mint aggregates and a tick stream.
+
+Every create/buy/sell is written to `trades`; per-mint aggregates live in memory (the hot
+path) and are flushed to `mints` once a second. Unique buyers exclude the creator wallet.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable
+
+from .config import Settings
+from .db import Database
+from .util import now_s
+
+log = logging.getLogger("bot.ingest")
+
+# pump.fun bonding curve constants (UI units, 6 decimals already applied by PumpPortal)
+INITIAL_VIRTUAL_TOKENS = 1_073_000_000.0
+SELLABLE_TOKENS = 793_100_000.0
+
+
+def bonding_progress(v_tokens: float | None) -> float:
+    if v_tokens is None:
+        return 0.0
+    return max(0.0, min(1.0, (INITIAL_VIRTUAL_TOKENS - float(v_tokens)) / SELLABLE_TOKENS))
+
+
+def trade_price(msg: dict) -> float | None:
+    """SOL per token, from the trade itself; falls back to curve reserves."""
+    sol, tok = msg.get("solAmount"), msg.get("tokenAmount") or msg.get("initialBuy")
+    try:
+        if sol and tok and float(tok) > 0:
+            return float(sol) / float(tok)
+        vs, vt = msg.get("vSolInBondingCurve"), msg.get("vTokensInBondingCurve")
+        if vs and vt and float(vt) > 0:
+            return float(vs) / float(vt)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+@dataclass
+class MintState:
+    mint: str
+    name: str = ""
+    symbol: str = ""
+    uri: str = ""
+    creator: str = ""
+    bonding_curve_key: str = ""
+    created_at: float = 0.0
+    first_trade_at: float = 0.0
+    last_trade_at: float = 0.0
+    trade_count: int = 0
+    buy_count: int = 0
+    sell_count: int = 0
+    buyers: set[str] = field(default_factory=set)
+    buy_sol: float = 0.0
+    sell_sol: float = 0.0
+    creator_sold_sol: float = 0.0
+    v_sol: float | None = None
+    v_tokens: float | None = None
+    progress: float = 0.0
+    market_cap_sol: float | None = None
+    last_price_sol: float | None = None
+    pool: str = "pump"
+    graduated: bool = False
+    status: str = "tracking"
+    status_reason: str = ""
+
+    @property
+    def net_inflow_sol(self) -> float:
+        return self.buy_sol - self.sell_sol
+
+    @property
+    def unique_buyers(self) -> int:
+        return len(self.buyers)
+
+    def age_min(self, now: float) -> float:
+        return (now - self.first_trade_at) / 60 if self.first_trade_at else 0.0
+
+    def row(self) -> dict:
+        return {
+            "mint": self.mint, "name": self.name, "symbol": self.symbol, "uri": self.uri,
+            "creator": self.creator, "bonding_curve_key": self.bonding_curve_key,
+            "created_at": self.created_at, "first_trade_at": self.first_trade_at,
+            "last_trade_at": self.last_trade_at, "trade_count": self.trade_count,
+            "buy_count": self.buy_count, "sell_count": self.sell_count,
+            "unique_buyers": self.unique_buyers, "buy_sol": self.buy_sol, "sell_sol": self.sell_sol,
+            "net_inflow_sol": self.net_inflow_sol, "creator_sold_sol": self.creator_sold_sol,
+            "v_sol": self.v_sol, "v_tokens": self.v_tokens, "progress": self.progress,
+            "market_cap_sol": self.market_cap_sol, "last_price_sol": self.last_price_sol,
+            "pool": self.pool, "graduated": int(self.graduated), "status": self.status,
+            "status_reason": self.status_reason, "updated_at": now_s(),
+        }
+
+
+TickHandler = Callable[[str, float, float, dict], Awaitable[None]]
+
+
+class Ingestor:
+    def __init__(self, settings: Settings, db: Database):
+        self.s = settings
+        self.db = db
+        self.mints: dict[str, MintState] = {}
+        self.pinned: set[str] = set()  # mints that must stay subscribed (candidates, positions)
+        self._trade_buf: list[tuple] = []
+        self._dirty: set[str] = set()
+        self.tick_handlers: list[TickHandler] = []
+        self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
+        self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
+        self.stats = {"creates": 0, "trades": 0}
+
+    # --- message handling -----------------------------------------------------
+    async def handle(self, msg: dict, ts: float | None = None) -> None:
+        tx = msg.get("txType")
+        mint = msg.get("mint")
+        if not tx or not mint:
+            return
+        ts = ts or now_s()
+        if tx == "create":
+            await self._on_create(msg, ts)
+        elif tx in ("buy", "sell"):
+            await self._on_trade(msg, ts)
+
+    async def _on_create(self, msg: dict, ts: float) -> None:
+        mint = msg["mint"]
+        st = self.mints.get(mint) or MintState(mint=mint)
+        st.name = (msg.get("name") or "")[:64]
+        st.symbol = (msg.get("symbol") or "")[:32]
+        st.uri = msg.get("uri") or ""
+        st.creator = msg.get("traderPublicKey") or ""
+        st.bonding_curve_key = msg.get("bondingCurveKey") or ""
+        st.created_at = ts
+        self.mints[mint] = st
+        self.stats["creates"] += 1
+        # The create carries the dev's initial buy: it is the first bonding-curve trade.
+        sol = float(msg.get("solAmount") or 0)
+        self._apply(st, "buy", st.creator, sol, float(msg.get("initialBuy") or 0), msg, ts)
+        await self._evict_if_full()
+        if self.subscribe:
+            await self.subscribe([mint])
+
+    async def _on_trade(self, msg: dict, ts: float) -> None:
+        mint = msg["mint"]
+        st = self.mints.get(mint)
+        if st is None:
+            # Not a tracked mint: an account-trade event for a watched creator's other token,
+            # or a late message after unsubscribe. Keep the raw trade; don't start tracking it.
+            self._trade_buf.append((
+                msg.get("signature"), mint, msg.get("traderPublicKey"), msg["txType"],
+                _f(msg.get("solAmount"), 0.0), _f(msg.get("tokenAmount"), 0.0), trade_price(msg),
+                _f(msg.get("vSolInBondingCurve"), None), _f(msg.get("vTokensInBondingCurve"), None),
+                _f(msg.get("marketCapSol"), None), msg.get("pool"), ts))
+            return
+        side = msg["txType"]
+        self._apply(st, side, msg.get("traderPublicKey") or "", float(msg.get("solAmount") or 0),
+                    float(msg.get("tokenAmount") or 0), msg, ts)
+        if st.last_price_sol:
+            for h in self.tick_handlers:
+                try:
+                    await h(mint, st.last_price_sol, ts, msg)
+                except Exception:  # a broken handler must not stop ingestion
+                    log.exception("tick handler failed for %s", mint)
+
+    def _apply(self, st: MintState, side: str, trader: str, sol: float, tokens: float, msg: dict, ts: float):
+        if not st.first_trade_at:
+            st.first_trade_at = ts
+        st.last_trade_at = ts
+        st.trade_count += 1
+        self.stats["trades"] += 1
+        if side == "buy":
+            st.buy_count += 1
+            st.buy_sol += sol
+            if trader and trader != st.creator:
+                st.buyers.add(trader)
+        else:
+            st.sell_count += 1
+            st.sell_sol += sol
+            if trader and trader == st.creator:
+                st.creator_sold_sol += sol
+        st.v_sol = _f(msg.get("vSolInBondingCurve"), st.v_sol)
+        st.v_tokens = _f(msg.get("vTokensInBondingCurve"), st.v_tokens)
+        st.market_cap_sol = _f(msg.get("marketCapSol"), st.market_cap_sol)
+        pool = msg.get("pool") or st.pool
+        st.pool = pool
+        if pool and pool != "pump":
+            st.graduated = True
+            st.progress = 1.0
+        else:
+            st.progress = bonding_progress(st.v_tokens)
+        price = trade_price(msg)
+        if price:
+            st.last_price_sol = price
+        self._trade_buf.append((
+            msg.get("signature"), st.mint, trader, side, sol, tokens, price,
+            st.v_sol, st.v_tokens, st.market_cap_sol, pool, ts,
+        ))
+        self._dirty.add(st.mint)
+
+    # --- subscriptions ---------------------------------------------------------
+    async def _evict_if_full(self) -> None:
+        if len(self.mints) <= self.s.MAX_TRACKED_MINTS:
+            return
+        victims = sorted(
+            (m for m in self.mints.values() if m.mint not in self.pinned),
+            key=lambda m: m.last_trade_at,
+        )[: len(self.mints) - self.s.MAX_TRACKED_MINTS]
+        await self._drop([v.mint for v in victims], "evicted")
+
+    async def _drop(self, mints: list[str], reason: str) -> None:
+        if not mints:
+            return
+        for m in mints:
+            st = self.mints.pop(m, None)
+            if st and st.status == "tracking":
+                st.status, st.status_reason = "dropped", reason
+            if st:
+                await self.db.upsert_mints([st.row()])
+            self._dirty.discard(m)
+        if self.unsubscribe:
+            await self.unsubscribe(mints)
+
+    async def housekeeping(self) -> None:
+        now = now_s()
+        old = [m.mint for m in self.mints.values()
+               if m.mint not in self.pinned and m.age_min(now) > self.s.PF_MAX_AGE_MIN]
+        await self._drop(old, "aged_out")
+        await self.db.prune_trades(now - self.s.TRADE_RETENTION_HOURS * 3600)
+
+    async def flush(self) -> None:
+        buf, self._trade_buf = self._trade_buf, []
+        await self.db.insert_trades(buf)
+        dirty, self._dirty = self._dirty, set()
+        await self.db.upsert_mints([self.mints[m].row() for m in dirty if m in self.mints])
+
+    async def run_flusher(self, stop: asyncio.Event) -> None:
+        last_hk = now_s()
+        while not stop.is_set():
+            await asyncio.sleep(1.0)
+            try:
+                await self.flush()
+                if now_s() - last_hk > 60:
+                    await self.housekeeping()
+                    last_hk = now_s()
+            except Exception:
+                log.exception("flush failed")
+        await self.flush()
+
+    async def restore(self) -> None:
+        """Rebuild in-memory state for mints still inside the window after a restart."""
+        cutoff = now_s() - self.s.PF_MAX_AGE_MIN * 60
+        rows = await self.db.fetchall(
+            "SELECT * FROM mints WHERE first_trade_at > ? OR status IN ('candidate','evaluated')", [cutoff])
+        for r in rows:
+            st = MintState(mint=r["mint"])
+            for k in ("name", "symbol", "uri", "creator", "bonding_curve_key", "created_at", "first_trade_at",
+                      "last_trade_at", "trade_count", "buy_count", "sell_count", "buy_sol", "sell_sol",
+                      "creator_sold_sol", "v_sol", "v_tokens", "progress", "market_cap_sol",
+                      "last_price_sol", "pool", "status", "status_reason"):
+                if r.get(k) is not None:
+                    setattr(st, k, r[k])
+            st.graduated = bool(r.get("graduated"))
+            buyers = await self.db.fetchall(
+                "SELECT DISTINCT trader FROM trades WHERE mint=? AND side='buy' AND trader!=?",
+                [st.mint, st.creator or ""])
+            st.buyers = {b["trader"] for b in buyers}
+            self.mints[st.mint] = st
+        if rows:
+            log.info("restored %d mints from db", len(rows))
+
+
+def _f(v, default):
+    try:
+        return float(v) if v is not None else default
+    except (TypeError, ValueError):
+        return default

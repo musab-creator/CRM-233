@@ -1,0 +1,101 @@
+"""Helius RPC (free plan: 10 req/s) and Enhanced Transactions API (2 req/s)."""
+from __future__ import annotations
+
+import itertools
+
+import httpx
+
+from ..util import RateLimiter
+from .http import HttpError, request_json
+
+LAMPORTS = 1_000_000_000
+
+
+class RpcError(Exception):
+    pass
+
+
+class Helius:
+    def __init__(self, client: httpx.AsyncClient, rpc_url: str, api_url: str, api_key: str,
+                 rpc_rps: float, enhanced_rps: float):
+        self.c = client
+        self.rpc_url = rpc_url
+        self.api_url = api_url.rstrip("/")
+        self.key = api_key
+        self.rpc_lim = RateLimiter(rpc_rps, burst=rpc_rps)
+        self.enh_lim = RateLimiter(enhanced_rps, burst=1)
+        self._ids = itertools.count(1)
+
+    async def rpc(self, method: str, params: list) -> dict | list | int | None:
+        body = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params}
+        data = await request_json(self.c, "POST", self.rpc_url, json=body, limiter=self.rpc_lim)
+        if data is None:
+            raise RpcError(f"{method}: empty response")
+        if data.get("error"):
+            raise RpcError(f"{method}: {data['error']}")
+        return data.get("result")
+
+    async def balance_sol(self, pubkey: str) -> float:
+        res = await self.rpc("getBalance", [pubkey, {"commitment": "confirmed"}])
+        return (res or {}).get("value", 0) / LAMPORTS
+
+    async def holders(self, mint: str, exclude: set[str] | None = None) -> dict:
+        """Top-20 token accounts resolved to owner wallets, with % of supply."""
+        exclude = exclude or set()
+        supply_res = await self.rpc("getTokenSupply", [mint])
+        supply = float(((supply_res or {}).get("value") or {}).get("uiAmount") or 0)
+        largest = ((await self.rpc("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])) or {}).get("value") or []
+        addrs = [a["address"] for a in largest]
+        owners: dict[str, str] = {}
+        if addrs:
+            accs = ((await self.rpc("getMultipleAccounts", [addrs, {"encoding": "jsonParsed"}])) or {}).get("value") or []
+            for addr, acc in zip(addrs, accs):
+                try:
+                    owners[addr] = acc["data"]["parsed"]["info"]["owner"]
+                except (TypeError, KeyError):
+                    owners[addr] = ""
+        rows = []
+        for a in largest:
+            ui = float(a.get("uiAmount") or 0)
+            owner = owners.get(a["address"], "")
+            rows.append({
+                "token_account": a["address"], "owner": owner,
+                "pct": round(100 * ui / supply, 3) if supply else None,
+                "is_pool_or_curve": a["address"] in exclude or owner in exclude,
+            })
+        real = [r for r in rows if not r["is_pool_or_curve"]]
+        return {
+            "supply": supply,
+            "holders": rows,
+            "top10_pct_ex_pools": round(sum(r["pct"] or 0 for r in real[:10]), 2),
+            "top1_pct_ex_pools": real[0]["pct"] if real else None,
+        }
+
+    async def address_transactions(self, address: str, limit: int = 20) -> list[dict]:
+        """Enhanced (parsed) transactions for a wallet, newest first."""
+        url = f"{self.api_url}/addresses/{address}/transactions"
+        try:
+            data = await request_json(self.c, "GET", url, params={"api-key": self.key, "limit": limit},
+                                      limiter=self.enh_lim)
+        except HttpError:
+            return []
+        out = []
+        for t in data or []:
+            out.append({
+                "signature": t.get("signature"), "timestamp": t.get("timestamp"), "type": t.get("type"),
+                "source": t.get("source"), "description": (t.get("description") or "")[:200],
+                "token_transfers": [
+                    {"mint": x.get("mint"), "from": x.get("fromUserAccount"), "to": x.get("toUserAccount"),
+                     "amount": x.get("tokenAmount")}
+                    for x in (t.get("tokenTransfers") or [])[:6]
+                ],
+            })
+        return out
+
+    async def simulate(self, tx_b64: str) -> dict:
+        return await self.rpc("simulateTransaction", [tx_b64, {
+            "encoding": "base64", "sigVerify": True, "commitment": "confirmed"}])
+
+    async def send(self, tx_b64: str) -> str:
+        return await self.rpc("sendTransaction", [tx_b64, {
+            "encoding": "base64", "skipPreflight": False, "maxRetries": 3, "preflightCommitment": "confirmed"}])

@@ -1,0 +1,10 @@
+.env
+data/
+reports/
+STOP
+STOP_SIM
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.log

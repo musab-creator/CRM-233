@@ -31,6 +31,30 @@ jobs:
       - name: Build
         run: npm run build
 
+  meme-agents:
+    name: Test meme-agents
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: meme-agents
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: meme-agents/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Offline smoke run
+        run: python -m bot simulate --minutes 2 && python -m bot report --sim
+
   xtract:
     name: Build xtract
     runs-on: ubuntu-latest
