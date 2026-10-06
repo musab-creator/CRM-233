@@ -119,6 +119,8 @@ The bot now:
   Telegram is set up);
 - with Telegram set up, also messages you on every entry and exit, sends an hourly digest of
   trades and open positions, and the daily summary at midnight UTC.
+- answers `/status`, `/digest`, `/report`, `/stop`, `/resume` and `/help` typed into the Telegram
+  chat, so you can check on it from your phone without PowerShell.
 
 ## 9. Watch it
 

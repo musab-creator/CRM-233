@@ -10,7 +10,7 @@ so check the linked page before you pay for anything.
 | `ANTHROPIC_API_KEY` | **Required** | The three agents (Scout, Hunter, Analyst) | Pay per token. The bot stops evaluating at `LLM_DAILY_BUDGET_USD` (default $5/day). |
 | `HELIUS_API_KEY` | **Required** | On-chain data: bonding-curve state, holders, the creator's wallet, and the live-mode RPC | Free plan: 1M credits/month, 10 RPC req/s, 2 DAS req/s. The bot paces itself under `HELIUS_MONTHLY_CREDITS`. |
 | `X_BEARER_TOKEN` | Optional, **but without it the bot almost never buys** (see below) | Scout searches X; Hunter reads the watchlist timelines | Pay per use: $0.005 per post read, $0.01 per user read. The bot stops at `X_MONTHLY_BUDGET_USD` (default $20/month). |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional | Alerts for entries, exits, the daily summary and health | Free |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Optional | Alerts for entries, exits, the hourly digest, the daily summary and health; `/status` and `/report` from your phone | Free |
 | `JUPITER_API_KEY` | Optional, live mode only | Swaps for graduated tokens | Free plan: 1 req/s |
 | `PUMPPORTAL_API_KEY` | **Not needed** (see below) | Paid per-token trade stream, off by default | 0.01 SOL per 10,000 trades from a wallet you fund |
 | `CRYPTOPANIC_TOKEN` | Optional | Extra news headlines | Paid plans only (the free plan was discontinued in early 2026). Without it the bot uses free RSS feeds. |
@@ -156,6 +156,11 @@ time), an **hourly digest** at the top of each UTC hour with the hour's closed t
 positions, candidates and today's totals (`TELEGRAM_DIGEST=all`; `wins` sends it only for hours
 with a winning trade; `off` disables it), the daily summary at midnight UTC, and health
 alerts from the cron check.
+
+What you can ask it: type `/status`, `/digest` (this hour so far), `/report`, `/stop` (kill
+switch on: no new entries, every position closed), `/resume` or `/help` in the chat and the bot
+answers within a few seconds. Only messages from `TELEGRAM_CHAT_ID` are answered; the `/`
+button in Telegram shows the menu. `TELEGRAM_COMMANDS=false` turns this off.
 
 ### Jupiter (`JUPITER_API_KEY`), optional, live mode only
 

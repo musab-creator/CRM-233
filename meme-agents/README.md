@@ -57,6 +57,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle, and that the report runs. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
+| Telegram `/status`, `/digest`, `/report`, `/stop`, `/resume`, `/help` | Sent to your bot from `TELEGRAM_CHAT_ID`: the same status, this hour's digest, the full report, and the kill switch on or off. Other chats are ignored. `TELEGRAM_COMMANDS=false` turns this off. |
 
 ## How a token moves through the pipeline
 
@@ -195,6 +196,10 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   - BLIND: no PumpPortal message for 5 minutes;
   - PAUSED: the daily loss cap was hit;
   - DEGRADED: the last 6 agent votes all failed, for example because the Anthropic key expired.
+- **Telegram commands.** With Telegram set up, the bot long-polls its own messages (no open port)
+  and answers `/status`, `/digest` (this hour so far), `/report`, `/stop` (writes the STOP file),
+  `/resume` and `/help`, only from `TELEGRAM_CHAT_ID`. Commands from any other chat are logged
+  and ignored; commands sent while the bot was down are not answered on restart.
 - **systemd** (`deploy/meme-agents.service`) restarts the bot after a crash, and after a hang:
   the bot pings systemd's watchdog every 60 s. Configuration errors (exit 2) are not
   retried. The unit can write only `data/`, `logs/` and `reports/`.

@@ -88,6 +88,10 @@ async def _telegram_chats_hint(http: httpx.AsyncClient, base: str, name: str | N
     """The chat ids that have written to the bot (getUpdates), so the user can copy the right one."""
     try:
         r = await http.get(f"{base}/getUpdates", timeout=10)
+        if r.status_code == 409:  # the running bot long-polls the same messages for its commands
+            return ("the running bot is reading this bot's messages, so the chat ids cannot be listed here: "
+                    "`journalctl -u meme-agents | grep 'telegram: ignoring'` shows the id of any chat that "
+                    "has sent it a command, or stop the bot and run preflight again")
         updates = _json(r).get("result") or []
     except Exception:
         updates = []

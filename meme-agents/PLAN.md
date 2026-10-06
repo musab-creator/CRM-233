@@ -136,6 +136,11 @@ Added after the build, when research showed a change in PumpPortal's data API:
     evenly over the UTC day with `LLM_BUDGET_BURST_HOURS` (2) hours' worth up front, so the bot
     evaluates throughout the day instead of spending it all in the first two hours. The brief's
     cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`.
+24. **Telegram commands come only from `TELEGRAM_CHAT_ID`.** The bot long-polls `getUpdates`
+    (no inbound port, so the firewall stays closed) and answers `/status`, `/digest`, `/report`,
+    `/stop` and `/resume` from that chat alone; other chats are logged and ignored. `/stop` writes
+    the same STOP file as the kill switch, so the two paths cannot disagree. Nothing in the chat
+    can change a setting, unlock live mode or send a transaction.
 
 ## File tree
 
@@ -175,7 +180,9 @@ meme-agents/
     status.py        live status and the health check for cron
     preflight.py     API/key checks and the live-data probe
     acceptance.py    the brief's "Done when" test, automated
-    telegram.py      optional alerts
+    telegram.py      optional alerts and the getUpdates poller
+    digest.py        the hourly Telegram digest
+    commands.py      Telegram commands (/status /digest /report /stop /resume) from the configured chat
     engine.py        wires everything together
     sim.py           offline synthetic feed for smoke runs (no network, no keys)
   tests/  test_prefilter.py test_consensus.py test_paper.py test_exits.py

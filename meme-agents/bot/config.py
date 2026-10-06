@@ -56,6 +56,7 @@ class Settings:
     TELEGRAM_BOT_TOKEN: str = field(default="", repr=False)
     TELEGRAM_CHAT_ID: str = ""
     TELEGRAM_DIGEST: str = "all"              # hourly Telegram digest: all | wins (hours with a winning trade) | off
+    TELEGRAM_COMMANDS: bool = True            # answer /status /digest /report /stop /resume from TELEGRAM_CHAT_ID
     WALLET_PRIVATE_KEY: str = field(default="", repr=False)
 
     # --- paths -----------------------------------------------------------------

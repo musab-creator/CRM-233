@@ -17,6 +17,7 @@ import httpx
 from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs
 from .budget import Budget, utc_day, utc_month
+from .commands import TelegramCommands
 from .config import Settings
 from .consensus import gate
 from .db import Database
@@ -632,6 +633,8 @@ class Engine:
             "heartbeat": self.heartbeat,
             **{f"evaluator{i}": self.evaluator for i in range(self.s.LLM_CONCURRENCY)},
         }
+        if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
+            loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
         log.info("bot running in %s mode (model %s)", self.s.MODE, self.s.LLM_MODEL)
         sd_notify("READY=1")
