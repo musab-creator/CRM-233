@@ -15,11 +15,44 @@ from .risk import kill_switch_active, utc_midnight
 from .util import now_s
 
 
+HEARTBEAT_STALE_S = 180   # the bot writes one every 60 s
+STREAM_STALE_S = 300      # pump.fun launches every few seconds: 5 silent minutes means blind
+FAILING_VOTES = 6         # this many failed votes in a row (two candidates) means the agents are down
+
+
 def _ago(ts: float | None, now: float) -> str:
     if not ts:
         return "never"
     d = now - ts
     return f"{d:.0f}s ago" if d < 120 else f"{d / 60:.0f}m ago" if d < 7200 else f"{d / 3600:.1f}h ago"
+
+
+async def health(db: Database, s: Settings, now: float | None = None) -> tuple[str, str]:
+    """(state, one line) for monitoring: OK, PAUSED (alive, needs a human), DEGRADED (alive, but
+    the agents fail, for example an expired key), DOWN or BLIND."""
+    now = now or now_s()
+    raw = await db.kv_get("heartbeat")
+    if not raw:
+        return "DOWN", "no heartbeat recorded: the bot has not run against this database"
+    hb = json.loads(raw)
+    if hb.get("stopped_at"):
+        return "DOWN", f"stopped cleanly {_ago(hb['stopped_at'], now)}"
+    if now - (hb.get("ts") or 0) > HEARTBEAT_STALE_S:
+        return "DOWN", f"last heartbeat {_ago(hb.get('ts'), now)}"
+    started = hb.get("started_at") or hb.get("ts")
+    if now - started > STREAM_STALE_S and now - (hb.get("last_msg_at") or 0) > STREAM_STALE_S:
+        return "BLIND", (f"no PumpPortal message for {_ago(hb.get('last_msg_at'), now)} "
+                         f"(reconnects {hb.get('reconnects')}, stalls {hb.get('stalls')})")
+    extra = f", {hb['crashes']} loop restart(s)" if hb.get("crashes") else ""
+    # an expired or revoked ANTHROPIC_API_KEY keeps the bot alive but turns every vote into an error
+    recent = await db.fetchall("SELECT error FROM votes ORDER BY id DESC LIMIT ?", [FAILING_VOTES])
+    if len(recent) == FAILING_VOTES and all(r["error"] and "budget" not in r["error"] for r in recent):
+        return "DEGRADED", f"the last {FAILING_VOTES} agent votes failed: {recent[0]['error'][:160]}"
+    if hb.get("paused"):
+        return "PAUSED", f"{hb['paused']}{extra}"
+    return "OK", (f"up {_ago(started, now).replace(' ago', '')}, {hb.get('launches')} launches, "
+                  f"{hb.get('cycles')} decisions, queue {hb.get('queue')}, Helius credits "
+                  f"{hb.get('helius_credits_month')} this month{extra}")
 
 
 async def build_status(db: Database, s: Settings) -> str:
@@ -28,7 +61,9 @@ async def build_status(db: Database, s: Settings) -> str:
     hb_raw = await db.kv_get("heartbeat")
     hb = json.loads(hb_raw) if hb_raw else {}
     alive = hb.get("ts")
-    state = "RUNNING" if alive and now - alive < 180 else "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started"
+    state = ("STOPPED (clean shutdown)" if hb.get("stopped_at") else
+             "RUNNING" if alive and now - alive < 180 else
+             "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started")
     lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={s.MODE}")
     if hb:
         lines.append(f"stream: {hb.get('tracked')} mints tracked, {hb.get('trades')} trades this session, "

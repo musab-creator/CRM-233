@@ -1,0 +1,48 @@
+# systemd unit for meme-agents. deploy/install.sh --systemd fills in @APP_DIR@ and @USER@ and
+# installs it as /etc/systemd/system/meme-agents.service.
+#
+#   sudo systemctl start meme-agents       start (paper mode unless .env unlocks live)
+#   sudo systemctl stop meme-agents        stop; open paper positions are kept and resumed
+#   journalctl -u meme-agents -f           follow the log (also in logs/bot.log)
+#
+# Note: the daily loss cap pauses entries "until restart". A restart after a crash also counts
+# as a restart, so it clears the pause too. Check `python -m bot status` after any crash.
+
+[Unit]
+Description=meme-agents: pump.fun paper-trading bot gated by three Claude agents
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=notify
+User=@USER@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/python -m bot run
+# Exit 2 = bad configuration or live-mode checks refused: retrying cannot fix that.
+# Exit 3 = a startup problem such as no network: retried.
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=2
+TimeoutStartSec=180
+TimeoutStopSec=150
+# the bot pings systemd every 60 s; if its event loop hangs, systemd restarts it
+WatchdogSec=300
+Environment=PYTHONUNBUFFERED=1
+
+# hardening: the bot only writes data/, logs/ and reports/
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@/data @APP_DIR@/logs @APP_DIR@/reports
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
