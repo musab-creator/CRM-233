@@ -5,7 +5,7 @@
 #   deploy/install.sh --cron       also add the 5-minute health check to your crontab
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY="${PYTHON:-python3.12}"
+PY="${PYTHON:-}"
 SYSTEMD=0
 CRON=0
 for arg in "$@"; do
@@ -18,11 +18,23 @@ for arg in "$@"; do
 done
 cd "$APP_DIR"
 
-if ! command -v "$PY" >/dev/null 2>&1; then
-  echo "$PY not found. On Ubuntu 24.04: sudo apt install python3.12 python3.12-venv" >&2
+if [ -z "$PY" ]; then  # the first Python that is 3.12 or newer
+  for c in python3.12 python3.13 python3.14 python3; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
+      PY="$c"
+      break
+    fi
+  done
+fi
+if [ -z "$PY" ]; then
+  echo "Python 3.12 or newer not found. On Ubuntu 24.04: sudo apt install python3.12 python3.12-venv" >&2
   exit 1
 fi
-[ -x .venv/bin/python ] || "$PY" -m venv .venv
+if [ ! -x .venv/bin/python ] && ! "$PY" -m venv .venv; then
+  echo "could not create the virtualenv. On Ubuntu/Debian: sudo apt install $(basename "$PY")-venv" >&2
+  rm -rf .venv
+  exit 1
+fi
 .venv/bin/pip install --quiet --upgrade pip
 .venv/bin/pip install --quiet -r requirements.txt
 mkdir -p data logs reports

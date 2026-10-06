@@ -1,0 +1,123 @@
+# Running meme-agents on your VPS
+
+Step by step on a fresh server, copy and paste. Ubuntu 24.04 is the easiest choice because it
+ships with Python 3.12. 1 vCPU, 1 GB of RAM and a few GB of disk are enough. The bot opens no
+ports and runs in **paper mode**: nothing here enables real trading.
+
+## 1. Connect to the server
+
+Your VPS provider's dashboard shows the server's **IP address** and the **root password**,
+or lets you add an SSH key.
+
+- **Windows:** open PowerShell and run `ssh root@YOUR_SERVER_IP`.
+- **Mac or Linux:** open Terminal and run the same command.
+- Type `yes` the first time, then the password. Nothing appears on screen while you type it;
+  that is normal.
+- You can also use the dashboard's "Console" or "Web terminal" button.
+
+## 2. Create a user for the bot (don't run it as root)
+
+```bash
+adduser bot             # choose a password; press Enter for the other questions
+usermod -aG sudo bot
+su - bot                # you are now "bot"; run every step below as this user
+```
+
+## 3. Install the basics and close the firewall
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git python3.12 python3.12-venv
+sudo ufw allow OpenSSH && sudo ufw --force enable    # the bot needs no open ports
+```
+
+## 4. Get the code
+
+```bash
+git clone https://github.com/musab-creator/CRM-233.git
+cd CRM-233
+git checkout claude/solana-meme-trading-agents-lfzoer   # until PR #9 is merged, then use main
+cd meme-agents
+```
+
+If git asks for a username and password, the repository is private:
+
+- **Username:** your GitHub username.
+- **Password:** a token, not your GitHub password. To make one, go to GitHub → **Settings**
+  → **Developer settings** → **Personal access tokens** → **Fine-grained tokens** →
+  **Generate new token**:
+  - **Repository access:** *Only select repositories*, then `CRM-233`.
+  - **Permissions:** *Contents*, *Read-only*.
+  - Generate it, copy it, and paste it as the password.
+
+## 5. Install
+
+```bash
+deploy/install.sh
+```
+
+This creates `.venv`, installs the dependencies, creates `.env` (readable only by you) and
+runs the tests, which should all pass. It is safe to run again at any time.
+
+## 6. Put your keys in `.env`
+
+```bash
+nano .env
+```
+
+Find these two lines and paste each key straight after the `=`, with no quotes or spaces:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+HELIUS_API_KEY=...
+```
+
+For Telegram alerts, fill in `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` too
+([KEYS.md](../KEYS.md) shows how). Save with **Ctrl+O**, then **Enter**, and exit with
+**Ctrl+X**.
+
+## 7. Check everything
+
+```bash
+.venv/bin/python -m bot preflight
+```
+
+Every row marked *(required)* must say **PASS**. If one fails, the line says why, for
+example a mistyped key.
+
+## 8. Start it for good
+
+```bash
+deploy/install.sh --systemd --cron
+sudo systemctl start meme-agents
+```
+
+The bot now:
+- starts again after a reboot;
+- restarts if it crashes or hangs;
+- gets a health check every 5 minutes, with a Telegram message if it goes down (when
+  Telegram is set up).
+
+## 9. Watch it
+
+```bash
+.venv/bin/python -m bot status     # what it is doing right now
+.venv/bin/python -m bot report     # results so far (also written to reports/)
+journalctl -u meme-agents -f       # the live log; Ctrl+C stops watching, not the bot
+```
+
+## Everyday commands
+
+Run these from `~/CRM-233/meme-agents`.
+
+| What | Command |
+|---|---|
+| Stop the bot | `sudo systemctl stop meme-agents` |
+| Start it | `sudo systemctl start meme-agents` |
+| Is it running? | `sudo systemctl status meme-agents` |
+| Kill switch: no new entries, close all positions | `touch STOP`. Remove it (`rm STOP`) to resume entries. |
+| Update to the latest code | `git pull && deploy/install.sh && sudo systemctl restart meme-agents` |
+| Health in one line | `.venv/bin/python -m bot status --check` |
+
+Don't also run `python -m bot` by hand while the service runs: the bot refuses to start a
+second copy on the same database, because two bots would trade the same bankroll.

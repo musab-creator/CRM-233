@@ -23,6 +23,9 @@ where to get each API key and where to store it.
 
 ## Setup (VPS, about 10 minutes)
 
+**[deploy/VPS.md](deploy/VPS.md)** walks through a fresh server with copy-paste commands,
+including SSH, a user for the bot, the firewall and a private-repo clone. In short:
+
 1. Install Python 3.12 and git. On Ubuntu: `sudo apt install python3.12 python3.12-venv git`.
 2. Clone the repo and `cd meme-agents`.
 3. Run `deploy/install.sh`. It creates `.venv`, installs the dependencies, creates `.env` from
