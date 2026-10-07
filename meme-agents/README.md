@@ -103,8 +103,9 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
      the same candidate data and no tools. Its BUY means "worth the committee's budget"; a
      PASS at `TRIAGE_MIN_CONFIDENCE` (0.7) or higher skips the three agents, which otherwise
      cost about $0.13 per candidate. It may skip only on hard red flags already in the data
-     (dev sold half or more, snipers still holding a third of the inflow, bundled buys,
-     retention under 40%, momentum gone). Errors, budget stops and unsure votes let the
+     (snipers still holding a third of the inflow, bundled buys, dev sold half or more together
+     with one of those, fewer than 10 effective holders, momentum reversed). The creator selling
+     on its own is not a flag: in the recorded outcomes those tokens did not do worse. Errors, budget stops and unsure votes let the
      candidate through. Its vote is stored like the others, so the report scores its skips
      against the shadow book. `TRIAGE_ENABLED=false` turns it off.
    - **Scout (المحقق):** `x_search`, `dexscreener_profile`, `dexscreener_boosts`. It judges

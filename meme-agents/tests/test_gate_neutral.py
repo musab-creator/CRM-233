@@ -115,3 +115,18 @@ def test_agent_forces_vote_after_prose_and_on_final_turn(s):
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_triage_no_longer_skips_on_the_creator_selling_alone():
+    from bot.agents.prompts import ANALYST, HUNTER, SCOUT, TRIAGE
+
+    hard = TRIAGE.split("Hard red flags", 1)[1].split("Weak signals", 1)[0]
+    weak = TRIAGE.split("Weak signals", 1)[1].split("Rules:", 1)[0]
+    assert "`dev_sold_pct_of_bought` >= 50) AND one of the sniper or" in hard   # only in combination
+    assert "alone it is not a flag" in hard
+    assert "`early_buyer_retention` below 0.4" not in hard                        # demoted ...
+    assert "`early_buyer_retention` below 0.4 by itself" in weak                 # ... to a weak signal
+    assert "creator selling by itself" in weak
+    assert "`net_flow_sol_5m` is negative (net outflow) after a positive" in hard
+    assert "did not do worse than the rest" in ANALYST                          # on-chain glossary
+    assert "cashing out" not in SCOUT and "cashing out" not in HUNTER and "cashing out" not in ANALYST

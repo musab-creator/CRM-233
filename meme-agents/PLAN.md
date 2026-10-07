@@ -193,6 +193,14 @@ Added after the build, when research showed a change in PumpPortal's data API:
     DexScreener gives no pair; preflight reports the fallback as a warning instead of a
     failure. Pair data for candidates still comes from DexScreener alone; the curve from
     Helius is the primary source for liquidity and price anyway.
+32. **The creator selling the launch buy is not a rug signal on pump.fun.** Triage skipped 62% of
+    one day's candidates (237 of 384), almost all on `dev_sold_pct_of_bought` 100. The report's
+    signal check over the shadow book said the opposite: dev sold above the median won 31% (n 45)
+    against 21% below it (n 57), and triage's own survivors won 12% against a 20% base rate.
+    Early-buyer retention pointed the same way (higher retention did worse). Both are now weak
+    signals; dev selling counts only together with a sniper or bundling flag. Five-minute net
+    flow turning negative after a positive previous window is the momentum flag instead. To be
+    re-checked against the report once a week of neutral-gate data exists.
 
 ## File tree
 
