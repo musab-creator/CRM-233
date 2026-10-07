@@ -162,11 +162,16 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
         return ("pass" if n else "warn"), f"{n} headlines" + ("" if s.CRYPTOPANIC_TOKEN else " (RSS only, no CryptoPanic token)")
 
     async def anthropic_key():
-        if not s.ANTHROPIC_API_KEY:
+        key = s.ANTHROPIC_API_KEY
+        if not key:
             return ("fail" if need_llm else "skip"), "ANTHROPIC_API_KEY not set: every agent vote would be PASS"
         import anthropic
-        client = anthropic.AsyncAnthropic(api_key=s.ANTHROPIC_API_KEY, max_retries=1)
-        m = await client.models.retrieve(s.LLM_MODEL)  # free: validates the key and the model id
+        client = anthropic.AsyncAnthropic(api_key=key, max_retries=1)
+        try:
+            m = await client.models.retrieve(s.LLM_MODEL)  # free: validates the key and the model id
+        except anthropic.AuthenticationError as e:
+            # the key itself is never printed; its shape says which kind of key was stored
+            return "fail", f"{_err(e)}; stored key {key_shape(key)}"
         return "pass", f"key valid, model {m.id} available"
 
     async def helius():
@@ -222,46 +227,92 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
 
 
 # --- live-data probe ---------------------------------------------------------------------------
-async def capture_stream(url: str, seconds: float, trade_subs: int = 20) -> dict:
+def key_shape(key: str) -> str:
+    """Describe an API key without revealing it: which kind of key its public prefix says it is, its
+    length, and stray characters a copy-paste leaves behind. The GitHub secret and the server .env
+    can only be compared this way."""
+    kinds = [("sk-ant-api", "sk-ant-api... (an Anthropic API key)"),
+             ("sk-ant-admin", "sk-ant-admin... (an Anthropic Admin API key: it cannot call the Messages API)"),
+             ("sk-ant-oat", "sk-ant-oat... (a Claude login token, not an API key)"),
+             ("sk-ant-", "sk-ant-... (unfamiliar Anthropic key variant)")]
+    kind = next((desc for prefix, desc in kinds if key.startswith(prefix)),
+                "does not start with sk-ant- (not an Anthropic API key)")
+    issues = []
+    if key != key.strip():
+        issues.append("surrounding whitespace")
+    if any(ch.isspace() for ch in key.strip()):
+        issues.append("inner whitespace or a line break")
+    if any(ch in key for ch in "\"'"):
+        issues.append("quote characters")
+    return f"shape: {kind}, {len(key)} chars" + (", " + ", ".join(issues) if issues else "")
+
+
+async def _read_stream(ws, t_end: float, trade_subs: int, creates: list, migrations: list, trades: dict,
+                       notices: list, other_tx: Counter) -> None:
+    """Read one connection until the capture window ends (returns) or the socket drops (raises)."""
+    while (left := t_end - time.monotonic()) > 0:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=left)
+        except asyncio.TimeoutError:
+            return
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            notices.append(str(raw)[:300])
+            continue
+        if not isinstance(msg, dict):
+            continue
+        tx = msg.get("txType")
+        if tx == "create":
+            msg["_seen"] = time.time()
+            creates.append(msg)
+            if len(creates) <= trade_subs:
+                await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [msg["mint"]]}))
+        elif tx in ("buy", "sell") and msg.get("mint"):
+            trades.setdefault(msg["mint"], []).append(msg)
+        elif tx == "migrate" or (tx is None and "pool" in msg and "mint" in msg):
+            migrations.append(msg)
+        elif tx:
+            other_tx[tx] += 1
+        elif len(notices) < 10:
+            notices.append({k: (str(v)[:200]) for k, v in msg.items()})
+
+
+async def capture_stream(url: str, seconds: float, trade_subs: int = 20, max_reconnects: int = 5) -> dict:
     """Record launches, migrations, any trades for the first `trade_subs` launches (subscribed
-    the way the paid stream would be), and PumpPortal's non-trade notices."""
+    the way the paid stream would be), and PumpPortal's non-trade notices.
+
+    PumpPortal drops connections without a close frame now and then (run 37675281355 lost its
+    socket within 150 s and the probe recorded nothing). The capture reconnects and re-subscribes
+    while time remains, up to `max_reconnects` times, and reports every drop."""
     creates: list[dict] = []
     migrations: list[dict] = []
     trades: dict[str, list[dict]] = {}
     notices: list = []
     other_tx: Counter = Counter()
+    drops: list[str] = []
+    reconnects = 0
     t_end = time.monotonic() + seconds
-    async with websockets.connect(url, open_timeout=15, max_size=2 ** 22) as ws:
-        await ws.send(json.dumps({"method": "subscribeNewToken"}))
-        await ws.send(json.dumps({"method": "subscribeMigration"}))
-        while (left := t_end - time.monotonic()) > 0:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=left)
-            except asyncio.TimeoutError:
+    while (left := t_end - time.monotonic()) > 0:
+        try:
+            async with websockets.connect(url, open_timeout=15, max_size=2 ** 22) as ws:
+                await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                await ws.send(json.dumps({"method": "subscribeMigration"}))
+                if creates:  # keep watching the launches an earlier connection subscribed to
+                    await ws.send(json.dumps({"method": "subscribeTokenTrade",
+                                              "keys": [c["mint"] for c in creates[:trade_subs]]}))
+                await _read_stream(ws, t_end, trade_subs, creates, migrations, trades, notices, other_tx)
+            break  # the window ended
+        except (websockets.WebSocketException, OSError, TimeoutError) as e:
+            drops.append(f"{round(seconds - left)}s: {_err(e)}")
+            if reconnects >= max_reconnects:
                 break
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                notices.append(str(raw)[:300])
-                continue
-            if not isinstance(msg, dict):
-                continue
-            tx = msg.get("txType")
-            if tx == "create":
-                msg["_seen"] = time.time()
-                creates.append(msg)
-                if len(creates) <= trade_subs:
-                    await ws.send(json.dumps({"method": "subscribeTokenTrade", "keys": [msg["mint"]]}))
-            elif tx in ("buy", "sell") and msg.get("mint"):
-                trades.setdefault(msg["mint"], []).append(msg)
-            elif tx == "migrate" or (tx is None and "pool" in msg and "mint" in msg):
-                migrations.append(msg)
-            elif tx:
-                other_tx[tx] += 1
-            elif len(notices) < 10:
-                notices.append({k: (str(v)[:200]) for k, v in msg.items()})
+            reconnects += 1
+            # one connection at a time, growing pause: PumpPortal times out clients that reconnect in bursts
+            await asyncio.sleep(max(0.0, min(1.0 * reconnects, t_end - time.monotonic())))
     return {"creates": creates, "migrations": migrations, "trades": trades, "notices": notices,
-            "other_tx": dict(other_tx), "seconds": seconds, "trade_subs": min(trade_subs, len(creates))}
+            "other_tx": dict(other_tx), "seconds": seconds, "trade_subs": min(trade_subs, len(creates)),
+            "reconnects": reconnects, "drops": drops}
 
 
 def summarize_stream(cap: dict) -> dict:
@@ -291,6 +342,8 @@ def summarize_stream(cap: dict) -> dict:
         "trades_received": n_trades,
         "notices": cap.get("notices") or [],
         "other_tx_types": cap.get("other_tx") or {},
+        "reconnects": cap.get("reconnects", 0),
+        "drops": cap.get("drops") or [],
         "sample_create": {k: v for k, v in (creates[0] if creates else {}).items() if k != "uri"},
         "sample_trade": next((v[0] for v in trades.values() if v), None),
     }
@@ -495,6 +548,7 @@ async def probe(s: Settings, http: httpx.AsyncClient, seconds: float) -> dict:
     match = hl.get("launch_trade_matches_create") or {}
     fresh_summary = out.get("dexscreener_fresh_launches") or {}
     out["assumptions"] = {
+        "pumpportal_stream_stayed_up": (not st["drops"]) or f"{st['reconnects']} reconnects after {st['drops']}",
         "pumpportal_create_fields_as_assumed": not st["create_fields_missing"],
         "create_reserves_on_pumpfun_curve (product/K ~ 1.0)": st["create_reserves_product_vs_k_median"],
         "pumpportal_trades_without_key": (f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} "
@@ -528,7 +582,8 @@ def render(checks: list[Check], probe_out: dict | None) -> str:
         st = probe_out["stream"]
         lines += ["", "== live probe ==",
                   f"stream: {st['launches']} launches ({st['launches_per_min']}/min), {st['migrations']} migrations, "
-                  f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches",
+                  (f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches, "
+                   f"{st['reconnects']} reconnects" + (f" after drops {st['drops']}" if st['drops'] else "")),
                   f"missing create fields: {st['create_fields_missing'] or 'none'}; create pools: {st['create_pools']}",
                   f"create fields: {st['create_fields_seen']}; skipped creates: "
                   f"{st['creates_skipped_not_pumpfun_curve']}, e.g. {json.dumps(st['sample_skipped_create'], default=str)}; "

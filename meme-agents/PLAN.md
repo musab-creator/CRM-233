@@ -180,6 +180,12 @@ Added after the build, when research showed a change in PumpPortal's data API:
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before
     this, Haiku's prose replies produced 90 triage errors in a day; each error fails open and
     sends the candidate to the committee at about thirty times the cost.
+30. **PumpPortal drops websocket connections without a close frame.** Live run 37675281355 lost
+    the probe's socket inside 150 s and recorded nothing. The probe reconnects (one connection
+    at a time, growing pause, five attempts) and re-subscribes, and reports every drop under
+    `pumpportal_stream_stayed_up`; ingest already reconnected. Preflight's Anthropic check now
+    also reports the stored key's shape (kind by public prefix, length, stray quotes or line
+    breaks) on a 401, since a GitHub secret can be compared with a server .env no other way.
 
 ## File tree
 
