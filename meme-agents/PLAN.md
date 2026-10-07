@@ -174,10 +174,16 @@ Added after the build, when research showed a change in PumpPortal's data API:
     Scout's PASSes also carried no information (75% of them were losers against an 80% base
     rate), because a token a few minutes old has no social footprint yet. The gate stays
     unanimous; what changes is the question. Scout and Hunter now vote PASS when they find
-    something against the token and BUY at 0.5 to 0.6 when they find nothing either way, so
-    Analyst (BUY lift 1.71x in the same data) has to supply the confidence that lifts the mean
-    over 0.65, and the forensics and social vetoes still run on every BUY. `false` restores the
-    strict prompts.
+    something against the token and BUY at 0.6 when they find nothing either way (0.5 when a tool
+    failed), so Analyst (BUY lift 1.71x in the same data) has to supply the confidence that lifts
+    the mean over 0.65: 0.6 + 0.6 + 0.75 is the lowest passing combination, which is why the
+    Analyst's neutral-mode prompt asks for 0.75 or more. The forensics and social vetoes still run
+    on every BUY. `false` restores the strict prompts. First live evening (7 Oct, 21:46 and 21:49
+    UTC): the Analyst voted BUY at 0.82 and 0.76, Scout and Hunter voted their neutral BUY, and
+    the grounding guard flipped both to PASS at grounding 0.17-0.30, because evidence such as
+    "x_search results 0" has no number the corpus can match. A neutral BUY (confidence at or
+    below 0.6 from Scout or Hunter in this mode) is therefore exempt from the grounding share;
+    it still needs at least one successful tool call, and the Analyst's BUY is guarded as before.
 29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
     force their single tool with `tool_choice`, and a committee agent is forced to call
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before

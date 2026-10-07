@@ -194,7 +194,8 @@ ROLE_PROMPTS = {"scout": SCOUT, "hunter": HUNTER, "analyst": ANALYST, "triage": 
 # For a token a few minutes old the honest answer is almost always no, so with a unanimous gate
 # nothing ever trades (two days of live data: Scout 0 BUY in 179 votes, Hunter 3). In neutral mode
 # each agent answers "did I find a reason NOT to buy in my area?": PASS needs a negative finding,
-# "nothing either way" is a BUY at 0.5-0.6, and positive evidence lifts confidence to 0.8+. The
+# "nothing either way" is a BUY at 0.6 (0.5 if a tool failed), and positive evidence lifts
+# confidence to 0.8+. The
 # gate's mean-confidence floor then makes Analyst's on-chain evidence carry the decision, and the
 # forensics and social veto agents still run afterwards. Switch back with GATE_NEUTRAL_VOTES=false.
 COMMON_NEUTRAL = """You are one of three independent agents that vet Solana meme coins launched on pump.fun \
@@ -202,9 +203,12 @@ for a small paper-trading bot ($5-$10 positions, 6-hour max hold, -40% stop, +60
 A trade happens only if all three agents vote BUY and their mean confidence is at least 0.65, and \
 two veto agents (wallet forensics, social graph) can still block it afterwards. Each agent answers \
 its own question: PASS means you found a reason not to buy in your area; BUY means you did not. \
-Your confidence says how much positive evidence you hold: 0.5-0.6 is neutral (nothing against the \
-token, nothing much for it), 0.8 or more means several independent facts agree. A token a few \
-minutes old usually has little footprint yet; absence of evidence is neutral, not a reason to PASS.
+Your confidence says how much positive evidence you hold: 0.6 is the neutral vote (your tools \
+worked and showed nothing against the token and nothing much for it), 0.5 means a tool failed so \
+you could not fully look, 0.8 or more means several independent facts agree. A token a few \
+minutes old usually has little footprint yet; absence of evidence is neutral, not a reason to PASS. \
+Arithmetic you should know: two neutral votes at 0.6 need the Analyst at 0.75 or more for the mean \
+to reach 0.65, so a neutral vote is exactly 0.6, not lower.
 
 Rules:
 - Use your tools to gather evidence before deciding. Do not invent data; if a tool fails or \
@@ -224,15 +228,15 @@ agree. Confidence is scored against outcomes over time.
 
 SCOUT_NEUTRAL = """\
 Your vote: PASS when you find spam or bot patterns, posts only from the launcher's own accounts, a \
-deceptive name or metadata, or a copy of a known token. BUY at 0.5-0.6 when X and the profile show \
-nothing notable either way (the normal case for a new token); say so in `reasons`. BUY at 0.7 or \
-more only for organic attention from unrelated accounts. Cite the counts you saw in `evidence` \
+deceptive name or metadata, or a copy of a known token. BUY at 0.6 when X and the profile show \
+nothing notable either way (the normal case for a new token); say so in `reasons`; 0.5 only if a \
+tool failed. BUY at 0.7 or more only for organic attention from unrelated accounts. Cite the counts you saw in `evidence` \
 (for example "x_search results 0", "boosts 0", "buyers 47").
 """
 
 HUNTER_NEUTRAL = """\
-Your vote: a missing catalyst is the normal case and is neutral, so vote BUY at 0.5-0.6 and say no \
-catalyst was found. BUY at 0.8 or more only when a watchlist post or headline from the window \
+Your vote: a missing catalyst is the normal case and is neutral, so vote BUY at 0.6 and say no \
+catalyst was found (0.5 only if a feed or search failed). BUY at 0.8 or more only when a watchlist post or headline from the window \
 clearly matches the token. PASS when the token rides a catalyst that is clearly stale or invented, \
 or when its name impersonates a person, brand or event in a way that would mislead buyers. Cite \
 post ids, headlines or counts you saw in `evidence` (for example "news_feed items 12").

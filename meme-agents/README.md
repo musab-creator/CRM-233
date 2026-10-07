@@ -151,9 +151,12 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    a few minutes old almost never has either, so in two days of live data Scout voted BUY 0
    times in 179 and nothing traded. Neutral mode asks each agent "did you find a reason not to
    buy in your area?": spam, bots or a deceptive name are a PASS from Scout, a stale or invented
-   catalyst a PASS from Hunter, and "nothing either way" is a BUY at confidence 0.5 to 0.6.
-   Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence floor then means
-   Analyst's on-chain evidence has to carry the decision, and the veto stage still runs.
+   catalyst a PASS from Hunter, and "nothing either way" is a BUY at confidence 0.6 (0.5 when a
+   tool failed). Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence
+   floor then means Analyst's on-chain evidence has to carry the decision (0.6 + 0.6 + 0.75 is
+   the lowest unanimous BUY that passes), and the veto stage still runs. A neutral BUY is exempt
+   from the evidence-grounding share of the guard, because its evidence is the absence of
+   findings; it still needs a successful tool call.
 
    **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
    so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a

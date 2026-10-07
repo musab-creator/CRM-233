@@ -4,7 +4,8 @@ import asyncio
 from types import SimpleNamespace
 
 
-from bot.agents.base import AgentSpec, run_agent
+from bot.agents.base import NEUTRAL_MAX_CONFIDENCE, AgentSpec, Vote, apply_grounding_guard, run_agent
+from bot.agents.grounding import Corpus
 from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, role_prompt
 from bot.agents.triage import run_triage
 from bot.budget import Budget
@@ -22,7 +23,8 @@ def test_role_prompt_variants():
     # strict: no catalyst / no attention means PASS; neutral: it is a low-confidence BUY
     assert "No catalyst found still means PASS" in role_prompt("hunter")
     assert "No catalyst found still means PASS" not in role_prompt("hunter", True)
-    assert "neutral" in role_prompt("hunter", True) and "0.5-0.6" in role_prompt("scout", True)
+    assert "neutral" in role_prompt("hunter", True) and "BUY at 0.6" in role_prompt("scout", True)
+    assert "0.75 or more" in role_prompt("analyst", True) and "exactly 0.6" in role_prompt("hunter", True)
     assert "Most candidates should be PASS" in role_prompt("scout") and "Most candidates" not in role_prompt("scout", True)
     # the veto and triage prompts are unchanged by the flag
     for name in ("triage", "forensics", "social"):
@@ -130,3 +132,38 @@ def test_triage_no_longer_skips_on_the_creator_selling_alone():
     assert "`net_flow_sol_5m` is negative (net outflow) after a positive" in hard
     assert "did not do worse than the rest" in ANALYST                          # on-chain glossary
     assert "cashing out" not in SCOUT and "cashing out" not in HUNTER and "cashing out" not in ANALYST
+
+
+def _corpora():
+    ctx, tools = Corpus(), Corpus()
+    ctx.add("candidate XP age 15.4m buyers 157 inflow 809.7 SOL")
+    tools.add("x_search: 0 results\nprofile: 0 boosts")
+    return ctx, tools
+
+
+def test_neutral_buy_is_exempt_from_the_grounding_share_but_not_from_looking():
+    ctx, tools = _corpora()
+    ungrounded = ["no spam or bot patterns found", "no posts from the launcher's accounts"]
+    neutral = apply_grounding_guard(Vote("scout", "BUY", 0.6, ["nothing notable"], ungrounded), ctx, tools, 1,
+                                    0.5, neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert neutral.vote == "BUY" and neutral.guard is None and neutral.grounding == 0.0
+    # the same vote without a single successful tool call is still downgraded: the agent did not look
+    blind = apply_grounding_guard(Vote("scout", "BUY", 0.6, [], ungrounded), ctx, tools, 0, 0.5,
+                                  neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert blind.vote == "PASS" and "without any successful tool call" in blind.guard
+    # a confident BUY (above the neutral band) is guarded exactly as before
+    confident = apply_grounding_guard(Vote("scout", "BUY", 0.8, [], ungrounded), ctx, tools, 1, 0.5,
+                                      neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert confident.vote == "PASS" and "grounding 0.00 < 0.5" in confident.guard
+    # strict mode (no neutral band) guards the 0.6 vote too
+    strict = apply_grounding_guard(Vote("scout", "BUY", 0.6, [], ungrounded), ctx, tools, 1, 0.5)
+    assert strict.vote == "PASS" and strict.raw_vote == "BUY"
+    # a PASS is never touched
+    assert apply_grounding_guard(Vote("hunter", "PASS", 0.7, [], []), ctx, tools, 0, 0.5,
+                                 neutral_max_conf=NEUTRAL_MAX_CONFIDENCE).vote == "PASS"
+
+
+def test_two_neutral_votes_and_an_analyst_at_075_reach_the_gate_floor():
+    assert round((0.6 + 0.6 + 0.75) / 3, 4) >= 0.65          # the lowest passing combination
+    assert round((0.6 + 0.6 + 0.74) / 3, 4) < 0.65
+    assert round((0.55 + 0.53 + 0.82) / 3, 4) < 0.65         # FORM8 at 21:46Z would still have failed the mean

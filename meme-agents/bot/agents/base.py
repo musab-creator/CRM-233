@@ -131,12 +131,23 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
     return Vote(agent, v, float(c), [r[:400] for r in reasons][:10], [e[:400] for e in evidence][:15], size)
 
 
+NEUTRAL_MAX_CONFIDENCE = 0.6          # a BUY at or below this, from a neutral-mode Scout or Hunter, ...
+NEUTRAL_AGENTS = ("scout", "hunter")  # ... claims nothing positive: "I looked and found nothing against it"
+
+
 def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls_ok: int,
-                          min_ratio: float) -> Vote:
+                          min_ratio: float, neutral_max_conf: float | None = None) -> Vote:
     """A BUY must rest on data the agent actually looked at; otherwise it becomes PASS.
 
     Evidence may cite the candidate context or tool results, but at least one item must come
-    from a tool result: the context alone is what every agent already gets for free."""
+    from a tool result: the context alone is what every agent already gets for free.
+
+    `neutral_max_conf` (GATE_NEUTRAL_VOTES, Scout and Hunter only): a BUY at or below it is the
+    neutral "nothing found against the token" vote. It still needs a successful tool call, so the
+    agent did look, but its evidence is the absence of findings ("x_search results 0"), which the
+    grounding share cannot credit: on the first live evening every such vote was flipped to PASS at
+    grounding 0.17-0.30 while the Analyst voted BUY at 0.76-0.82. The guard exists to stop
+    fabricated positive claims; a neutral vote makes none."""
     vote.raw_vote = vote.vote
     vote.tool_calls_ok = tool_calls_ok
     grounded = [e for e in vote.evidence if context.grounded(e) or tools.grounded(e)]
@@ -144,6 +155,8 @@ def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls
     if vote.vote == "BUY":
         if tool_calls_ok < 1:
             vote.vote, vote.guard = "PASS", "BUY without any successful tool call"
+        elif neutral_max_conf is not None and vote.confidence <= neutral_max_conf:
+            pass  # neutral BUY: looked, found nothing against it; the Analyst must carry the gate
         elif vote.grounding < min_ratio:
             vote.vote, vote.guard = "PASS", f"BUY evidence grounding {vote.grounding:.2f} < {min_ratio}"
         elif not any(tools.grounded(e) for e in vote.evidence):
@@ -255,8 +268,9 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)
                     vote.cost_usd, vote.turns = total_cost, turns
+                    neutral = NEUTRAL_MAX_CONFIDENCE if (s.GATE_NEUTRAL_VOTES and spec.name in NEUTRAL_AGENTS) else None
                     return apply_grounding_guard(vote, ctx_corpus, tool_corpus, tool_calls_ok,
-                                                 s.AGENT_MIN_GROUNDING)
+                                                 s.AGENT_MIN_GROUNDING, neutral_max_conf=neutral)
             if not uses:
                 messages.append({"role": "user", "content": "Call submit_vote to give your decision."})
                 force_vote = True
