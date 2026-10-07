@@ -1,42 +1,75 @@
 #!/usr/bin/env bash
-# Change settings in meme-agents/.env without opening an editor, for example:
-#   deploy/set-env.sh HELIUS_MONTHLY_CREDITS=200000000 HELIUS_RPC_RPS=200
-# Each KEY=VALUE replaces that key's line (keeping its trailing comment) or is appended if the
-# key is missing. Values are never printed. For secret keys, start the command with a space so
-# it stays out of your shell history, or use nano. Restart the bot afterwards.
+# Change non-secret settings, for example:
+#   bash deploy/set-env.sh HELIUS_MONTHLY_CREDITS=200000000 HELIUS_RPC_RPS=200
+# Replaces duplicate keys and writes .env atomically. Use nano .env for credentials: command
+# arguments can appear in process listings and shell history. Restart afterwards.
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$APP_DIR/.env"
 [ -f "$ENV_FILE" ] || { echo ".env not found: run deploy/install.sh first" >&2; exit 1; }
-[ $# -gt 0 ] || { sed -n '2,6p' "$0"; exit 2; }
+[ $# -gt 0 ] || { sed -n '2,5p' "$0"; exit 2; }
 PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
-for kv in "$@"; do
-  case "$kv" in
-    [A-Z]*=*) ;;
-    *) echo "bad argument: '$kv' (use KEY=VALUE)" >&2; exit 2 ;;
-  esac
-done
-"$PY" - "$ENV_FILE" "$@" <<'EOF'
-import re, sys
-path, *pairs = sys.argv[1:]
-lines = open(path, encoding="utf-8").read().split("\n")
-for kv in pairs:
-    key, val = kv.split("=", 1)
-    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
-        sys.exit(f"bad key: {key}")
-    for i, line in enumerate(lines):
-        if line.startswith(key + "="):
-            m = re.search(r"\s+#.*$", line[len(key) + 1:])  # keep an inline comment
-            lines[i] = f"{key}={val}" + (m.group(0) if m else "")
-            print(f"updated {key}")
-            break
+"$PY" - "$ENV_FILE" "$@" <<'PY'
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+path = Path(sys.argv[1])
+updates = {}
+for argument in sys.argv[2:]:
+    key, separator, value = argument.partition("=")
+    if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+        sys.exit("bad setting argument: use KEY=VALUE with an uppercase key")
+    if "\n" in value or "\r" in value:
+        sys.exit(f"{key}: multiline values are not supported")
+    updates[key] = value
+
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = set()
+result = []
+for line in lines:
+    match = re.match(r"\s*(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", line)
+    key = match.group(1) if match else None
+    if key not in updates:
+        result.append(line)
+        continue
+    if key in seen:
+        continue
+    seen.add(key)
+    # Preserve the explanation as a separate comment so quoted values stay unambiguous.
+    old_value = line[match.end():].strip()
+    if old_value.startswith(('"', "'")):
+        comment_text = old_value[old_value.rfind(old_value[0]) + 1:]
     else:
-        if lines and lines[-1] == "":
-            lines.insert(len(lines) - 1, f"{key}={val}")
-        else:
-            lines.append(f"{key}={val}")
-        print(f"added {key}")
-open(path, "w", encoding="utf-8").write("\n".join(lines))
-EOF
-chmod 600 "$ENV_FILE"
-echo "apply with: sudo systemctl restart meme-agents"
+        comment_text = old_value
+    comment = re.search(r"\s+#.*$", comment_text)
+    if comment:
+        result.append(comment.group(0).strip())
+    result.append(f'{key}="{updates[key]}"')
+for key, value in updates.items():
+    if key not in seen:
+        result.append(f'{key}="{value}"')
+
+fd, temporary = tempfile.mkstemp(prefix=".env-update-", dir=path.parent)
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as file:
+        file.write("\n".join(result) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary, path)
+    if os.name != "nt":
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+for key in updates:
+    print(f"updated {key}")
+PY
+printf '%s\n' "apply with: sudo systemctl restart meme-agents"

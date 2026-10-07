@@ -173,7 +173,16 @@ class HeliusChain:
             try:
                 res = await self.h.das("getTokenAccounts", {**params, "options": {"showZeroBalance": True}})
                 return (res or {}).get("token_accounts") or []
-            except Exception as e:  # older DAS versions reject the option: count holders only
+            except Exception as e:
+                # A transient timeout/rate limit does not establish that the provider lacks
+                # this capability. Fall back only when its response explicitly rejects it.
+                error = str(e).lower()
+                names_option = "showzerobalance" in error or "options" in error
+                rejects_option = any(word in error for word in (
+                    "invalid params", "unsupported", "not supported", "unknown", "unrecognized",
+                    "unexpected", "not allowed"))
+                if not (names_option and rejects_option):
+                    raise
                 log.warning("getTokenAccounts with showZeroBalance failed (%s); retrying without", e)
                 self._das_options = False
         res = await self.h.das("getTokenAccounts", params)

@@ -2,19 +2,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import random
 import re
 import time
+from collections.abc import Iterable
+from urllib.parse import quote, quote_plus
 
 log = logging.getLogger("bot")
 
-_SECRET_RE = re.compile(r"(api-key=|api_key=|auth_token=|Bearer\s+|/bot)[A-Za-z0-9:_\-]{8,}")
+# Provider exception bodies may contain headers, URL parameters or serialized settings.
+_SECRET_RE = re.compile(
+    r"(?P<prefix>\b(?:api[-_]key|x[-_]api[-_]key|auth[-_]token|"
+    r"(?:anthropic|helius|pumpportal|jupiter)_api_key|x_bearer_token|"
+    r"cryptopanic_token|telegram_bot_token|wallet_private_key)"
+    r"[\"']?\s*[:=]\s*[\"']?)(?:\[[^\]\r\n]*\]|[^\s&\"',}<>]+)",
+    re.IGNORECASE,
+)
+_AUTH_RE = re.compile(r"(?P<prefix>\b(?:Bearer|Basic)\s+)[^\s\"',}<>]+", re.IGNORECASE)
+_TELEGRAM_RE = re.compile(r"(?P<prefix>/bot)[0-9]+:[A-Za-z0-9_-]+", re.IGNORECASE)
+_KNOWN_SECRETS: set[str] = set()
+
+
+def register_secrets(values: Iterable[str]) -> None:
+    """Register configured credentials so even unlabelled provider errors are masked.
+
+    Values stay in memory only. URL-encoded forms also occur in SDK exception URLs.
+    """
+    for value in values:
+        if value:
+            _KNOWN_SECRETS.update((value, quote(value, safe=""), quote_plus(value)))
 
 
 def redact(text: str) -> str:
-    """Mask anything that looks like a key in URLs, headers or Telegram bot paths."""
-    return _SECRET_RE.sub(lambda m: m.group(1) + "***", text)
+    """Mask configured keys and credential-shaped URL, header and JSON fields."""
+    for secret in sorted(_KNOWN_SECRETS, key=len, reverse=True):
+        text = text.replace(secret, "***")
+    for pattern in (_SECRET_RE, _AUTH_RE, _TELEGRAM_RE):
+        text = pattern.sub(lambda match: match.group("prefix") + "***", text)
+    return text
 
 
 class RedactingFormatter(logging.Formatter):
@@ -47,8 +74,13 @@ class RateLimiter:
     """Token bucket. `await acquire()` blocks until a request may be sent."""
 
     def __init__(self, rate_per_s: float, burst: float | None = None):
+        if not math.isfinite(rate_per_s) or rate_per_s <= 0:
+            raise ValueError("rate_per_s must be finite and greater than zero")
+        if burst is not None and (not math.isfinite(burst) or burst <= 0):
+            raise ValueError("burst must be finite and greater than zero")
         self.rate = rate_per_s
-        self.capacity = burst if burst is not None else max(1.0, rate_per_s)
+        # Fractional request rates still need room for one complete request.
+        self.capacity = max(1.0, burst if burst is not None else rate_per_s)
         self.tokens = self.capacity
         self.updated = time.monotonic()
         self._lock = asyncio.Lock()
@@ -67,7 +99,15 @@ class RateLimiter:
 
 def backoff_delay(attempt: int, base: float = 1.0, cap: float = 60.0) -> float:
     """Exponential backoff with full jitter."""
-    return random.uniform(0, min(cap, base * (2 ** attempt)))
+    if not math.isfinite(base) or not math.isfinite(cap) or base <= 0 or cap <= 0:
+        raise ValueError("backoff base and cap must be finite and greater than zero")
+    exponent = max(0, attempt)
+    # Saturate before exponentiation: prolonged outages must not overflow 2 ** attempt.
+    if base >= cap or exponent >= math.ceil(math.log2(cap) - math.log2(base)):
+        ceiling = cap
+    else:
+        ceiling = math.ldexp(base, exponent)
+    return random.uniform(0, ceiling)
 
 
 def now_s() -> float:
@@ -102,14 +142,20 @@ class InstanceLock:
         self.fd: int | None = None
 
     def acquire(self) -> bool:
-        try:
-            import fcntl
-        except ImportError:  # Windows: no guard
+        if self.fd is not None:
             return True
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                import msvcrt
+                if os.fstat(fd).st_size < 1:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             os.close(fd)
             return False

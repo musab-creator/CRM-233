@@ -14,12 +14,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
+from dataclasses import fields
+from datetime import date
 import signal
 import sys
 
 from .config import load_settings
 from .live.guard import LiveRefused
-from .util import setup_logging
+from .util import redact, register_secrets, setup_logging
 
 log = logging.getLogger("bot")
 
@@ -29,8 +32,8 @@ def _install_signals(engine) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, engine.stop.set)
-        except NotImplementedError:  # Windows
-            pass
+        except NotImplementedError:  # Windows ProactorEventLoop has no add_signal_handler.
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(engine.stop.set))
 
 
 async def _run(minutes: float | None) -> int:
@@ -39,7 +42,7 @@ async def _run(minutes: float | None) -> int:
     eng = Engine(s)
     _install_signals(eng)
     try:
-        await eng.run(minutes * 60 if minutes else None)
+        await eng.run(minutes * 60 if minutes is not None else None)
     except LiveRefused as e:
         log.error("%s", e)
         return 2
@@ -130,7 +133,8 @@ async def _acceptance(minutes: float, sim: bool, seed: int, no_llm: bool) -> int
         return await run_acceptance(s, minutes, lambda st: build_sim_engine(st, seed), no_llm=no_llm,
                                     install_signals=_install_signals)
     from .engine import Engine
-    s = load_settings()
+    # --no-llm must prevent API spend even when a key already exists in .env/environment.
+    s = load_settings(overrides={"ANTHROPIC_API_KEY": ""} if no_llm else None)
     if not s.ANTHROPIC_API_KEY and not no_llm:
         print("ANTHROPIC_API_KEY is not set: add it to .env, or pass --no-llm for a run without the agents "
               "(the decision-cycle check is then skipped)", file=sys.stderr)
@@ -158,16 +162,35 @@ async def _live_check() -> int:
     return 0
 
 
+def _positive_duration(value: str) -> float:
+    try:
+        duration = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a number greater than zero") from None
+    if not math.isfinite(duration) or duration <= 0:
+        raise argparse.ArgumentTypeError("use a finite number greater than zero")
+    return duration
+
+
+def _utc_day(value: str) -> str:
+    try:
+        if date.fromisoformat(value).isoformat() != value:
+            raise ValueError
+    except ValueError:
+        raise argparse.ArgumentTypeError("use a valid date in YYYY-MM-DD format") from None
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m bot")
     sub = p.add_subparsers(dest="cmd")
     r = sub.add_parser("run", help="run the bot")
-    r.add_argument("--minutes", type=float, default=None, help="stop after N minutes")
+    r.add_argument("--minutes", type=_positive_duration, default=None, help="stop after N minutes")
     rp = sub.add_parser("report", help="print metrics and write reports/daily-YYYY-MM-DD.md")
-    rp.add_argument("--day", default=None, help="UTC day for the daily section (default today)")
+    rp.add_argument("--day", type=_utc_day, default=None, help="UTC day for the daily section (default today)")
     rp.add_argument("--sim", action="store_true", help="report on the simulation database")
     sm = sub.add_parser("simulate", help="offline end-to-end run with synthetic data")
-    sm.add_argument("--minutes", type=float, default=10)
+    sm.add_argument("--minutes", type=_positive_duration, default=10)
     sm.add_argument("--seed", type=int, default=7)
     sub.add_parser("live-check", help="run live-mode startup checks")
     st = sub.add_parser("status", help="what the bot is doing right now (safe while it runs)")
@@ -176,14 +199,16 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--alert", action="store_true", help="with --check: Telegram message when the state changes")
     pf = sub.add_parser("preflight", help="check every API and key (free calls only)")
     pf.add_argument("--probe", action="store_true", help="also record what the live APIs return (~3 min)")
-    pf.add_argument("--seconds", type=float, default=150, help="probe capture length")
+    pf.add_argument("--seconds", type=_positive_duration, default=150, help="probe capture length")
     pf.add_argument("--no-llm", action="store_true", help="do not require ANTHROPIC_API_KEY")
     ac = sub.add_parser("acceptance", help="run paper mode for N minutes and check the brief's done criteria")
-    ac.add_argument("--minutes", type=float, default=60)
+    ac.add_argument("--minutes", type=_positive_duration, default=60)
     ac.add_argument("--sim", action="store_true", help="against the offline simulator (tests the harness)")
     ac.add_argument("--seed", type=int, default=7)
     ac.add_argument("--no-llm", action="store_true", help="run without ANTHROPIC_API_KEY (result INCOMPLETE)")
     a = p.parse_args(argv)
+    if getattr(a, "alert", False) and not a.check:
+        p.error("--alert requires --check")
 
     cmd = a.cmd or "run"
     from .config import ConfigError
@@ -192,26 +217,42 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s = load_settings(overrides=SIM_OVERRIDES if sim else None)
     except ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
+        print(redact(f"config error: {e}"), file=sys.stderr)
         return 2
-    # only long-running commands write the log file
-    setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE) if s.LOG_FILE and cmd in ("run", "simulate", "acceptance") else None)
-    if cmd == "run":
-        return asyncio.run(_run(getattr(a, "minutes", None)))
-    if cmd == "report":
-        return asyncio.run(_report(a.day, a.sim))
-    if cmd == "simulate":
-        return asyncio.run(_simulate(a.minutes, a.seed))
-    if cmd == "live-check":
-        return asyncio.run(_live_check())
-    if cmd == "status":
-        return asyncio.run(_status(s, a.check, a.alert))
-    if cmd == "preflight":
-        return asyncio.run(_preflight(s, a.probe, a.seconds, a.no_llm))
-    if cmd == "acceptance":
-        return asyncio.run(_acceptance(a.minutes, a.sim, a.seed, a.no_llm))
-    p.print_help()
-    return 1
+    register_secrets(getattr(s, field.name) for field in fields(s) if not field.repr)
+    # Only long-running commands write the log file.
+    try:
+        setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE)
+                      if s.LOG_FILE and cmd in ("run", "simulate", "acceptance") else None)
+        if cmd == "run":
+            coro = _run(getattr(a, "minutes", None))
+        elif cmd == "report":
+            coro = _report(a.day, a.sim)
+        elif cmd == "simulate":
+            coro = _simulate(a.minutes, a.seed)
+        elif cmd == "live-check":
+            coro = _live_check()
+        elif cmd == "status":
+            coro = _status(s, a.check, a.alert)
+        elif cmd == "preflight":
+            coro = _preflight(s, a.probe, a.seconds, a.no_llm)
+        elif cmd == "acceptance":
+            coro = _acceptance(a.minutes, a.sim, a.seed, a.no_llm)
+        else:
+            p.print_help()
+            return 1
+        return asyncio.run(coro)
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        print(redact(f"cannot access a required file or service: {exc}. "
+                     "Check the project directory, permissions and network connection."), file=sys.stderr)
+        return 3
+    except Exception:
+        # Keep diagnostics useful while the formatter masks keys even in tracebacks.
+        log.exception("command failed; check the error below and run python -m bot preflight")
+        return 1
+
 
 
 if __name__ == "__main__":

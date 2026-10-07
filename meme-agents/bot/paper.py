@@ -14,6 +14,7 @@ Exit, for `tokens` at observed price P:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 
 from .config import Settings
 
@@ -27,6 +28,7 @@ class Fill:
     sol: float         # SOL spent (buy, incl. network fee) or received (sell, net)
     fee_sol: float     # protocol + PumpPortal + network
     tx_sig: str | None = None
+    remaining_tokens: float | None = None  # confirmed live receipt holdings, never estimated
 
 
 def _fee_rate(s: Settings) -> float:
@@ -34,8 +36,8 @@ def _fee_rate(s: Settings) -> float:
 
 
 def entry_fill(sol_in: float, price: float, s: Settings) -> Fill:
-    if sol_in <= 0 or price <= 0:
-        raise ValueError("sol_in and price must be positive")
+    if not isfinite(sol_in) or not isfinite(price) or sol_in <= 0 or price <= 0:
+        raise ValueError("sol_in and price must be finite and positive")
     exec_price = price * (1 + s.ENTRY_SLIPPAGE_PCT / 100)
     fee = sol_in * _fee_rate(s)
     tokens = (sol_in - fee) / exec_price
@@ -43,8 +45,8 @@ def entry_fill(sol_in: float, price: float, s: Settings) -> Fill:
 
 
 def exit_fill(tokens: float, price: float, s: Settings) -> Fill:
-    if tokens <= 0 or price <= 0:
-        raise ValueError("tokens and price must be positive")
+    if not isfinite(tokens) or not isfinite(price) or tokens <= 0 or price <= 0:
+        raise ValueError("tokens and price must be finite and positive")
     exec_price = price * (1 - s.EXIT_SLIPPAGE_PCT / 100)
     gross = tokens * exec_price
     fee = gross * _fee_rate(s)
@@ -53,6 +55,8 @@ def exit_fill(tokens: float, price: float, s: Settings) -> Fill:
 
 def mark_to_market(tokens: float, price: float, s: Settings) -> float:
     """Net SOL the remaining tokens would fetch right now (liquidation value)."""
+    if not isfinite(tokens) or not isfinite(price):
+        raise ValueError("tokens and price must be finite")
     if tokens <= 0 or price <= 0:
         return 0.0
     return exit_fill(tokens, price, s).sol

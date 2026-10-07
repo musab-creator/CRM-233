@@ -105,7 +105,7 @@ class XClient:
         cur = await self._cursor(source)
         worst = max_results * self.post_usd
         try:
-            await self.budget.reserve(worst)
+            hold = await self.budget.reserve(worst)
         except BudgetExceeded as e:
             return {"error": str(e), "posts": await self._cached(source, iso(since_ts))}
         actual = 0.0
@@ -123,7 +123,7 @@ class XClient:
             if e.status == 400 and cur.get("id"):
                 await self.db.kv_set(f"xsince:{source}", "{}")  # e.g. since_id rejected: start over
         finally:
-            await self.budget.settle(worst, actual, label)
+            await self.budget.settle(hold, actual, label)
         out: dict = {"posts": await self._cached(source, iso(since_ts))}
         if err:
             out["error"] = err
@@ -147,7 +147,7 @@ class XClient:
         uid = await self.db.kv_get(key)
         if uid:
             return uid
-        await self.budget.reserve(self.user_usd)
+        hold = await self.budget.reserve(self.user_usd)
         actual = 0.0
         try:
             data = await request_json(self.c, "GET", f"{self.base}/users/by/username/{handle}",
@@ -155,7 +155,7 @@ class XClient:
             uid = (data.get("data") or {}).get("id")
             actual = self.user_usd
         finally:
-            await self.budget.settle(self.user_usd, actual, f"user {handle}")
+            await self.budget.settle(hold, actual, f"user {handle}")
         if uid:
             await self.db.kv_set(key, uid)
         return uid
@@ -170,7 +170,7 @@ class XClient:
             return {"users": []}
         worst = len(ids) * self.user_usd
         try:
-            await self.budget.reserve(worst)
+            hold = await self.budget.reserve(worst)
         except BudgetExceeded as e:
             return {"error": str(e), "users": []}
         actual = 0.0
@@ -191,7 +191,7 @@ class XClient:
             err = str(e)
             log.warning("x users failed: %s", e)
         finally:
-            await self.budget.settle(worst, actual, f"users x{len(ids)}")
+            await self.budget.settle(hold, actual, f"users x{len(ids)}")
         out: dict = {"users": users}
         if err:
             out["error"] = err

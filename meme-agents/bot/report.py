@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,60 +15,84 @@ from .util import now_s
 
 
 def trade_metrics(pnls_usd: list[float], pnls_sol: list[float], bankroll_usd: float) -> dict:
+    if len(pnls_usd) != len(pnls_sol):
+        raise ValueError("USD and SOL PnL lists must describe the same closed trades")
+    if not all(math.isfinite(v) for v in [bankroll_usd, *pnls_usd, *pnls_sol]):
+        raise ValueError("trade metrics require finite PnL and starting equity")
     n = len(pnls_usd)
     wins = [p for p in pnls_usd if p > 0]
-    losses = [p for p in pnls_usd if p <= 0]
-    gross_win, gross_loss = sum(wins), -sum(losses)
+    losses = [p for p in pnls_usd if p < 0]
+    gross_win, gross_loss = math.fsum(wins), -math.fsum(losses)
     equity, peak, max_dd, max_dd_pct = bankroll_usd, bankroll_usd, 0.0, 0.0
     for p in pnls_usd:
         equity += p
         peak = max(peak, equity)
         dd = peak - equity
-        if dd > max_dd:
-            max_dd, max_dd_pct = dd, (dd / peak * 100 if peak > 0 else 0.0)
+        max_dd = max(max_dd, dd)
+        max_dd_pct = max(max_dd_pct, dd / peak * 100 if peak > 0 else 0.0)
     return {
         "closed_trades": n,
         "wins": len(wins),
         "losses": len(losses),
+        "breakeven": n - len(wins) - len(losses),
+        "starting_equity_usd": bankroll_usd,
+        "drawdown_basis": "closed-trade realized equity; excludes open positions",
         "win_rate": len(wins) / n if n else None,
-        "expectancy_usd": sum(pnls_usd) / n if n else None,
-        "expectancy_sol": sum(pnls_sol) / n if n else None,
+        "expectancy_usd": math.fsum(pnls_usd) / n if n else None,
+        "expectancy_sol": math.fsum(pnls_sol) / n if n else None,
         "avg_win_usd": gross_win / len(wins) if wins else None,
         "avg_loss_usd": -gross_loss / len(losses) if losses else None,
         "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (math.inf if gross_win > 0 else None),
         "max_drawdown_usd": max_dd,
         "max_drawdown_pct": max_dd_pct,
-        "pnl_usd": sum(pnls_usd),
-        "pnl_sol": sum(pnls_sol),
+        "pnl_usd": math.fsum(pnls_usd),
+        "pnl_sol": math.fsum(pnls_sol),
     }
 
 
-async def agent_accuracy(db: Database) -> dict:
+async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
     """Per agent: how often its BUY vote preceded a winner (real outcome if traded, else shadow),
     how often PASS avoided a loser, the lift of its BUYs over the base win rate, and its Brier
     score (P(win) = confidence for BUY, 1 - confidence for PASS; 0.25 = coin flip, lower = better)."""
     rows = await db.fetchall("""
         SELECT v.agent, v.vote, v.confidence, v.error, v.guard, v.candidate_id,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
-                 AND p.status='closed' ORDER BY id LIMIT 1) AS real_pnl,
+                 AND p.status='closed' AND (? IS NULL OR p.mode=? OR p.mode IS NULL)
+                 ORDER BY p.closed_at DESC, p.id DESC LIMIT 1) AS real_pnl,
+               EXISTS(SELECT 1 FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
+                 AND p.status IN ('open','closed') AND (? IS NULL OR p.mode=? OR p.mode IS NULL)) AS traded,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='shadow'
-                 AND p.status='closed' ORDER BY id LIMIT 1) AS shadow_pnl
-        FROM votes v""")
+                 AND p.status='closed' ORDER BY p.closed_at DESC, p.id DESC LIMIT 1) AS shadow_pnl
+        FROM votes v WHERE NOT EXISTS (
+          SELECT 1 FROM votes newer WHERE newer.candidate_id=v.candidate_id
+            AND newer.agent=v.agent AND newer.id>v.id)
+          AND (? IS NULL OR NOT EXISTS (
+            SELECT 1 FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real')
+            OR EXISTS (SELECT 1 FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
+                       AND (p.mode=? OR p.mode IS NULL)))
+        """, [mode, mode, mode, mode, mode, mode])
     out: dict[str, dict] = {}
     outcomes: dict[int, bool] = {}
     for r in rows:
         a = out.setdefault(r["agent"], {"votes": 0, "buy_votes": 0, "buy_scored": 0, "buy_winners": 0,
                                         "pass_scored": 0, "pass_losers": 0, "errors": 0, "guarded": 0,
+                                        "real_scored": 0, "shadow_scored": 0,
                                         "_brier": [], })
         a["votes"] += 1
         a["guarded"] += int(bool(r.get("guard")))
-        if r["error"]:
+        confidence = r["confidence"]
+        if (r["error"] or r["vote"] not in ("BUY", "PASS") or not isinstance(confidence, (int, float))
+                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
             a["errors"] += 1
             continue
-        pnl = r["real_pnl"] if r["real_pnl"] is not None else r["shadow_pnl"]
+        # A closed shadow cannot substitute for a real trade whose result is still open.
+        pnl = r["real_pnl"] if r["traded"] else r["shadow_pnl"]
+        if pnl is not None and not math.isfinite(pnl):
+            pnl = None
         if pnl is not None:
+            a["real_scored" if r["traded"] else "shadow_scored"] += 1
             outcomes[r["candidate_id"]] = pnl > 0
-            p_win = r["confidence"] if r["vote"] == "BUY" else 1 - r["confidence"]
+            p_win = confidence if r["vote"] == "BUY" else 1 - confidence
             a["_brier"].append((p_win - (1.0 if pnl > 0 else 0.0)) ** 2)
         if r["vote"] == "BUY":
             a["buy_votes"] += 1
@@ -92,25 +118,39 @@ async def _scored_candidates(db: Database) -> list[dict]:
     cands = await db.fetchall("""
         SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
         FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
-        WHERE c.decision IS NOT NULL""")
-    votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes "
-                              "WHERE agent IN ('scout', 'hunter', 'analyst')")
+        WHERE c.decision IS NOT NULL
+          AND p.id=(SELECT q.id FROM positions q WHERE q.candidate_id=c.id
+                    AND q.kind='shadow' AND q.status='closed' ORDER BY q.closed_at DESC, q.id DESC LIMIT 1)
+        ORDER BY p.closed_at, p.id""")
+    votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes v "
+                              "WHERE agent IN ('scout', 'hunter', 'analyst') AND NOT EXISTS "
+                              "(SELECT 1 FROM votes newer WHERE newer.candidate_id=v.candidate_id "
+                              "AND newer.agent=v.agent AND newer.id>v.id)")
     by_c: dict[int, list[dict]] = {}
     for v in votes:
         by_c.setdefault(v["candidate_id"], []).append(v)
     out = []
     for c in cands:
         vs = by_c.get(c["id"], [])
-        if len(vs) != 3 or any(v["error"] for v in vs) or not c["cost_sol"]:
+        if (set(v["agent"] for v in vs) != {"scout", "hunter", "analyst"} or len(vs) != 3
+                or any(v["error"] or v["vote"] not in ("BUY", "PASS")
+                       or not isinstance(v["confidence"], (int, float))
+                       or not math.isfinite(v["confidence"]) or not 0 <= v["confidence"] <= 1 for v in vs)
+                or not isinstance(c["cost_sol"], (int, float)) or not math.isfinite(c["cost_sol"])
+                or c["cost_sol"] <= 0 or c["pnl_sol"] is None or not math.isfinite(c["pnl_sol"])
+                or c["pnl_usd"] is None or not math.isfinite(c["pnl_usd"])):
             continue
         try:
             metrics = json.loads(c["metrics"] or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
+            metrics = {}
+        if not isinstance(metrics, dict):
             metrics = {}
         out.append({"buys": sum(v["vote"] == "BUY" for v in vs),
                     "mean_conf": sum(v["confidence"] for v in vs) / 3,
                     "ret": c["pnl_sol"] / c["cost_sol"], "pnl_usd": c["pnl_usd"] or 0.0,
-                    "win": c["pnl_sol"] > 0, "flow": metrics.get("flow") or {}})
+                    "win": c["pnl_sol"] > 0,
+                    "flow": metrics["flow"] if isinstance(metrics.get("flow"), dict) else {}})
     return out
 
 
@@ -139,7 +179,8 @@ def signal_check(scored: list[dict]) -> list[dict]:
     """For each flow feature: outcomes above vs at-or-below its median across scored candidates."""
     out = []
     for name in SIGNALS:
-        vals = [(r["flow"].get(name), r) for r in scored if isinstance(r["flow"].get(name), (int, float))]
+        vals = [(r["flow"].get(name), r) for r in scored if isinstance(r["flow"].get(name), (int, float))
+                and math.isfinite(r["flow"][name])]
         if len(vals) < 4:
             continue
         xs = sorted(v for v, _ in vals)
@@ -155,11 +196,27 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     day = day or utc_day(now)
     day_start = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
     day_end = day_start + 86400
-    closed = await db.fetchall(
-        "SELECT * FROM positions WHERE kind='real' AND status='closed' ORDER BY closed_at")
+    closed_recorded = await db.fetchall(
+        "SELECT * FROM positions WHERE kind='real' AND status='closed' AND (mode=? OR mode IS NULL) "
+        "ORDER BY closed_at, id", [s.MODE])
+    closed = [p for p in closed_recorded if all(isinstance(p[k], (int, float)) and math.isfinite(p[k])
+                                              for k in ("pnl_usd", "pnl_sol"))]
     closed_day = [p for p in closed if day_start <= (p["closed_at"] or 0) < day_end]
-    shadows = await db.fetchall("SELECT pnl_sol, pnl_usd FROM positions WHERE kind='shadow' AND status='closed'")
-    open_pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open')")
+    opening_equity = s.BANKROLL_USD + math.fsum(p["pnl_usd"] for p in closed
+                                               if p["closed_at"] is not None and p["closed_at"] < day_start)
+    shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd FROM positions WHERE kind='shadow' "
+                                        "AND status='closed' ORDER BY closed_at, id")
+    shadows = [p for p in shadows_recorded if all(isinstance(p[k], (int, float)) and math.isfinite(p[k])
+                                                for k in ("pnl_usd", "pnl_sol"))]
+    open_pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') "
+                                "AND (mode=? OR mode IS NULL)", [s.MODE])
+    raw_heartbeat = await db.kv_get("heartbeat")
+    try:
+        heartbeat = json.loads(raw_heartbeat or "{}")
+    except (json.JSONDecodeError, TypeError):
+        heartbeat = {}
+    if not isinstance(heartbeat, dict):
+        heartbeat = {}
     funnel = {
         "mints_seen": (await db.fetchone("SELECT COUNT(*) c FROM mints WHERE first_trade_at>=? AND first_trade_at<?",
                                          [day_start, day_end]))["c"],
@@ -189,14 +246,18 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     return {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
         "mode": s.MODE,
+        "data_source": "simulation" if heartbeat.get("simulated") is True else
+                       "real feeds" if heartbeat.get("simulated") is False else "unrecorded",
+        "legacy_unknown_mode_trades": sum(p["mode"] is None for p in closed_recorded),
+        "unscored_closed_trades": len(closed_recorded) - len(closed),
         "day": day,
         "all_time": trade_metrics([p["pnl_usd"] or 0 for p in closed], [p["pnl_sol"] or 0 for p in closed],
                                   s.BANKROLL_USD),
         "day_metrics": trade_metrics([p["pnl_usd"] or 0 for p in closed_day],
-                                     [p["pnl_sol"] or 0 for p in closed_day], s.BANKROLL_USD),
+                                     [p["pnl_sol"] or 0 for p in closed_day], opening_equity),
         "shadow": trade_metrics([p["pnl_usd"] or 0 for p in shadows], [p["pnl_sol"] or 0 for p in shadows],
                                 s.BANKROLL_USD),
-        **_agent_section(await agent_accuracy(db)),
+        **_agent_section(await agent_accuracy(db, s.MODE)),
         "gate_sweep": gate_sweep(scored),
         "signals": signal_check(scored),
         "funnel_day": funnel,
@@ -237,11 +298,13 @@ def render_text(r: dict) -> str:
         f"meme-agents report ({r['mode']} mode), generated {r['generated_at']}",
         "",
         "== Closed trades (all time) ==",
-        f"closed trades     {m['closed_trades']}  (wins {m['wins']}, losses {m['losses']})",
+            f"closed trades     {m['closed_trades']}  (wins {m['wins']}, losses {m['losses']}, "
+            f"breakeven {m.get('breakeven', 0)})",
         f"win rate          {_f(m['win_rate'], '{:.1%}')}",
         f"expectancy/trade  ${_f(m['expectancy_usd'])}  ({_f(m['expectancy_sol'], '{:+.4f}')} SOL)",
         f"profit factor     {_f(m['profit_factor'])}",
-        f"max drawdown      ${_f(m['max_drawdown_usd'])}  ({_f(m['max_drawdown_pct'], '{:.1f}')}%)",
+        f"max drawdown      ${_f(m['max_drawdown_usd'])}  ({_f(m['max_drawdown_pct'], '{:.1f}')}%) "
+        "[closed-trade realized equity]",
         f"PnL               {m['pnl_sol']:+.4f} SOL  /  ${m['pnl_usd']:+.2f}",
         "",
         f"== Day {r['day']} ==",
@@ -252,6 +315,13 @@ def render_text(r: dict) -> str:
         "",
         "== Per-agent accuracy (BUY vote -> winner; real outcome if traded, else shadow) ==",
     ]
+    lines.insert(1, f"data source: {r.get('data_source', 'unrecorded')} "
+                    "(simulation results do not verify real-data acceptance)" if r.get("data_source") == "simulation"
+                 else f"data source: {r.get('data_source', 'unrecorded')}")
+    if r.get("legacy_unknown_mode_trades"):
+        lines.insert(2, f"legacy trades with unrecorded mode included: {r['legacy_unknown_mode_trades']}")
+    if r.get("unscored_closed_trades"):
+        lines.insert(2, f"closed trades excluded from metrics for missing/invalid PnL: {r['unscored_closed_trades']}")
     if not r["agents"]:
         lines.append("no votes recorded yet")
     for name in ("triage", "scout", "hunter", "analyst", "forensics", "social"):
@@ -262,7 +332,8 @@ def render_text(r: dict) -> str:
                      f"{a['buy_winners']}/{a['buy_scored']} ({_f(a['buy_accuracy'], '{:.0%}')}, "
                      f"lift {_f(a['buy_lift'], '{:.2f}x')})  "
                      f"PASS->loser {a['pass_losers']}/{a['pass_scored']} ({_f(a['pass_accuracy'], '{:.0%}')})  "
-                     f"Brier {_f(a['brier'], '{:.3f}')}  guarded {a['guarded']}  errors {a['errors']}")
+                     f"Brier {_f(a['brier'], '{:.3f}')}  guarded {a['guarded']}  errors {a['errors']}  "
+                     f"scored real {a.get('real_scored', 0)}, shadow {a.get('shadow_scored', 0)}")
     if r["agents"]:
         lines.append(f"base win rate of scored candidates: {_f(r['base_win_rate'], '{:.0%}')} "
                      f"over {r['scored_candidates']}  (lift > 1 = agent's BUYs beat the base rate; "
@@ -289,13 +360,14 @@ def render_text(r: dict) -> str:
     if r["exit_reasons"]:
         lines.append("exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
     if r["open_positions"]:
-        lines += ["", "== Open =="] + [f"#{p['id']} {p['mint']} {p['status']} ${p['size_usd']:.2f}"
+        lines += ["", "== Open =="] + [f"#{p['id']} {p['mint']} {p['status']} ${_f(p['size_usd'])}"
                                        for p in r["open_positions"]]
     if r["trades"]:
         lines += ["", "== Closed trades =="]
         for t in r["trades"][-30:]:
-            lines.append(f"#{t['id']:<4} {t['mint'][:10]}… {t['opened']} -> {t['closed']}  ${t['size_usd']:.2f}  "
-                         f"{t['exit']:<26} {t['pnl_sol']:+.4f} SOL  ${t['pnl_usd']:+.2f}")
+            lines.append(f"#{t['id']:<4} {str(t['mint'] or '?')[:10]}… {t['opened']} -> {t['closed']}  "
+                         f"${_f(t['size_usd'])}  {t['exit'] or '?':<26} "
+                         f"{_f(t['pnl_sol'], '{:+.4f}')} SOL  ${_f(t['pnl_usd'], '{:+.2f}')}")
     if r["recent_decisions"]:
         lines += ["", "== Recent gate decisions =="]
         for d in r["recent_decisions"]:
@@ -306,7 +378,18 @@ def render_text(r: dict) -> str:
 
 def render_markdown(r: dict) -> str:
     return f"# Daily report {r['day']}\n\n```\n{render_text(r)}\n```\n\n<details><summary>raw</summary>\n\n```json\n" \
-           f"{json.dumps(r, indent=2, default=str)}\n```\n</details>\n"
+           f"{json.dumps(_json_safe(r), indent=2, default=str, allow_nan=False)}\n```\n</details>\n"
+
+
+def _json_safe(value):
+    """Profit factor can be infinite; preserve it as a label in valid report JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "inf" if value == math.inf else "-inf" if value == -math.inf else None
+    if isinstance(value, dict):
+        return {key: _json_safe(v) for key, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 async def write_daily(db: Database, s: Settings, day: str | None = None) -> tuple[str, Path]:
@@ -314,6 +397,16 @@ async def write_daily(db: Database, s: Settings, day: str | None = None) -> tupl
     out_dir = s.path(s.REPORTS_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"daily-{r['day']}.md"
-    path.write_text(render_markdown(r))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=out_dir,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as f:
+            temporary = Path(f.name)
+            f.write(render_markdown(r))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return render_text(r), path
-

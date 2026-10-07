@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -24,20 +25,44 @@ log = logging.getLogger("bot.agents")
 ToolFn = Callable[[dict], Awaitable[Any]]
 
 MAX_TOOL_RESULT_CHARS = 6000
-CHARS_PER_TOKEN = 3.0  # conservative for JSON-heavy prompts (real ratio is ~3.5-4)
+INPUT_FRAMING_ALLOWANCE = 2048  # reserve for provider-added message/tool framing
+BYTES_PER_TOKEN = 2.0  # base58 addresses and JSON punctuation tokenize at ~2-3 bytes per token; text at ~4
+
+
+def _api_json(value: Any) -> Any:
+    """Serialize SDK content blocks as API JSON instead of Python repr strings."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    if hasattr(value, "__dict__"):
+        return vars(value)
+    raise TypeError(f"unsupported LLM request value: {type(value).__name__}")
+
+
+def request_input_bytes(system, tools, messages) -> int:
+    payload = json.dumps([system, tools, messages], default=_api_json, ensure_ascii=False,
+                         allow_nan=False, separators=(",", ":"))
+    return len(payload.encode("utf-8"))
 
 
 def worst_case_call_usd(s: Settings, system, tools, messages, *, price_in: float | None = None,
                         price_out: float | None = None, max_tokens: int | None = None) -> float:
-    """Upper bound for one request: every input token billed as a cache write (1.25x input
-    price) plus the full max_tokens of output. Reserved before the call, settled to the
-    actual `usage` after, so concurrent agents cannot overrun the daily budget. The prices
-    default to the main model's; the triage model passes its own."""
-    chars = len(json.dumps([system, tools, messages], default=str, ensure_ascii=False))
-    in_tokens = chars / CHARS_PER_TOKEN
+    """Conservative allowance for one request: UTF-8 bytes / BYTES_PER_TOKEN plus provider
+    framing, all billed as a cache write (1.25x input), plus the full max_tokens of output.
+
+    Measured in bytes, not characters, so Unicode and base58 addresses are not undercounted.
+    One token per byte would be a strict upper bound but reserves 3-4x the real cost and
+    starves the paced daily budget; the hold is settled to the returned usage right after
+    the call anyway. Oversized requests fail before any billed API call.
+    """
+    input_bytes = request_input_bytes(system, tools, messages)
+    if input_bytes > s.LLM_MAX_INPUT_BYTES:
+        raise ValueError(f"LLM input exceeds {s.LLM_MAX_INPUT_BYTES} UTF-8 bytes")
+    in_tokens = input_bytes / BYTES_PER_TOKEN + INPUT_FRAMING_ALLOWANCE
     pin = s.LLM_PRICE_IN_PER_MTOK if price_in is None else price_in
     pout = s.LLM_PRICE_OUT_PER_MTOK if price_out is None else price_out
     out_tokens = s.LLM_MAX_TOKENS if max_tokens is None else max_tokens
+    if any(isinstance(p, bool) or not math.isfinite(p) or p < 0 for p in (pin, pout)):
+        raise ValueError("LLM prices must be finite and nonnegative")
     return (in_tokens * pin * 1.25 + out_tokens * pout) / 1_000_000
 
 
@@ -183,10 +208,13 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 _append_user_text(messages, "Final turn: call submit_vote now with what you have.")
             reserve = worst_case_call_usd(s, system, tools, messages)
             try:
-                await budget.reserve(reserve)
+                reservation = await budget.reserve(reserve)
             except BudgetExceeded as e:
                 return Vote(spec.name, cost_usd=total_cost, turns=turns, error=f"llm budget: {e}")
-            cost = 0.0
+            # A timeout/connection error may occur after a billed request. Until usage is
+            # known, charge the full reservation instead of silently refunding the call.
+            cost = reserve
+            usage_known = False
             try:
                 resp = await client.messages.create(
                     model=s.LLM_MODEL, max_tokens=s.LLM_MAX_TOKENS, system=system,
@@ -199,10 +227,12 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                                     getattr(u, "cache_creation_input_tokens", 0) or 0,
                                     getattr(u, "cache_read_input_tokens", 0) or 0,
                                     s.LLM_PRICE_IN_PER_MTOK, s.LLM_PRICE_OUT_PER_MTOK)
+                usage_known = True
             finally:
-                await budget.settle(reserve, cost, f"{spec.name} turn {turn}")
-            total_cost += cost
-            turns += 1
+                detail = f"{spec.name} turn {turn}" + ("; estimated: usage unknown" if not usage_known else "")
+                await asyncio.shield(budget.settle(reservation, cost, detail))
+                total_cost += cost
+                turns += 1
             if resp.stop_reason == "refusal":
                 return Vote(spec.name, cost_usd=total_cost, turns=turns, error="model refusal")
             if resp.stop_reason == "max_tokens":
@@ -213,6 +243,9 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 continue
             messages.append({"role": "assistant", "content": resp.content})
             uses = [b for b in resp.content if b.type == "tool_use"]
+            terminal = [b for b in uses if b.name == "submit_vote"]
+            if terminal and (len(terminal) != 1 or len(uses) != 1):
+                raise ValueError("submit_vote must be exactly one terminal tool call")
             for b in uses:
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)

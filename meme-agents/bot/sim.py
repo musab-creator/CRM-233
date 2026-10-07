@@ -381,6 +381,7 @@ class FakeLLM:
 def build_sim_engine(settings, seed: int = 7, launch_every_s: float = 20.0):
     from .engine import Engine
     eng = Engine(settings, llm=FakeLLM())
+    eng.simulated = True
     feed = SimFeed(eng.ingest.handle, seed=seed, launch_every_s=launch_every_s)
     eng.feed = feed
     eng.dex = FakeDex(feed)

@@ -20,7 +20,7 @@ def git(cwd, *args):
 
 
 @pytest.fixture
-def server(tmp_path):
+def server(tmp_path, request):
     """A bare 'origin', a server clone on branch work with the update script, and a developer
     clone that pushes a new commit. Stubs for sudo, systemctl and install.sh log what ran."""
     origin = tmp_path / "origin.git"
@@ -28,9 +28,20 @@ def server(tmp_path):
     dev = tmp_path / "dev"
     git(tmp_path, "clone", "-q", str(origin), str(dev))
     git(dev, "checkout", "-q", "-b", "work")
+    prefix = getattr(request, "param", "")
+    if prefix:
+        dev = dev / prefix
+        dev.mkdir()
     (dev / "deploy").mkdir()
     shutil.copy(SCRIPT, dev / "deploy" / "update.sh")
-    (dev / "deploy" / "install.sh").write_text("#!/usr/bin/env bash\necho install >> \"$(dirname \"$0\")/../log\"\n")
+    (dev / "deploy" / "install.sh").write_text(
+        '#!/usr/bin/env bash\n'
+        'echo install >> "$UPDATE_LOG"\n'
+        '[ "${FAIL_INSTALL:-0}" != 1 ] || exit 42\n'
+        'mkdir -p "$MEME_AGENTS_VENV_DIR/bin"\n'
+        'if [ "${EDIT_RUNNING_SOURCE:-0}" = 1 ]; then echo "operator edit" > "${UPDATE_LOG%/*}/v"; fi\n'
+        "printf '#!/usr/bin/env bash\\necho \"OK: stub status\"\\nexit \"${FAIL_STATUS:-0}\"\\n' > \"$MEME_AGENTS_VENV_DIR/bin/python\"\n"
+        'chmod +x "$MEME_AGENTS_VENV_DIR/bin/python"\n')
     (dev / "deploy" / "install.sh").chmod(0o755)
     (dev / "deploy" / "update.sh").chmod(0o755)
     (dev / "v").write_text("1\n")
@@ -39,6 +50,8 @@ def server(tmp_path):
     git(dev, "push", "-q", "-u", "origin", "work")
     srv = tmp_path / "srv"
     git(tmp_path, "clone", "-q", "-b", "work", str(origin), str(srv))
+    if prefix:
+        srv = srv / prefix
     (srv / ".venv" / "bin").mkdir(parents=True)
     (srv / ".venv" / "bin" / "python").write_text("#!/usr/bin/env bash\necho 'OK: stub status'\n")
     (srv / ".venv" / "bin" / "python").chmod(0o755)
@@ -47,7 +60,9 @@ def server(tmp_path):
     (stubs / "sudo").write_text('#!/usr/bin/env bash\necho "sudo $*" >> "$UPDATE_LOG"\n'
                                 'while [ "${1:-}" = -n ]; do shift; done\n"$@"\n')
     (stubs / "systemctl").write_text('#!/usr/bin/env bash\necho "systemctl $*" >> "$UPDATE_LOG"\n'
-                                     '[ "$1" = is-active ] && echo active\nexit 0\n')
+                                     '[ "$1" != restart ] || [ "${FAIL_RESTART:-0}" != 1 ] || exit 1\n'
+                                     '[ "$1" != is-active ] || [ "${SERVICE_INACTIVE:-0}" != 1 ] || exit 3\n'
+                                     'exit 0\n')
     (stubs / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
     for f in stubs.iterdir():
         f.chmod(0o755)
@@ -58,8 +73,9 @@ def server(tmp_path):
     return srv, dev, stubs, new_sha
 
 
-def run(srv, stubs, *args, ssh_cmd=None):
+def run(srv, stubs, *args, ssh_cmd=None, extra_env=None):
     env = {**os.environ, **GIT_ENV, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}", "UPDATE_LOG": str(srv / "log")}
+    env.update(extra_env or {})
     if ssh_cmd is not None:
         env["SSH_ORIGINAL_COMMAND"] = ssh_cmd
     else:
@@ -74,13 +90,15 @@ def test_forced_command_pulls_reinstalls_and_restarts(server):
     assert r.returncode == 0, r.stderr
     assert git(srv, "rev-parse", "HEAD") == new_sha and (srv / "v").read_text() == "2\n"
     log = (srv / "log").read_text().splitlines()
-    assert log == ["install", "sudo -n systemctl restart meme-agents", "systemctl restart meme-agents",
-                   "systemctl is-active meme-agents"]
+    assert log == ["install", "systemctl is-active --quiet meme-agents",
+                   "sudo -n systemctl stop meme-agents", "systemctl stop meme-agents",
+                   "sudo -n systemctl restart meme-agents", "systemctl restart meme-agents",
+                   "systemctl is-active --quiet meme-agents"]
     assert "updating work" in r.stdout and "two" in r.stdout and "OK: stub status" in r.stdout
     assert r.stdout.rstrip().endswith(f"deployed {new_sha[:12]}")
     # nothing new: no reinstall, no restart
     r = run(srv, stubs, ssh_cmd=f"deploy work {new_sha}")
-    assert r.returncode == 0 and "nothing to do" in r.stdout and len((srv / "log").read_text().splitlines()) == 4
+    assert r.returncode == 0 and "nothing to do" in r.stdout and len((srv / "log").read_text().splitlines()) == 7
 
 
 def test_other_branch_bad_command_and_force(server):

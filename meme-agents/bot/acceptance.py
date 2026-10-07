@@ -11,6 +11,8 @@ Runs the bot in paper mode for N minutes, then checks the log and the database:
 
 With --no-llm (no ANTHROPIC_API_KEY), check 2 is skipped and the result can at best be
 INCOMPLETE. Everything else still runs against live data, including the pre-filter funnel.
+Synthetic --sim runs and successful runs shorter than 60 minutes are also INCOMPLETE for
+the real one-hour acceptance requirement, even when every smoke-test check passes.
 
 Writes reports/acceptance-YYYYmmdd-HHMMSS.md. Exit code 0 = PASS, 1 = FAIL, 3 = INCOMPLETE.
 """
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -55,7 +58,7 @@ class Recorder(logging.Handler):
         try:
             msg = redact(record.getMessage())
         except Exception:
-            msg = str(record.msg)
+            msg = redact(str(record.msg))
         if record.levelno >= logging.ERROR:
             self.error_count += 1
             if len(self.errors) < 25:
@@ -85,31 +88,33 @@ def reason_keys(reason: str) -> list[str]:
     return out
 
 
-async def funnel(db: Database, since: float) -> dict:
+async def funnel(db: Database, since: float, until: float | None = None) -> dict:
     one = db.fetchone
+    window = [since, until if until is not None else math.inf]
     f: dict = {
-        "launches": (await one("SELECT COUNT(*) c FROM mints WHERE created_at>=?", [since]))["c"],
-        "stage1_passed": (await one("SELECT COUNT(DISTINCT mint) c FROM prefilter_results WHERE ts>=?", [since]))["c"],
-        "stage2_passed": (await one("SELECT COUNT(DISTINCT mint) c FROM prefilter_results WHERE ts>=? AND passed=1",
-                                    [since]))["c"],
+        "launches": (await one("SELECT COUNT(*) c FROM mints WHERE created_at>=? AND created_at<=?", window))["c"],
+        "stage1_passed": (await one("SELECT COUNT(DISTINCT mint) c FROM prefilter_results WHERE ts>=? AND ts<=?", window))["c"],
+        "stage2_passed": (await one("SELECT COUNT(DISTINCT mint) c FROM prefilter_results WHERE ts>=? AND ts<=? AND passed=1",
+                                    window))["c"],
         "candidates": {r["status"]: r["c"] for r in await db.fetchall(
-            "SELECT status, COUNT(*) c FROM candidates WHERE ts>=? GROUP BY status", [since])},
+            "SELECT status, COUNT(*) c FROM candidates WHERE ts>=? AND ts<=? GROUP BY status", window)},
         "decisions": {r["decision"]: r["c"] for r in await db.fetchall(
-            "SELECT decision, COUNT(*) c FROM candidates WHERE ts>=? AND decision IS NOT NULL GROUP BY decision",
-            [since])},
-        "votes_with_error": (await one("SELECT COUNT(*) c FROM votes WHERE ts>=? AND error IS NOT NULL", [since]))["c"],
-        "votes_downgraded_by_guard": (await one("SELECT COUNT(*) c FROM votes WHERE ts>=? AND guard IS NOT NULL",
-                                                [since]))["c"],
-        "real_entries": (await one("SELECT COUNT(*) c FROM positions WHERE kind='real' AND decided_at>=?",
-                                   [since]))["c"],
-        "llm_usd": round((await one("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' AND ts>=?",
-                                    [since]))["s"], 4),
-        "x_usd": round((await one("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='x' AND ts>=?",
-                                  [since]))["s"], 4),
+            "SELECT decision, COUNT(*) c FROM candidates WHERE ts>=? AND ts<=? AND decision IS NOT NULL GROUP BY decision",
+            window)},
+        "votes_with_error": (await one("SELECT COUNT(*) c FROM votes WHERE ts>=? AND ts<=? AND error IS NOT NULL "
+                                        "AND error!=''", window))["c"],
+        "votes_downgraded_by_guard": (await one("SELECT COUNT(*) c FROM votes WHERE ts>=? AND ts<=? AND guard IS NOT NULL "
+                                                "AND guard!=''", window))["c"],
+        "real_entries": (await one("SELECT COUNT(*) c FROM positions WHERE kind='real' AND opened_at>=? "
+                                   "AND opened_at<=?", window))["c"],
+        "llm_usd": round((await one("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='llm' AND ts>=? AND ts<=?",
+                                    window))["s"], 4),
+        "x_usd": round((await one("SELECT COALESCE(SUM(usd),0) s FROM ledger WHERE kind='x' AND ts>=? AND ts<=?",
+                                  window))["s"], 4),
     }
     any_reason: Counter = Counter()
     sole: Counter = Counter()
-    for r in await db.fetchall("SELECT reason FROM prefilter_results WHERE ts>=? AND passed=0", [since]):
+    for r in await db.fetchall("SELECT reason FROM prefilter_results WHERE ts>=? AND ts<=? AND passed=0", window):
         keys = reason_keys(r["reason"])
         any_reason.update(set(keys))
         if len(keys) == 1:
@@ -119,21 +124,27 @@ async def funnel(db: Database, since: float) -> dict:
     return f
 
 
-async def first_full_cycle(db: Database, since: float, need_clean_votes: bool) -> tuple[dict | None, int]:
+async def first_full_cycle(db: Database, since: float, need_clean_votes: bool,
+                           until: float | None = None) -> tuple[dict | None, int]:
     """(the first full decision cycle of the run, how many there were)."""
     rows = await db.fetchall(
         "SELECT c.id, c.mint, c.ts, c.decision, c.mean_confidence, c.gate_reason, c.metrics, m.symbol "
-        "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL AND c.id IN "
-        "(SELECT candidate_id FROM votes WHERE ts>=?) ORDER BY c.ts", [since])
+        "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL "
+        "AND c.ts>=? AND c.ts<=? ORDER BY c.ts, c.id", [since, until if until is not None else math.inf])
     full, first = 0, None
     for c in rows:
         votes = await db.fetchall("SELECT agent, vote, raw_vote, confidence, reasons, evidence, error, guard, "
-                                  "cost_usd FROM votes WHERE candidate_id=? AND agent IN ('scout', 'hunter', "
+                                  "cost_usd, ts FROM votes WHERE candidate_id=? AND agent IN ('scout', 'hunter', "
                                   "'analyst') ORDER BY agent", [c["id"]])
         agents = tuple(sorted(v["agent"] for v in votes))
         if agents != AGENTS or not c["gate_reason"] or c["decision"] not in ("BUY", "PASS"):
             continue
-        if need_clean_votes and any(v["error"] for v in votes):
+        if any(v["ts"] is None or v["ts"] < since or (until is not None and v["ts"] > until) for v in votes):
+            continue
+        if need_clean_votes and any(v["error"] or v["vote"] not in ("BUY", "PASS")
+                                    or not isinstance(v["confidence"], (int, float))
+                                    or not math.isfinite(v["confidence"]) or not 0 <= v["confidence"] <= 1
+                                    for v in votes):
             continue
         full += 1
         if first is None:
@@ -147,7 +158,8 @@ async def evaluate_run(db: Database, s: Settings, started: float, ended: float, 
     problems = []
     if crash:
         problems.append(f"stopped by {crash}")
-    if ran_min < minutes - 0.2:
+    tolerance_s = min(1.0, minutes * 60 * 0.001)
+    if ended - started < minutes * 60 - tolerance_s:
         problems.append(f"ran {ran_min:.1f} of {minutes:g} minutes (interrupted)")
     if crashes:
         problems.append("background loops restarted: " + ", ".join(f"{k} x{v}" for k, v in crashes.items()))
@@ -155,9 +167,9 @@ async def evaluate_run(db: Database, s: Settings, started: float, ended: float, 
         problems.append(f"{rec.error_count} ERROR log line(s)")
     crit = [Criterion(f"ran {minutes:g} min in paper mode without a crash", "FAIL" if problems else "PASS",
                       "; ".join(problems) or f"ran {ran_min:.1f} min, 0 errors, no loop restarts")]
-    first, n_full = await first_full_cycle(db, started, need_clean_votes=True)
+    first, n_full = await first_full_cycle(db, started, need_clean_votes=True, until=ended)
     if no_llm:
-        _, n_any = await first_full_cycle(db, started, need_clean_votes=False)
+        _, n_any = await first_full_cycle(db, started, need_clean_votes=False, until=ended)
         crit.append(Criterion("logged >= 1 full decision cycle (candidate, 3 votes, gate result)", "SKIP",
                               f"no ANTHROPIC_API_KEY: {n_any} candidate(s) reached the gate with placeholder votes"))
     else:
@@ -174,6 +186,8 @@ def render(crit: list[Criterion], verdict: str, started: float, ended: float, f:
     lines = [f"# Acceptance run {t0}: {verdict}", "",
              f"Ran {(ended - started) / 60:.1f} min. Exit code {EXIT[verdict]}.", "",
              "| Check | Result | Detail |", "|---|---|---|"]
+    if engine_facts.get("simulated"):
+        lines.insert(3, "**SIMULATION:** feeds and Claude votes are synthetic; this run cannot pass real-data acceptance.")
     lines += [f"| {c.name} | **{c.status}** | {c.detail} |" for c in crit]
     lines += ["", "## Pipeline funnel (this run)", "",
               f"- launches seen: {f['launches']}; curve reads: {engine_facts.get('curve_reads')}; "
@@ -188,17 +202,27 @@ def render(crit: list[Criterion], verdict: str, started: float, ended: float, f:
               f"- stage-2 rejections by rule: {json.dumps(f['stage2_rejections']) if f['stage2_rejections'] else 'none'}",
               f"- rule that was the only blocker: {json.dumps(f['stage2_sole_blocker']) if f['stage2_sole_blocker'] else 'none'}"]
     if first:
-        m = json.loads(first["metrics"] or "{}")
-        pf = m.get("prefilter") or {}
+        try:
+            m = json.loads(first["metrics"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            m = {}
+        pf = m.get("prefilter") if isinstance(m, dict) else {}
+        if not isinstance(pf, dict):
+            pf = {}
         when = datetime.fromtimestamp(first["ts"], timezone.utc).strftime("%H:%M:%S")
         lines += ["", "## First full decision cycle", "",
                   f"Candidate #{first['id']} {first.get('symbol') or '?'} `{first['mint']}` at {when} UTC: age "
                   f"{pf.get('age_min')} min, {pf.get('unique_buyers')} buyers, {pf.get('net_inflow_sol')} SOL "
                   f"net inflow, liquidity {_usd(pf.get('liquidity_usd'))}", ""]
         for v in first["votes"]:
-            reasons = json.loads(v["reasons"] or "[]")
+            try:
+                reasons = json.loads(v["reasons"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                reasons = []
+            if not isinstance(reasons, list):
+                reasons = []
             lines.append(f"- {v['agent']}: **{v['vote']}** {v['confidence']:.2f}"
-                         f"{' (guard: ' + v['guard'] + ')' if v['guard'] else ''} - {(reasons or ['-'])[0][:200]}")
+                         f"{' (guard: ' + v['guard'] + ')' if v['guard'] else ''} - {str((reasons or ['-'])[0])[:200]}")
         lines.append(f"- gate: **{first['decision']}** (mean confidence {first['mean_confidence'] or 0:.2f}): "
                      f"{first['gate_reason']}")
     lines += ["", "## Log", "", f"- ERROR lines: {rec.error_count}"]
@@ -223,25 +247,40 @@ async def run_acceptance(s: Settings, minutes: float, engine_factory, no_llm: bo
     if s.is_live:
         print("acceptance runs in paper mode only: set MODE=paper", flush=True)
         return 2
+    if not isinstance(minutes, (int, float)) or not math.isfinite(minutes) or minutes <= 0:
+        print("acceptance duration must be a finite positive number of minutes", flush=True)
+        return 2
     rec = Recorder()
     root = logging.getLogger()
     root.addHandler(rec)
-    eng = engine_factory(s)
-    if install_signals:
-        install_signals(eng)
     started = now_s()
     crash = None
+    eng = None
     try:
+        eng = engine_factory(s)
+        if install_signals:
+            install_signals(eng)
         await eng.run(minutes * 60)
     except Exception as e:  # LiveRefused, StartupError, or a bug: all of them fail check 1
         crash = redact(f"{type(e).__name__}: {e}")[:300]
-    ended = now_s()
-    root.removeHandler(rec)
-    facts = {"curve_reads": eng.ingest.stats.get("curve_reads"), "stream_trades": eng.ingest.stats.get("stream_trades"),
-             "helius_credits": getattr(eng.helius, "credits", None)}
+    finally:
+        ended = now_s()
+        root.removeHandler(rec)
+    simulated = bool(getattr(eng, "simulated", False))
+    stats = getattr(getattr(eng, "ingest", None), "stats", {}) or {}
+    facts = {"curve_reads": stats.get("curve_reads"), "stream_trades": stats.get("stream_trades"),
+             "helius_credits": getattr(getattr(eng, "helius", None), "credits", None),
+             "simulated": simulated}
     db = await Database(s.path(s.DB_PATH)).open()
     try:
-        crit = await evaluate_run(db, s, started, ended, minutes, crash, rec, dict(eng.crashes), no_llm)
+        crit = await evaluate_run(db, s, started, ended, minutes, crash, rec,
+                                  dict(getattr(eng, "crashes", {}) or {}), no_llm)
+        if simulated:
+            crit.append(Criterion("real market data and real Claude decision cycle", "SKIP",
+                                  "SIMULATION: synthetic feeds and fake model votes verify the code path only"))
+        if minutes < 60:
+            crit.append(Criterion("one-hour paper acceptance requirement", "SKIP",
+                                  f"requested {minutes:g} minutes; a successful smoke run is not the required hour"))
         report_path = None
         try:  # the same call `python -m bot report` makes
             text, path = await write_daily(db, s)
@@ -251,8 +290,8 @@ async def run_acceptance(s: Settings, minutes: float, engine_factory, no_llm: bo
                                   f"wrote {path.name} ({path.stat().st_size} bytes)" if ok else "empty report"))
         except Exception as e:
             crit.append(Criterion("report runs on the recorded data", "FAIL", redact(f"{type(e).__name__}: {e}")[:300]))
-        f = await funnel(db, started)
-        first, _ = await first_full_cycle(db, started, need_clean_votes=not no_llm)
+        f = await funnel(db, started, until=ended)
+        first, _ = await first_full_cycle(db, started, need_clean_votes=not no_llm, until=ended)
     finally:
         await db.close()
     statuses = {c.status for c in crit}

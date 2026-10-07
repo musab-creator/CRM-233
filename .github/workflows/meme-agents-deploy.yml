@@ -6,7 +6,7 @@ name: meme-agents deploy
 # repository secrets (Settings -> Secrets and variables -> Actions): VPS_HOST, VPS_PORT,
 # VPS_USER, VPS_KNOWN_HOSTS and VPS_SSH_KEY. The key can run deploy/update.sh and nothing else,
 # and the server ignores pushes to branches other than the one it has checked out. Without the
-# secrets the workflow does nothing.
+# secrets the workflow does nothing (ci.yml runs the test suite on every push regardless).
 
 on:
   push:
@@ -68,12 +68,14 @@ jobs:
           KEY: ${{ secrets.VPS_SSH_KEY }}
           HOST: ${{ secrets.VPS_HOST }}
           KNOWN: ${{ secrets.VPS_KNOWN_HOSTS }}
-          USER: ${{ secrets.VPS_USER || 'bot' }}
+          VPS_LOGIN: ${{ secrets.VPS_USER || 'bot' }}
           PORT: ${{ secrets.VPS_PORT || '22' }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy_key
           printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          trap 'rm -f ~/.ssh/deploy_key' EXIT
+          [[ "$GITHUB_REF_NAME" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "unsupported branch name" >&2; exit 2; }
           ssh -i ~/.ssh/deploy_key -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes \
-              -o ConnectTimeout=20 "$USER@$HOST" "deploy $GITHUB_REF_NAME $GITHUB_SHA"
+              -o ConnectTimeout=20 "$VPS_LOGIN@$HOST" "deploy $GITHUB_REF_NAME $GITHUB_SHA"

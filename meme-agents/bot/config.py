@@ -1,9 +1,10 @@
-"""Settings loaded from `.env` (and the process environment, which wins).
+"""Settings loaded from `.env`; process overrides apply only to non-secret fields.
 
 Every threshold in the pipeline lives here so it can be tuned without code changes.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -14,9 +15,13 @@ ROOT = Path(__file__).resolve().parent.parent
 def load_dotenv(path: Path) -> dict[str, str]:
     """Minimal KEY=VALUE parser: comments, blank lines, optional quotes, `export ` prefix."""
     out: dict[str, str] = {}
-    if not path.exists():
-        return out
-    for raw in path.read_text().splitlines():
+    try:
+        if not path.exists():
+            return out
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"Cannot read .env ({type(exc).__name__}); check file access and UTF-8 encoding") from None
+    for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -24,8 +29,12 @@ def load_dotenv(path: Path) -> dict[str, str]:
             line = line[7:]
         key, _, val = line.partition("=")
         val = val.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
-            val = val[1:-1]
+        if val and val[0] in "'\"":
+            quote = val[0]
+            end = val.find(quote, 1)
+            if end < 0 or (val[end + 1:].strip() and not val[end + 1:].strip().startswith("#")):
+                raise ConfigError(f"{key.strip()}: invalid quoted value")
+            val = val[1:end]
         elif val.startswith("#"):
             val = ""  # empty value followed by a comment
         else:
@@ -162,6 +171,7 @@ class Settings:
     LLM_PRICE_OUT_PER_MTOK: float = 15.0
     LLM_MAX_TURNS: int = 6
     LLM_MAX_TOKENS: int = 2048
+    LLM_MAX_INPUT_BYTES: int = 120000
     LLM_TIMEOUT_S: float = 120.0
     LLM_CONCURRENCY: int = 2
     AGENT_MIN_GROUNDING: float = 0.5
@@ -238,9 +248,12 @@ def _coerce(raw: str, current, name: str = ""):
         if v in _FALSE:
             return False
         # a typo must never silently flip a safety flag (e.g. LIVE_DRY_RUN=ture -> sends real trades)
-        raise ConfigError(f"{name}={raw!r} is not a boolean; use true/false")
+        raise ConfigError(f"{name}: invalid boolean; use true/false")
     if isinstance(current, int):
-        return int(float(raw))
+        value = float(raw)
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError("must be a finite whole number")
+        return int(value)
     if isinstance(current, float):
         return float(raw)
     if isinstance(current, list):
@@ -250,7 +263,8 @@ def _coerce(raw: str, current, name: str = ""):
 
 def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None = None) -> Settings:
     values = load_dotenv(env_file or ROOT / ".env")
-    values.update({k: v for k, v in os.environ.items()})
+    secret_fields = {f.name for f in fields(Settings) if not f.repr}
+    values.update({k: v for k, v in os.environ.items() if k not in secret_fields})
     if overrides:
         values.update(overrides)
     s = Settings()
@@ -260,12 +274,59 @@ def load_settings(env_file: Path | None = None, overrides: dict[str, str] | None
                 setattr(s, f.name, _coerce(values[f.name], getattr(s, f.name), f.name))
             except ConfigError:
                 raise
-            except ValueError as e:
-                raise ConfigError(f"{f.name}={values[f.name]!r}: {e}") from None
+            except (ValueError, OverflowError):
+                raise ConfigError(f"{f.name}: invalid numeric value") from None
+    validate_settings(s)
     s.PUMPPORTAL_TRADE_STREAM = s.PUMPPORTAL_TRADE_STREAM.strip().lower()
     if s.PUMPPORTAL_TRADE_STREAM not in STREAM_MODES:
-        raise ConfigError(f"PUMPPORTAL_TRADE_STREAM={s.PUMPPORTAL_TRADE_STREAM!r}: use one of {', '.join(STREAM_MODES)}")
+        raise ConfigError(f"PUMPPORTAL_TRADE_STREAM: use one of {', '.join(STREAM_MODES)}")
     s.TELEGRAM_DIGEST = s.TELEGRAM_DIGEST.strip().lower()
     if s.TELEGRAM_DIGEST not in DIGEST_MODES:
-        raise ConfigError(f"TELEGRAM_DIGEST={s.TELEGRAM_DIGEST!r}: use one of {', '.join(DIGEST_MODES)}")
+        raise ConfigError(f"TELEGRAM_DIGEST: use one of {', '.join(DIGEST_MODES)}")
     return s
+
+
+def validate_settings(s: Settings) -> None:
+    """Reject unsafe numeric settings before any network client or order is created."""
+    s.MODE = s.MODE.strip().lower()
+    if s.MODE not in ("paper", "live"):
+        raise ConfigError("MODE must be paper or live")
+    for f in fields(s):
+        value = getattr(s, f.name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not math.isfinite(value) or value < 0:
+                raise ConfigError(f"{f.name} must be finite and non-negative")
+    positive = (
+        "BANKROLL_USD", "MAX_OPEN_POSITIONS", "MAX_POSITIONS_PER_CREATOR",
+        "POSITION_MIN_USD", "POSITION_MAX_USD", "MAX_TRACKED_MINTS", "TRADE_RETENTION_HOURS",
+        "PF_SCAN_INTERVAL_S", "LIQ_POLL_S", "RUGCHECK_POLL_S", "WS_STALL_S", "WS_MAX_BACKOFF_S",
+        "LLM_MAX_TURNS", "LLM_MAX_TOKENS", "LLM_MAX_INPUT_BYTES", "LLM_TIMEOUT_S", "LLM_CONCURRENCY",
+        "LLM_PRICE_IN_PER_MTOK", "LLM_PRICE_OUT_PER_MTOK", "TRIAGE_PRICE_IN_PER_MTOK",
+        "TRIAGE_PRICE_OUT_PER_MTOK", "TRIAGE_MAX_TOKENS", "TIME_STOP_HOURS",
+        "ENTRY_FILL_TIMEOUT_S", "EXIT_FILL_TIMEOUT_S", "EXIT_RETRY_BASE_S", "EXIT_RETRY_MAX_S",
+        "LIVE_CONFIRM_TIMEOUT_S", "CURVE_POLL_CALLS_PER_MIN", "CURVE_HOT_POLL_S", "CURVE_POLL_SCALE",
+        "DEX_TOKENS_RPS", "DEX_BOOSTS_RPS", "RUGCHECK_RPS", "HELIUS_RPC_RPS",
+        "HELIUS_ENHANCED_RPS", "JUPITER_RPS", "REGIME_REFRESH_MIN",
+    )
+    for name in positive:
+        if getattr(s, name) <= 0:
+            raise ConfigError(f"{name} must be greater than zero")
+    if s.POSITION_MIN_USD > s.POSITION_MAX_USD:
+        raise ConfigError("POSITION_MIN_USD must not exceed POSITION_MAX_USD")
+    if s.PF_MIN_AGE_MIN > s.PF_MAX_AGE_MIN:
+        raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
+    if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:
+        raise ConfigError("EXIT_RETRY_BASE_S must not exceed EXIT_RETRY_MAX_S")
+    if s.LIVE_MAX_WALLET_SOL > 0.5:
+        raise ConfigError("LIVE_MAX_WALLET_SOL must not exceed 0.5 SOL")
+    for name in ("CONSENSUS_MIN_MEAN_CONFIDENCE", "AGENT_MIN_GROUNDING", "TRIAGE_MIN_CONFIDENCE",
+                 "VETO_MIN_CONFIDENCE", "TAKE_PROFIT_SELL_FRACTION", "REGIME_MIN_MULTIPLIER"):
+        if not 0 < getattr(s, name) <= 1:
+            raise ConfigError(f"{name} must be greater than zero and at most one")
+    for name in ("DAILY_LOSS_CAP_PCT", "STOP_LOSS_PCT", "TRAILING_STOP_PCT",
+                 "EMERGENCY_LIQ_DROP_PCT", "PF_MAX_TOP10_PCT"):
+        if not 0 < getattr(s, name) <= 100:
+            raise ConfigError(f"{name} must be greater than zero and at most 100")
+    for name in ("PUMPFUN_FEE_PCT", "PUMPPORTAL_FEE_PCT", "ENTRY_SLIPPAGE_PCT", "EXIT_SLIPPAGE_PCT"):
+        if getattr(s, name) >= 100:
+            raise ConfigError(f"{name} must be below 100")

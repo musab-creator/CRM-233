@@ -54,7 +54,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
 | `python -m bot status --check [--alert]` | One line for monitoring (OK, PAUSED, DEGRADED, DOWN or BLIND); exits 1 if degraded, down or blind. `--alert` sends a Telegram message when the state changes. |
 | `python -m bot preflight [--probe]` | Checks every API and key with free calls. `--probe` also records what the live APIs return and tests this build's assumptions against it (about 3 minutes). |
-| `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle, and that the report runs. Writes `reports/acceptance-*.md` with the pipeline funnel. |
+| `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
 | Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume and stop (stop asks to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/help`. Only `TELEGRAM_CHAT_ID` is answered. Settings and keys change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
@@ -215,8 +215,8 @@ Any sample under 30 is flagged as noise. Don't tune on it.
 
 ## Operations
 
-- Logs go to the console and to `logs/bot.log`, rotated at 20 MB with 5 files kept. Secrets
-  that appear in URLs are redacted.
+- Logs go to the console and to `logs/bot.log`, rotated at 20 MB with 5 files kept. The
+  configured keys, and anything key-shaped in URLs, headers and error bodies, are redacted.
 - **Stall watchdog.** If PumpPortal sends nothing for `WS_STALL_S` seconds (default 90),
   the client reconnects and re-subscribes, even when the socket still answers pings.
 - The engine writes a heartbeat to the database every 60 s. `python -m bot status --check`
@@ -234,18 +234,23 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   `TELEGRAM_CHAT_ID`. Commands from any other chat are logged and ignored; commands sent while
   the bot was down are not answered on restart. The chat can never change a setting or a key:
   the service runs with its code and `.env` read-only.
-- **Updates.** `deploy/update.sh` pulls the tracked branch (fast-forward only), reinstalls and
-  restarts the service. `.github/workflows/meme-agents-deploy.yml` runs it over SSH after each
-  push once the `VPS_*` secrets exist; `deploy/VPS.md` has the details.
+- **Updates.** `deploy/update.sh` fetches the tracked branch (fast-forward only), builds and
+  tests it in a separate checkout and virtualenv while the old bot keeps running, then stops
+  the service, switches code and dependencies over and restarts. If the restart or the health
+  check fails it puts the previous code and virtualenv back. `.env`, `STOP`, `data/`, `logs/`
+  and `reports/` are never touched. `.github/workflows/meme-agents-deploy.yml` runs it over
+  SSH after each push once the `VPS_*` secrets exist; `deploy/VPS.md` has the details.
 - **systemd** (`deploy/meme-agents.service`) restarts the bot after a crash, and after a hang:
   the bot pings systemd's watchdog every 60 s. Configuration errors (exit 2) are not
-  retried. The unit can write only `data/`, `logs/` and `reports/`.
+  retried. Code, `.venv` and `.env` are read-only inside the unit; it can write the runtime
+  directories and the `STOP` file (so Telegram `/stop` and `/resume` work).
 - **One bot per database.** A lock next to `data/bot.db` refuses a second process, such as
   the service plus a manual run. Without it, two bots would trade the same bankroll.
 - **Self-healing loops.** Every background loop is supervised. If one ever raises, it is
   logged with its traceback, counted, shown by `status`, and restarted.
 - **Restarts are safe.** Open positions, queued candidates and budgets all resume from
-  SQLite. Older databases are migrated in place.
+  SQLite. A crash restart keeps a daily-loss pause in force; a clean stop and start resets
+  the loss baseline. Older databases are migrated in place.
 
 ## Budgets
 
@@ -263,7 +268,12 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   by all candidates.
 - **Helius.** Credits are counted per UTC month against `HELIUS_MONTHLY_CREDITS`; see below.
 
-All three budgets are stored in SQLite, so a restart does not reset them.
+All three budgets are stored in SQLite, so a restart does not reset them. Each LLM and X
+call first writes a worst-case hold to SQLite and settles it to the real usage afterwards, so
+parallel agents, and even two processes, cannot overrun a budget together. A call whose
+usage never came back (timeout mid-request) is charged at its hold, never refunded, and holds
+left by a crash stay counted for the day. `LLM_MAX_INPUT_BYTES` refuses an oversized request
+before it is billed.
 
 ## Data sources and costs
 

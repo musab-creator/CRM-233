@@ -9,6 +9,7 @@ the shadow book's outcomes.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import anthropic
@@ -29,7 +30,7 @@ def triage_skips(vote: Vote, s: Settings) -> bool:
 
 
 def triage_first_call_usd(s: Settings, context: str) -> float:
-    system = [{"type": "text", "text": ROLE_PROMPTS[AGENT]}]
+    system = [{"type": "text", "text": ROLE_PROMPTS[AGENT], "cache_control": {"type": "ephemeral"}}]
     return worst_case_call_usd(s, system, [vote_tool(False)], [{"role": "user", "content": context}],
                                price_in=s.TRIAGE_PRICE_IN_PER_MTOK, price_out=s.TRIAGE_PRICE_OUT_PER_MTOK,
                                max_tokens=s.TRIAGE_MAX_TOKENS)
@@ -46,10 +47,11 @@ async def run_triage(client: anthropic.AsyncAnthropic, s: Settings, context: str
             reserve = worst_case_call_usd(s, system, [vt], messages, price_in=s.TRIAGE_PRICE_IN_PER_MTOK,
                                           price_out=s.TRIAGE_PRICE_OUT_PER_MTOK, max_tokens=s.TRIAGE_MAX_TOKENS)
             try:
-                await budget.reserve(reserve)
+                reservation = await budget.reserve(reserve)
             except BudgetExceeded as e:
                 return Vote(AGENT, cost_usd=total, turns=turns, error=f"llm budget: {e}")
-            cost = 0.0
+            cost = reserve
+            usage_known = False
             try:
                 resp = await client.messages.create(
                     model=s.TRIAGE_MODEL, max_tokens=s.TRIAGE_MAX_TOKENS, system=system, tools=[vt],
@@ -60,13 +62,21 @@ async def run_triage(client: anthropic.AsyncAnthropic, s: Settings, context: str
                                     getattr(u, "cache_creation_input_tokens", 0) or 0,
                                     getattr(u, "cache_read_input_tokens", 0) or 0,
                                     s.TRIAGE_PRICE_IN_PER_MTOK, s.TRIAGE_PRICE_OUT_PER_MTOK)
+                usage_known = True
             finally:
-                await budget.settle(reserve, cost, f"{AGENT} turn {attempt}")
-            total += cost
-            turns += 1
+                detail = f"{AGENT} turn {attempt}" + ("; estimated: usage unknown" if not usage_known else "")
+                await asyncio.shield(budget.settle(reservation, cost, detail))
+                total += cost
+                turns += 1
             if resp.stop_reason == "refusal":
                 return Vote(AGENT, cost_usd=total, turns=turns, error="model refusal")
-            for b in resp.content:
+            if resp.stop_reason == "max_tokens":
+                messages.append({"role": "user", "content": "Your reply was cut off. Call submit_vote briefly."})
+                continue
+            terminal = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+            if len(terminal) > 1:
+                raise ValueError("submit_vote must be exactly one terminal tool call")
+            for b in terminal:
                 if getattr(b, "type", None) == "tool_use" and b.name == "submit_vote":
                     vote = validate_vote(AGENT, b.input, False)
                     vote.cost_usd, vote.turns, vote.raw_vote = total, turns, vote.vote

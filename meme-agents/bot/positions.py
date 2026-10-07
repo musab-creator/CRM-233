@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, fields
+from math import isfinite
 from typing import Awaitable, Callable
 
 from .config import Settings
 from .db import Database
 from .exits import ExitState, check_exit
+from .live.executor import LiveExecutionUnknown
 from .paper import Fill, PaperExecutor, mark_to_market
 from .risk import RiskManager, kill_switch_active
 from .util import now_s
@@ -78,7 +80,8 @@ class Position:
 
 def _num(v) -> float | None:
     try:
-        return float(v)
+        number = float(v)
+        return number if isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
@@ -111,6 +114,7 @@ class PositionManager:
         # live trades run off the tick path, one in flight per position
         self._inflight: set[int] = set()
         self._tasks: set[asyncio.Task] = set()
+        self._entry_uncertain: set[int] = set()
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._kill_handled = False
@@ -121,10 +125,19 @@ class PositionManager:
 
     async def cash_sol(self) -> float:
         """Paper bankroll: starting SOL + realized PnL - capital tied up in active positions."""
+        if self.executor.mode == "live" and not getattr(self.executor, "dry_run", True):
+            balance = await self.executor.chain.balance_sol(self.executor.pubkey)
+            if not isfinite(balance) or balance < 0:
+                raise ValueError("live wallet balance must be finite and nonnegative")
+            # Open inventory and failed transaction fees are already reflected in the wallet.
+            reserved = sum(p.sol_in + self.s.NETWORK_FEE_SOL
+                           for p in self.active("real") if p.status == "pending")
+            return balance - reserved
         start = await self.db.kv_get("bankroll_sol")
         start_sol = float(start) if start else 0.0
         r = await self.db.fetchone(
-            "SELECT COALESCE(SUM(pnl_sol),0) s FROM positions WHERE kind='real' AND status='closed'")
+            "SELECT COALESCE(SUM(pnl_sol),0) s FROM positions WHERE kind='real' AND mode=? AND status='closed'",
+            [self.executor.mode])
         tied = sum(p.cost_sol or p.sol_in + self.s.NETWORK_FEE_SOL for p in self.active("real"))
         tied -= sum(p.proceeds_sol for p in self.active("real"))
         return start_sol + float(r["s"]) - tied
@@ -135,17 +148,27 @@ class PositionManager:
 
     async def realized_since(self, since: float) -> float:
         r = await self.db.fetchone(
-            "SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND status='closed' AND closed_at>=?",
-            [since])
+            "SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND mode=? AND status='closed' AND closed_at>=?",
+            [self.executor.mode, since])
         return float(r["s"])
 
     # --- persistence -------------------------------------------------------------
     async def load(self) -> None:
-        rows = await self.db.fetchall("SELECT * FROM positions WHERE status IN ('pending','open')")
+        rows = await self.db.fetchall(
+            "SELECT * FROM positions WHERE status IN ('pending','open') AND (kind='shadow' OR mode=?)",
+            [self.executor.mode])
         names = {f.name for f in fields(Position)}
         for r in rows:
             p = Position(**{k: v for k, v in r.items() if k in names})
             self.positions[p.id] = p
+            intent = None
+            if p.status == "pending" and self._is_live(p) and hasattr(self.executor, "pending_intent"):
+                intent = await self.executor.pending_intent(p.mint, "buy")
+            if p.status == "pending" and (intent or (p.exit_reason or "").startswith("execution_uncertain:")):
+                self._entry_uncertain.add(p.id)
+                if intent:
+                    p.last_price = intent["price"]
+                self.risk.paused_reason = "unresolved live transaction; entries paused until restart after reconciliation"
             self.pin(p.mint, True)
             if self.watch_account and p.creator:
                 await self.watch_account(p.creator, True)
@@ -164,13 +187,30 @@ class PositionManager:
                                        "price": f.price, "tokens": f.tokens, "sol": f.sol,
                                        "fee_sol": f.fee_sol, "tx_sig": f.tx_sig})
 
+    async def _persist_fill(self, p: Position, f: Fill, reason: str, ts: float, before: dict) -> None:
+        """Commit the inventory and its cash movement together, or restore both in memory."""
+        try:
+            async with self.db.transaction():
+                await self._save(p)
+                await self._record_fill(p, f, reason, ts)
+                if self._is_live(p) and f.tx_sig and hasattr(self.executor, "acknowledge_fill"):
+                    await self.executor.acknowledge_fill(p.mint, f.side, f.tx_sig)
+        except BaseException:
+            for key, value in before.items():
+                setattr(p, key, value)
+            raise
+
     # --- entry ---------------------------------------------------------------------
     async def create(self, mint: str, candidate_id: int | None, kind: str, creator: str, size_usd: float,
                      liq_usd: float | None) -> Position | None:
         sol_usd = self.sol_price.get()
-        if not sol_usd:
+        if not sol_usd or not isfinite(sol_usd) or sol_usd <= 0:
             log.warning("no SOL/USD price yet; cannot size %s position for %s", kind, mint)
             return None
+        if kind not in ("real", "shadow") or not isfinite(size_usd) or size_usd <= 0:
+            raise ValueError("position kind and size must be valid")
+        if kind == "real" and not self.s.POSITION_MIN_USD <= size_usd <= self.s.POSITION_MAX_USD:
+            raise ValueError("real position size is outside configured limits")
         sol_in = size_usd / sol_usd
         async with self.lock:
             if kind == "real":
@@ -198,7 +238,13 @@ class PositionManager:
         self._inflight.add(p.id)
         task = asyncio.create_task(coro)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        def finished(done: asyncio.Task) -> None:
+            self._tasks.discard(done)
+            if not done.cancelled() and done.exception():
+                log.error("position task #%s failed", p.id,
+                          exc_info=(type(done.exception()), done.exception(), done.exception().__traceback__))
+                self.risk.paused_reason = "live transaction persistence failed; reconcile before restarting"
+        task.add_done_callback(finished)
 
     async def _cancel_entry(self, p: Position, reason: str, ts: float) -> None:
         p.status, p.exit_reason, p.closed_at = "cancelled", reason[:200], ts
@@ -209,7 +255,7 @@ class PositionManager:
         """Caller holds the lock."""
         if p.id in self._inflight:
             return
-        if p.kind == "real":
+        if p.kind == "real" and p.id not in self._entry_uncertain:
             # the world may have changed between the decision and this first trade
             if kill_switch_active(self.s):
                 await self._cancel_entry(p, "kill switch before fill", ts)
@@ -236,16 +282,34 @@ class PositionManager:
             except Exception as e:
                 log.error("live entry failed #%s %s: %s", p.id, p.mint, e)
                 async with self.lock:
-                    await self._cancel_entry(p, f"entry_error: {e}", now_s())
+                    if isinstance(e, LiveExecutionUnknown):
+                        self._entry_uncertain.add(p.id)
+                        p.exit_reason = f"execution_uncertain: {e}"[:200]
+                        p.last_price = price
+                        await self._save(p)
+                        self.risk.paused_reason = "unresolved live transaction; entries paused until restart after reconciliation"
+                    else:
+                        self._entry_uncertain.discard(p.id)
+                        await self._cancel_entry(p, f"entry_error: {e}", now_s())
                 if self.notify:
                     await self.notify(f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}")
                 return
             async with self.lock:
-                await self._apply_entry(p, f, price, now_s())
+                try:
+                    await self._apply_entry(p, f, price, now_s())
+                except BaseException:
+                    if p.status == "pending":
+                        self._entry_uncertain.add(p.id)
+                        p.last_price = price
+                    raise
+                self._entry_uncertain.discard(p.id)
+                if kill_switch_active(self.s):
+                    await self.queue_exit(p, "kill_switch")
         finally:
             self._inflight.discard(p.id)
 
     async def _apply_entry(self, p: Position, f: Fill, price: float, ts: float) -> None:
+        before = asdict(p)
         if p.status != "pending":
             log.error("fill for #%s arrived in state %s; recording it anyway", p.id, p.status)
             self.positions[p.id] = p
@@ -255,8 +319,8 @@ class PositionManager:
         p.last_tick_at = ts
         p.tokens_initial = p.tokens_remaining = f.tokens
         p.cost_sol = f.sol
-        await self._save(p)
-        await self._record_fill(p, f, "entry", ts)
+        p.exit_reason = None
+        await self._persist_fill(p, f, "entry", ts, before)
         if p.kind == "real":
             msg = (f"🟢 ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f} = {p.sol_in:.4f} SOL "
                    f"@ {price:.3e} SOL\ntokens {f.tokens:,.0f}\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
@@ -305,7 +369,8 @@ class PositionManager:
         p.exit_attempts += 1
         delay = min(self.s.EXIT_RETRY_MAX_S, self.s.EXIT_RETRY_BASE_S * 2 ** (p.exit_attempts - 1))
         p.next_exit_at = ts + delay
-        p.pending_exit, p.pending_exit_fraction = reason, fraction
+        if not p.pending_exit or p.pending_exit == reason or (p.pending_exit_fraction or 1.0) <= fraction:
+            p.pending_exit, p.pending_exit_fraction = reason, fraction
         p.pending_exit_at = p.pending_exit_at or ts
         await self._save(p)
         log.error("exit failed #%s %s (%s), attempt %d: %s; retrying in %.0fs",
@@ -318,14 +383,22 @@ class PositionManager:
                           reason: str) -> None:
         if p.status != "open":
             return
+        before = asdict(p)
         full = fraction >= 0.999
-        p.tokens_remaining = 0.0 if full else max(0.0, p.tokens_remaining - f.tokens)
+        if f.remaining_tokens is not None:
+            p.tokens_remaining = max(0.0, f.remaining_tokens)
+            full = p.tokens_remaining <= 1e-9
+        else:
+            p.tokens_remaining = 0.0 if full else max(0.0, p.tokens_remaining - f.tokens)
         p.proceeds_sol += f.sol
         if reason == "take_profit":
             p.tp_done = 1
-        p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
+        # A full emergency exit may have replaced the in-flight take-profit intent.
+        if p.pending_exit is None or (p.pending_exit == reason and
+                (full or (p.pending_exit_fraction or 1.0) <= fraction) and
+                (f.remaining_tokens is None or full or fraction < 0.999)):
+            p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
         p.exit_attempts, p.next_exit_at = 0, None
-        await self._record_fill(p, f, reason, ts)
         closed = full or p.tokens_remaining <= p.tokens_initial * 1e-9
         if closed:
             p.tokens_remaining = 0.0
@@ -333,7 +406,7 @@ class PositionManager:
             p.sol_usd_exit = self.sol_price.get() or p.sol_usd_entry
             p.pnl_sol = p.proceeds_sol - p.cost_sol
             p.pnl_usd = p.pnl_sol * (p.sol_usd_exit or 0)
-        await self._save(p)
+        await self._persist_fill(p, f, reason, ts, before)
         if p.kind == "real":
             sym = await self._symbol(p.mint)
             if closed:
@@ -353,6 +426,7 @@ class PositionManager:
             await self._release(p)
             if p.kind == "real":
                 self.risk.register_realized(await self.realized_since(self.risk.loss_window_start(ts)))
+                await self.risk.persist()
 
     async def drain(self, timeout: float = 90.0) -> None:
         """Let in-flight live trades finish (on shutdown)."""
@@ -373,6 +447,9 @@ class PositionManager:
 
     # --- event handlers ------------------------------------------------------------
     async def on_tick(self, mint: str, price: float, ts: float, msg: dict) -> None:
+        if not isfinite(price) or price <= 0 or not isfinite(ts):
+            log.warning("ignoring invalid position tick for %s", mint)
+            return
         targets = [p for p in self.positions.values() if p.mint == mint and p.active]
         if not targets:
             return
@@ -386,7 +463,8 @@ class PositionManager:
 
     async def _on_price(self, p: Position, price: float, ts: float) -> None:
         """Mark to market and run the exit rules. Caller holds the lock."""
-        if p.status != "open":
+        if (p.status != "open" or not isfinite(price) or price <= 0 or not isfinite(ts)
+                or (p.last_tick_at is not None and ts < p.last_tick_at)):
             return
         p.last_price, p.last_tick_at = price, ts
         p.peak_price = max(p.peak_price or price, price)
@@ -398,6 +476,8 @@ class PositionManager:
             await self._exit(p, sig.fraction, price, ts, sig.reason)
 
     async def queue_exit(self, p: Position, reason: str, fraction: float = 1.0) -> None:
+        if p.id in self._entry_uncertain:
+            return  # keep the durable intent until its original signature has a known outcome
         if p.id in self._inflight and p.status == "pending":
             return  # a live buy is in flight: let it land, then the exit is queued on the open position
         if p.status == "pending":
@@ -405,7 +485,8 @@ class PositionManager:
             await self._save(p)
             await self._release(p)
             return
-        if not p.pending_exit:
+        urgent = reason == "kill_switch" or reason.startswith("emergency")
+        if not p.pending_exit or (urgent and (p.pending_exit_fraction or 1.0) < fraction):
             p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
             await self._save(p)
             log.info("exit queued #%d %s: %s", p.id, p.mint, reason)
@@ -425,6 +506,10 @@ class PositionManager:
             else:
                 self._kill_handled = False
             for p in list(self.positions.values()):
+                if p.id in self._entry_uncertain:
+                    if p.id not in self._inflight and p.last_price:
+                        self._spawn(p, self._live_entry(p, p.last_price))
+                    continue
                 if (p.status == "pending" and p.id not in self._inflight
                         and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S):
                     p.status, p.exit_reason, p.closed_at = "cancelled", "no trade after decision", now
@@ -467,10 +552,10 @@ class PositionManager:
         async with self.lock:
             for p in opened:
                 pair = pairs.get(p.mint)
-                liq = ((pair or {}).get("liquidity") or {}).get("usd")
+                liq = _num(((pair or {}).get("liquidity") or {}).get("usd"))
                 if liq is None and self.curve_liquidity:
-                    liq = self.curve_liquidity(p.mint)
-                if liq is None:
+                    liq = _num(self.curve_liquidity(p.mint))
+                if liq is None or liq < 0:
                     continue
                 p.last_liq_usd = liq
                 if p.entry_liq_usd is None:

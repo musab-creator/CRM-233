@@ -29,8 +29,9 @@ chmod 600 .env            # only your user can read it
 nano .env                 # paste each value after the = sign, no quotes, no spaces
 ```
 
-`.gitignore` already excludes `.env`, so git never picks it up. The bot reads only this file
-and the process environment, and it masks keys in its logs.
+`.gitignore` already excludes `.env`, so git never picks it up. Keys are read from this file
+only: a key exported in the shell environment is ignored (non-secret settings can still be
+overridden that way). The bot masks the configured keys in its logs.
 
 **For the test run on GitHub:** use repository secrets, never a file in the repo.
 

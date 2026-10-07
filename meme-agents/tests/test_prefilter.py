@@ -52,6 +52,7 @@ def test_creator_is_not_a_unique_buyer():
         async def upsert_mints(self, rows): ...
     ing = Ingestor.__new__(Ingestor)
     ing.mints, ing._trade_buf, ing._dirty, ing.stats = {}, [], set(), {"creates": 0, "trades": 0}
+    ing._dirty_versions = {}
     st = MintState(mint="M", creator="DEV")
     ing._apply(st, "buy", "DEV", 1.0, 100.0, {}, NOW)
     ing._apply(st, "buy", "A", 1.0, 100.0, {}, NOW)

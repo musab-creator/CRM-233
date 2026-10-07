@@ -19,7 +19,7 @@ from .agents.tools import ToolContext, build_specs, build_veto_specs
 from .agents.triage import run_triage, triage_first_call_usd, triage_skips
 from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
-from .config import Settings
+from .config import Settings, validate_settings
 from .consensus import apply_vetoes, gate
 from .db import Database
 from .digest import hour_start, hourly_digest
@@ -74,6 +74,7 @@ def month_fraction(ts: float) -> float:
 class Engine:
     def __init__(self, s: Settings, *, http: httpx.AsyncClient | None = None, feed=None, dex=None, rug=None,
                  helius=None, x=None, news=None, llm=None, chain=None):
+        validate_settings(s)
         self.s = s
         self.started_at = now_s()
         self.db = Database(s.path(s.DB_PATH))
@@ -98,7 +99,7 @@ class Engine:
             anthropic.AsyncAnthropic(api_key=s.ANTHROPIC_API_KEY, max_retries=2) if s.ANTHROPIC_API_KEY else None)
         self.tg = Telegram(self.http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID)
         self.sol_price = SolPrice(self.dex.sol_usd, 60)
-        self.risk = RiskManager(s, self.started_at)
+        self.risk = RiskManager(s, self.started_at, db=self.db)
         self.executor = PaperExecutor(s)
         self.positions: PositionManager | None = None
         self.queue: asyncio.Queue[int] = asyncio.Queue()
@@ -124,6 +125,7 @@ class Engine:
             raise StartupError(f"another bot process is already using {self.s.path(self.s.DB_PATH)}; "
                                "stop it first (systemctl stop meme-agents, or Ctrl-C the other terminal)")
         await self.db.open()
+        await self.risk.startup()
         kp = await check_live_startup(self.s, self.helius.balance_sol)  # raises LiveRefused
         if kp is not None:
             from .live.executor import LiveExecutor
@@ -161,6 +163,9 @@ class Engine:
             log.info("bankroll initialised: $%.2f = %.4f SOL @ $%.2f", self.s.BANKROLL_USD,
                      self.s.BANKROLL_USD / sol, sol)
         await self.positions.load()
+        self.risk.register_realized(await self.positions.realized_since(self.risk.loss_window_start(now_s())))
+        await self.risk.persist()
+        await self._restore_stream_subscriptions()
         # candidates that were queued but never evaluated before a restart
         for c in await self.db.fetchall("SELECT id FROM candidates WHERE status='pending'"):
             self.queue.put_nowait(c["id"])
@@ -202,6 +207,20 @@ class Engine:
     def _stream_ok(self) -> bool:
         return self.stream_mode != "off" and self._stream_blocked_day is None
 
+    async def _restore_stream_subscriptions(self) -> None:
+        """Restore existing subscriptions after restart or a daily budget reset."""
+        if not self._stream_ok():
+            return
+        mints = set(self.ingest.pinned)
+        if self.stream_mode == "all":
+            mints.update(st.mint for st in self.ingest.mints.values() if st.status == "tracking")
+        if mints:
+            await self.feed.subscribe_tokens(sorted(mints))
+        if self.positions:
+            wallets = {p.creator for p in self.positions.active(None) if p.creator}
+            if wallets:
+                await self.feed.subscribe_accounts(sorted(wallets))
+
     async def _check_stream_budget(self) -> None:
         """Count streamed trades per UTC day (persisted) and cut the stream at the budget."""
         if self.stream_mode == "off":
@@ -229,6 +248,7 @@ class Engine:
         elif self._stream_blocked_day and self._stream_blocked_day != day:
             self._stream_blocked_day = None  # a new UTC day
             self.ingest.stream_new_tokens = self.stream_mode == "all"
+            await self._restore_stream_subscriptions()
             log.info("PumpPortal trade stream budget reset for %s", day)
 
     async def stream_guard(self) -> None:
@@ -468,11 +488,17 @@ class Engine:
         if self.llm is not None:
             # Running agents that cannot afford even their first call would only record three
             # budget errors as a decision: stop evaluating instead (as the brief asks).
-            first_calls = sum(worst_case_call_usd(self.s, [{"type": "text", "text": sp.system}],
-                                                  [*sp.tools, vote_tool(sp.with_size)],
-                                                  [{"role": "user", "content": context}]) for sp in specs)
-            if self.s.TRIAGE_ENABLED:
-                first_calls += triage_first_call_usd(self.s, context)
+            try:
+                first_calls = sum(worst_case_call_usd(self.s, [{"type": "text", "text": sp.system}],
+                                                      [*sp.tools, vote_tool(sp.with_size)],
+                                                      [{"role": "user", "content": context}]) for sp in specs)
+                if self.s.TRIAGE_ENABLED:
+                    first_calls += triage_first_call_usd(self.s, context)
+            except ValueError:
+                await self.db.update("candidates", "id", cid, {
+                    "status": "failed", "gate_reason": "agent request exceeds configured input bound"})
+                await self._finish_mint(mint, "failed")
+                return None
             left = await self.llm_budget.remaining()
             if left < first_calls:
                 return await self._skip_for_budget(
@@ -579,6 +605,15 @@ class Engine:
                 await self.evaluate(cid)
             except Exception:
                 log.exception("evaluation of candidate %s failed", cid)
+                # Never replay a late failure: a durable decision or live order may already exist.
+                cand = await self.db.fetchone("SELECT mint,status FROM candidates WHERE id=?", [cid])
+                if cand:
+                    if cand["status"] == "pending":
+                        await self.db.update("candidates", "id", cid, {
+                            "status": "failed", "gate_reason": "evaluation failed; no automatic replay"})
+                    await self._finish_mint(cand["mint"], "failed" if cand["status"] == "pending" else cand["status"])
+            finally:
+                self.queue.task_done()
 
     # --- misc loops -------------------------------------------------------------------
     async def heartbeat(self) -> None:
@@ -605,6 +640,7 @@ class Engine:
                  f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else "")
         await self.db.kv_set("heartbeat", json.dumps({
             "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "tracked": len(self.ingest.mints),
+            "simulated": bool(getattr(self, "simulated", False)),
             "launches": st["creates"], "trades": st["trades"], "curve_reads": st["curve_reads"],
             "stream_trades": st["stream_trades"], "trade_stream": self.stream_mode,
             "stream_blocked": self._stream_blocked_day is not None, "helius_credits_month": credits,
@@ -721,21 +757,24 @@ class Engine:
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
         log.info("bot running in %s mode (model %s)", self.s.MODE, self.s.LLM_MODEL)
         sd_notify("READY=1")
+        clean_stop = False
         try:
             if duration_s:
                 await self._sleep(duration_s)
                 self.stop.set()
             else:
                 await self.stop.wait()
+            clean_stop = True
         finally:
             self.stop.set()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.shutdown()
+            await self.shutdown(clean_stop=clean_stop)
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, clean_stop: bool = True) -> None:
         sd_notify("STOPPING=1")
         if self.positions:
             await self.positions.drain()
+        await self.risk.shutdown(clean_stop=clean_stop)
         try:
             await self._record_credits()  # metered usage survives restarts
             await self._check_stream_budget()

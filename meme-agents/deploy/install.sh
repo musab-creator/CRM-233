@@ -6,6 +6,7 @@
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PYTHON:-}"
+VENV_DIR="${MEME_AGENTS_VENV_DIR:-$APP_DIR/.venv}"
 SYSTEMD=0
 CRON=0
 for arg in "$@"; do
@@ -43,20 +44,33 @@ if [ -z "$PY" ]; then
   esac
   exit 1
 fi
-if [ ! -x .venv/bin/python ] && ! "$PY" -m venv .venv; then
-  echo "could not create the virtualenv. On Ubuntu/Debian: sudo apt install $(basename "$PY")-venv" >&2
-  rm -rf .venv
+if ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
+  echo "PYTHON must point to Python 3.12 or newer." >&2
   exit 1
 fi
-.venv/bin/pip install --quiet --upgrade pip
-.venv/bin/pip install --quiet -r requirements.txt
+# update.sh builds an isolated environment first; a direct reinstall must not change a running bot.
+if [ -z "${MEME_AGENTS_VENV_DIR:-}" ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet meme-agents; then
+  echo "meme-agents is running: use bash deploy/update.sh, or stop the service before reinstalling." >&2
+  exit 1
+fi
+if [ ! -x "$VENV_DIR/bin/python" ] && ! "$PY" -m venv "$VENV_DIR"; then
+  echo "could not create the virtualenv. On Ubuntu/Debian: sudo apt install $(basename "$PY")-venv" >&2
+  rm -rf "$VENV_DIR"
+  exit 1
+fi
+if ! "$VENV_DIR/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
+  echo "existing virtualenv uses an older Python; recreate it with Python 3.12 or newer." >&2
+  exit 1
+fi
+"$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+"$VENV_DIR/bin/python" -m pip install --quiet -r requirements.txt
 mkdir -p data logs reports
 if [ ! -f .env ]; then
   cp .env.example .env
   echo "created .env from .env.example: add your keys (KEYS.md says where to get each one)"
 fi
 chmod 600 .env
-.venv/bin/python -m pytest -q
+"$VENV_DIR/bin/python" -m pytest -q
 
 if [ "$SYSTEMD" = 1 ]; then
   unit=/etc/systemd/system/meme-agents.service

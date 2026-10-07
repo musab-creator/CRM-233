@@ -133,7 +133,11 @@ class Ingestor:
         self.mints: dict[str, MintState] = {}
         self.pinned: set[str] = set()  # mints that must stay subscribed (candidates, positions)
         self._trade_buf: list[tuple] = []
+        self._pending_trade_keys: set[tuple[str, str, str, str]] = set()
         self._dirty: set[str] = set()
+        self._dirty_versions: dict[str, int] = {}
+        self._event_lock = asyncio.Lock()
+        self._flush_lock = asyncio.Lock()
         self.tick_handlers: list[TickHandler] = []
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
@@ -147,14 +151,56 @@ class Ingestor:
         mint = msg.get("mint")
         if not tx or not mint:
             return
-        ts = ts or now_s()
-        if tx == "create":
-            await self._on_create(msg, ts)
-        elif tx in ("buy", "sell"):
-            self.stats["stream_trades"] += 1
-            await self._on_trade(msg, ts)
-        elif tx == "migrate":
-            self._on_migrate(msg)
+        ts = now_s() if ts is None else ts
+        tick = None
+        async with self._event_lock:
+            try:
+                if tx == "create":
+                    await self._on_create(msg, ts)
+                elif tx in ("buy", "sell"):
+                    # Meter delivered messages, including duplicates: the provider may charge both.
+                    self.stats["stream_trades"] += 1
+                    tick = await self._on_trade(msg, ts)
+                elif tx == "migrate":
+                    self._on_migrate(msg)
+            except BaseException:
+                # Do not poison replay protection if normalization or state mutation failed
+                # before the event reached the durable-write buffer.
+                side = "buy" if tx == "create" else tx
+                key = self._trade_key(msg.get("signature"), mint, msg.get("traderPublicKey") or "", side)
+                if key is not None and not any(
+                        self._trade_key(row[0], row[1], row[2], row[3]) == key for row in self._trade_buf):
+                    self._pending_trade_keys.discard(key)
+                raise
+        # A handler may call ingest again. Dispatch after the event lock is released, rather
+        # than deadlocking the callback on this same lock.
+        if tick is not None:
+            await self._tick(*tick)
+
+    @staticmethod
+    def _trade_key(signature, mint: str, trader: str, side: str) -> tuple[str, str, str, str] | None:
+        # Missing signatures cannot establish event identity: two identical unsigned trades
+        # may both be legitimate. A signature alone also identifies all traders in a bundle.
+        if not isinstance(signature, str) or not signature.strip():
+            return None
+        return signature, mint, trader, side
+
+    async def _claim_trade(self, signature, mint: str, trader: str, side: str) -> bool:
+        """Reserve a signed event before aggregates/ticks; False means already processed."""
+        key = self._trade_key(signature, mint, trader, side)
+        if key is None:
+            return True
+        if key in self._pending_trade_keys:
+            return False
+        if await self.db.fetchone(
+                "SELECT 1 FROM trades WHERE signature=? AND mint=? AND trader=? AND side=? LIMIT 1", key):
+            return False
+        self._pending_trade_keys.add(key)
+        return True
+
+    def _mark_dirty(self, mint: str) -> None:
+        self._dirty.add(mint)
+        self._dirty_versions[mint] = self._dirty_versions.get(mint, 0) + 1
 
     async def _on_create(self, msg: dict, ts: float) -> None:
         if (msg.get("pool") or "pump") != "pump" or not msg.get("bondingCurveKey"):
@@ -163,11 +209,16 @@ class Ingestor:
             self.stats["other_launchpads"] += 1
             return
         mint = msg["mint"]
+        trader = msg.get("traderPublicKey") or ""
+        sol = float(msg.get("solAmount") or 0)
+        tokens = float(msg.get("initialBuy") or 0)
+        if not await self._claim_trade(msg.get("signature"), mint, trader, "buy"):
+            return
         st = self.mints.get(mint) or MintState(mint=mint)
         st.name = (msg.get("name") or "")[:64]
         st.symbol = (msg.get("symbol") or "")[:32]
         st.uri = msg.get("uri") or ""
-        st.creator = msg.get("traderPublicKey") or ""
+        st.creator = trader
         st.bonding_curve_key = msg.get("bondingCurveKey") or ""
         st.mayhem = bool(msg.get("is_mayhem_mode"))
         st.created_at = ts
@@ -175,8 +226,7 @@ class Ingestor:
         self.mints[mint] = st
         self.stats["creates"] += 1
         # The create carries the dev's initial buy: it is the first bonding-curve trade.
-        sol = float(msg.get("solAmount") or 0)
-        self._apply(st, "buy", st.creator, sol, float(msg.get("initialBuy") or 0), msg, ts)
+        self._apply(st, "buy", st.creator, sol, tokens, msg, ts)
         await self._evict_if_full()
         if self.stream_new_tokens and self.subscribe:
             st.streamed = True
@@ -188,25 +238,28 @@ class Ingestor:
         if st:
             st.graduated, st.progress = True, 1.0
             st.pool = msg.get("pool") or "pump-amm"
-            self._dirty.add(st.mint)
+            self._mark_dirty(st.mint)
 
-    async def _on_trade(self, msg: dict, ts: float) -> None:
+    async def _on_trade(self, msg: dict, ts: float) -> tuple[str, float, float, dict] | None:
         mint = msg["mint"]
+        trader = msg.get("traderPublicKey") or ""
+        sol = float(msg.get("solAmount") or 0)
+        tokens = float(msg.get("tokenAmount") or 0)
+        side = msg["txType"]
+        if not await self._claim_trade(msg.get("signature"), mint, trader, side):
+            return
         st = self.mints.get(mint)
         if st is None:
             # Not a tracked mint: an account-trade event for a watched creator's other token,
             # or a late message after unsubscribe. Keep the raw trade; don't start tracking it.
             self._trade_buf.append((
-                msg.get("signature"), mint, msg.get("traderPublicKey"), msg["txType"],
-                _f(msg.get("solAmount"), 0.0), _f(msg.get("tokenAmount"), 0.0), trade_price(msg),
+                msg.get("signature"), mint, trader, side, sol, tokens, trade_price(msg),
                 _f(msg.get("vSolInBondingCurve"), None), _f(msg.get("vTokensInBondingCurve"), None),
                 _f(msg.get("marketCapSol"), None), msg.get("pool"), ts))
             return
-        side = msg["txType"]
-        self._apply(st, side, msg.get("traderPublicKey") or "", float(msg.get("solAmount") or 0),
-                    float(msg.get("tokenAmount") or 0), msg, ts)
+        self._apply(st, side, trader, sol, tokens, msg, ts)
         if st.last_price_sol:
-            await self._tick(mint, st.last_price_sol, ts, msg)
+            return mint, st.last_price_sol, ts, msg
 
     async def _tick(self, mint: str, price: float, ts: float, msg: dict) -> None:
         for h in self.tick_handlers:
@@ -232,7 +285,7 @@ class Ingestor:
             # graduated: the curve is emptied into the AMM pool, so keep the inflow it reached
             st.graduated, st.progress = True, 1.0
             st.real_sol = max(st.real_sol or 0.0, c.real_sol, c.v_sol - INITIAL_VIRTUAL_SOL)
-            self._dirty.add(mint)
+            self._mark_dirty(mint)
             return False
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
@@ -246,7 +299,7 @@ class Ingestor:
             st.snapshots.append((ts, price, c.real_sol))
         if moved:
             st.last_trade_at = ts
-        self._dirty.add(mint)
+        self._mark_dirty(mint)
         if moved and price:
             await self._tick(mint, price, ts, {"txType": "curve", "pool": "pump", "vSolInBondingCurve": c.v_sol,
                                                "vTokensInBondingCurve": c.v_tokens})
@@ -260,7 +313,7 @@ class Ingestor:
         st.wallets_ex_dev = snap.get("wallets_ex_dev")
         st.holders_now = snap.get("holders_ex_dev")
         st.holders_at = ts
-        self._dirty.add(mint)
+        self._mark_dirty(mint)
 
     def _apply(self, st: MintState, side: str, trader: str, sol: float, tokens: float, msg: dict, ts: float):
         if not st.first_trade_at:
@@ -295,7 +348,7 @@ class Ingestor:
             msg.get("signature"), st.mint, trader, side, sol, tokens, price,
             st.v_sol, st.v_tokens, st.market_cap_sol, pool, ts,
         ))
-        self._dirty.add(st.mint)
+        self._mark_dirty(st.mint)
 
     # --- subscriptions ---------------------------------------------------------
     async def _evict_if_full(self) -> None:
@@ -317,6 +370,7 @@ class Ingestor:
             if st:
                 await self.db.upsert_mints([st.row()])
             self._dirty.discard(m)
+            self._dirty_versions.pop(m, None)
         if self.unsubscribe:
             await self.unsubscribe(mints)
 
@@ -333,10 +387,24 @@ class Ingestor:
         await self.db.prune_trades(now - self.s.TRADE_RETENTION_HOURS * 3600)
 
     async def flush(self) -> None:
-        buf, self._trade_buf = self._trade_buf, []
-        await self.db.insert_trades(buf)
-        dirty, self._dirty = self._dirty, set()
-        await self.db.upsert_mints([self.mints[m].row() for m in dirty if m in self.mints])
+        # The periodic flusher and candidate evaluator can call this concurrently. Keep
+        # snapshots in memory until both table writes commit together; failed writes retry
+        # the same batch, while events arriving during I/O stay queued for the next flush.
+        async with self._flush_lock:
+            async with self.db.transaction():
+                buf = self._trade_buf[:]
+                versions = {m: self._dirty_versions.get(m, 0) for m in self._dirty}
+                rows = [self.mints[m].row() for m in versions if m in self.mints]
+                await self.db.insert_trades(buf)
+                await self.db.upsert_mints(rows)
+            del self._trade_buf[:len(buf)]
+            for row in buf:
+                key = self._trade_key(row[0], row[1], row[2], row[3])
+                if key is not None:
+                    self._pending_trade_keys.discard(key)
+            for mint, version in versions.items():
+                if self._dirty_versions.get(mint, 0) == version:
+                    self._dirty.discard(mint)
 
     async def run_flusher(self, stop: asyncio.Event) -> None:
         last_hk = now_s()

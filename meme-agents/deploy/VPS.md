@@ -77,7 +77,8 @@ bash deploy/install.sh
 ```
 
 This creates `.venv`, installs the dependencies, creates `.env` (readable only by you) and
-runs the tests, which should all pass. It is safe to run again at any time.
+runs the tests, which should all pass. Stop the service before rerunning this installer;
+use `bash deploy/update.sh` to update a running installation.
 
 ## 6. Put your keys in `.env`
 
@@ -133,22 +134,46 @@ journalctl -u meme-agents -f       # the live log; Ctrl+C stops watching, not th
 
 ## Automatic updates from GitHub
 
-`.github/workflows/meme-agents-deploy.yml` can update the server for you after every push to
-the branch it tracks. The workflow runs the unit tests on GitHub first, then connects to the
-server over SSH and runs `deploy/update.sh` there, which pulls, reinstalls and restarts the
-service. It needs five repository secrets (GitHub → the repo → **Settings** → **Secrets and
-variables** → **Actions**): `VPS_HOST`, `VPS_PORT`, `VPS_USER`, `VPS_KNOWN_HOSTS` and
-`VPS_SSH_KEY`. On the server side, the deploy key must be limited to `deploy/update.sh` and the
-bot user needs a passwordless sudo rule for the one command `systemctl restart meme-agents`.
-Until the secrets exist the workflow does nothing, and `deploy/update.sh` works by hand:
+`.github/workflows/meme-agents-deploy.yml` can update the server after every push to the
+branch it tracks (the test suite itself runs on every push in `ci.yml`). The workflow runs
+the tests again, then connects over SSH and runs `deploy/update.sh`, which first builds and
+tests the candidate code in a separate checkout and Python environment while the old bot
+keeps running. Only then does it stop the service, promote the code and dependencies,
+and restart. A failed restart or health check restores the previous code and environment.
 
-```bash
-deploy/update.sh            # pull, reinstall, restart (does nothing when already up to date)
-deploy/update.sh --force    # reinstall and restart anyway
+Your `.env`, `STOP`, database, logs and reports stay in place. A service you intentionally
+stopped stays stopped after an update. Code rollback does not undo database records or
+schema migrations written by a newly started version: back up the database before updates
+that change its schema.
+
+For automatic deployment, add these repository secrets under GitHub → **Settings** →
+**Secrets and variables** → **Actions**: `VPS_HOST`, `VPS_PORT`, `VPS_USER`,
+`VPS_KNOWN_HOSTS` and `VPS_SSH_KEY`. The SSH key must have a forced command pointing to
+this installation's `deploy/update.sh`; do not use a general login key. Obtain the host
+key fingerprint from your VPS console and verify it before setting `VPS_KNOWN_HOSTS`.
+
+The bot user needs passwordless permission only for these service commands, including
+the stop/start needed during promotion and rollback. Run `sudo visudo -f
+/etc/sudoers.d/meme-agents-deploy` and add the following (replace `bot` if needed, and
+confirm the systemctl path with `command -v systemctl`):
+
+```sudoers
+bot ALL=(root) NOPASSWD: /usr/bin/systemctl stop meme-agents, /usr/bin/systemctl restart meme-agents, /usr/bin/systemctl start meme-agents
 ```
 
-It only ever fast-forwards: a server with local edits or commits stops with an error instead
-of losing them.
+Without VPS secrets, GitHub still runs the tests but skips deployment. By hand:
+
+```bash
+bash deploy/update.sh            # validate, promote and restart if already running
+bash deploy/update.sh --force    # rebuild even when the branch is already current
+```
+
+Updates are serialized and fast-forward only. Local tracked edits or commits are
+preserved and stop deployment with an error. If the systemd template changes, stop the
+service, run `bash deploy/install.sh --systemd`, then start it to install the new unit.
+
+A daily-loss pause survives an unclean crash or watchdog restart. To deliberately reset
+its baseline, stop the service cleanly and start it again.
 
 ## Everyday commands
 
@@ -160,8 +185,8 @@ Run these from `~/CRM-233/meme-agents`.
 | Start it | `sudo systemctl start meme-agents` |
 | Is it running? | `sudo systemctl status meme-agents` |
 | Kill switch: no new entries, close all positions | `touch STOP`. Remove it (`rm STOP`) to resume entries. |
-| Update to the latest code | `deploy/update.sh` (pull, reinstall, restart) |
-| Change a setting without nano | `deploy/set-env.sh KEY=VALUE` (several at once is fine), then restart |
+| Update to the latest code | `bash deploy/update.sh` (validate, promote, restart if running) |
+| Change a setting without nano | `bash deploy/set-env.sh KEY=VALUE` for non-secret settings, then restart; use `nano .env` for keys |
 | Health in one line | `.venv/bin/python -m bot status --check` |
 
 Don't also run `python -m bot` by hand while the service runs: the bot refuses to start a

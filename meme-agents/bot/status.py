@@ -5,6 +5,7 @@ Safe to run while the bot is running (SQLite WAL allows concurrent readers).
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 
 from .budget import pace_released, utc_day, utc_month
@@ -12,12 +13,40 @@ from .config import Settings
 from .db import Database
 from .paper import mark_to_market
 from .risk import kill_switch_active, utc_midnight
-from .util import now_s
+from .util import now_s, redact
 
 
 HEARTBEAT_STALE_S = 180   # the bot writes one every 60 s
 STREAM_STALE_S = 300      # pump.fun launches every few seconds: 5 silent minutes means blind
 FAILING_VOTES = 6         # this many failed votes in a row (two candidates) means the agents are down
+
+
+def _read_heartbeat(raw: str | None) -> tuple[dict, str | None]:
+    if not raw:
+        return {}, None
+    try:
+        hb = json.loads(raw)
+        if not isinstance(hb, dict):
+            raise ValueError("not an object")
+        for key in ("ts", "started_at", "last_msg_at", "stopped_at"):
+            if hb.get(key) is not None:
+                number = float(hb[key])
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError("invalid timestamp")
+                hb[key] = number
+        if not hb.get("ts"):
+            raise ValueError("missing timestamp")
+        return hb, None
+    except (json.JSONDecodeError, TypeError, ValueError, OverflowError):
+        return {}, "heartbeat is malformed or has an invalid timestamp"
+
+
+def _positive(value) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number > 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _ago(ts: float | None, now: float) -> str:
@@ -30,11 +59,15 @@ def _ago(ts: float | None, now: float) -> str:
 async def health(db: Database, s: Settings, now: float | None = None) -> tuple[str, str]:
     """(state, one line) for monitoring: OK, PAUSED (alive, needs a human), DEGRADED (alive, but
     the agents fail, for example an expired key), DOWN or BLIND."""
-    now = now or now_s()
+    now = now_s() if now is None else now
     raw = await db.kv_get("heartbeat")
     if not raw:
         return "DOWN", "no heartbeat recorded: the bot has not run against this database"
-    hb = json.loads(raw)
+    hb, error = _read_heartbeat(raw)
+    if error:
+        return "DOWN", error
+    if hb["ts"] > now + 10 or (hb.get("started_at") or 0) > now + 10:
+        return "DOWN", "heartbeat timestamp is in the future: check the server clock"
     if hb.get("stopped_at"):
         return "DOWN", f"stopped cleanly {_ago(hb['stopped_at'], now)}"
     if now - (hb.get("ts") or 0) > HEARTBEAT_STALE_S:
@@ -44,13 +77,18 @@ async def health(db: Database, s: Settings, now: float | None = None) -> tuple[s
         return "BLIND", (f"no PumpPortal message for {_ago(hb.get('last_msg_at'), now)} "
                          f"(reconnects {hb.get('reconnects')}, stalls {hb.get('stalls')})")
     extra = f", {hb['crashes']} loop restart(s)" if hb.get("crashes") else ""
+    if kill_switch_active(s):
+        return "PAUSED", f"kill switch {s.STOP_FILE} is present: entries stopped, positions closing{extra}"
+    if hb.get("mode") in ("paper", "live") and hb["mode"] != s.MODE:
+        return "DEGRADED", f"running mode={hb['mode']} differs from configured mode={s.MODE}{extra}"
     if hb.get("helius_exhausted"):
         return "PAUSED", (f"Helius credits for the month are spent ({hb.get('helius_credits_month')}): no chain "
                           f"reads until the 1st; raise HELIUS_MONTHLY_CREDITS or upgrade the Helius plan{extra}")
     # an expired or revoked ANTHROPIC_API_KEY keeps the bot alive but turns every vote into an error
-    recent = await db.fetchall("SELECT error FROM votes ORDER BY id DESC LIMIT ?", [FAILING_VOTES])
-    if len(recent) == FAILING_VOTES and all(r["error"] and "budget" not in r["error"] for r in recent):
-        return "DEGRADED", f"the last {FAILING_VOTES} agent votes failed: {recent[0]['error'][:160]}"
+    recent = await db.fetchall("SELECT error FROM votes WHERE ts>=? OR ts IS NULL ORDER BY id DESC LIMIT ?",
+                              [started, FAILING_VOTES])
+    if len(recent) == FAILING_VOTES and all(r["error"] and "budget" not in r["error"].lower() for r in recent):
+        return "DEGRADED", f"the last {FAILING_VOTES} agent votes failed: {redact(recent[0]['error'])[:160]}"
     if hb.get("paused"):
         return "PAUSED", f"{hb['paused']}{extra}"
     return "OK", (f"up {_ago(started, now).replace(' ago', '')}, {hb.get('launches')} launches, "
@@ -62,12 +100,20 @@ async def build_status(db: Database, s: Settings) -> str:
     now = now_s()
     lines: list[str] = []
     hb_raw = await db.kv_get("heartbeat")
-    hb = json.loads(hb_raw) if hb_raw else {}
+    hb, heartbeat_error = _read_heartbeat(hb_raw)
     alive = hb.get("ts")
-    state = ("STOPPED (clean shutdown)" if hb.get("stopped_at") else
+    state = ("NOT RUNNING (invalid heartbeat)" if heartbeat_error else
+             "STOPPED (clean shutdown)" if hb.get("stopped_at") else
              "RUNNING" if alive and now - alive < 180 else
              "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started")
-    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={s.MODE}")
+    running_mode = hb.get("mode") if hb.get("mode") in ("paper", "live") else s.MODE
+    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}")
+    if heartbeat_error:
+        lines.append(heartbeat_error)
+    if hb.get("mode") in ("paper", "live") and running_mode != s.MODE:
+        lines.append(f"configuration differs: MODE={s.MODE}, running bot mode={running_mode}")
+    if hb.get("simulated") is True:
+        lines.append("SIMULATION: feeds and Claude votes are synthetic")
     if hb:
         lines.append(f"stream: {hb.get('tracked')} mints tracked, {hb.get('trades')} trades this session, "
                      f"last message {_ago(hb.get('last_msg_at'), now)}, reconnects {hb.get('reconnects')}, "
@@ -75,8 +121,8 @@ async def build_status(db: Database, s: Settings) -> str:
         if hb.get("paused"):
             lines.append(f"PAUSED: {hb['paused']}")
         if hb.get("regime") and hb["regime"] != "normal":
-            lines.append(f"regime: {hb['regime']} x{hb.get('regime_multiplier', 0):g} ({hb.get('regime_source')}): "
-                         + "; ".join(hb.get("regime_reasons") or []))
+            lines.append(f"regime: {hb['regime']} x{_positive(hb.get('regime_multiplier')) or 0:g} ({hb.get('regime_source')}): "
+                         + "; ".join(map(str, hb.get("regime_reasons") or [])))
     if kill_switch_active(s):
         lines.append(f"KILL SWITCH: {s.STOP_FILE} present, no new entries, positions closing")
 
@@ -106,7 +152,8 @@ async def build_status(db: Database, s: Settings) -> str:
                              " AND closed_at>=?", [start]))["s"]
     lines.append("today (UTC): " + ", ".join(f"{k} {v}" for k, v in f.items()) + f", realized PnL ${pnl:+.2f}")
 
-    pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') ORDER BY id")
+    pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') "
+                           "AND (mode=? OR mode IS NULL) ORDER BY id", [running_mode])
     lines += ["", f"open positions ({len(pos)}/{s.MAX_OPEN_POSITIONS}):"]
     if not pos:
         lines.append("  none")
@@ -117,9 +164,12 @@ async def build_status(db: Database, s: Settings) -> str:
         value = (p["proceeds_sol"] or 0) + (mark_to_market(p["tokens_remaining"] or 0, p["last_price"] or 0, s)
                                             if p["last_price"] else 0)
         upnl = value - (p["cost_sol"] or 0)
-        chg = (p["last_price"] / p["entry_price"] - 1) * 100 if p["last_price"] and p["entry_price"] else 0
+        entry = _positive(p["entry_price"])
+        last, peak = _positive(p["last_price"]), _positive(p["peak_price"])
+        chg = f"{(last / entry - 1) * 100:+.1f}%" if entry and last else "n/a"
+        peak_change = f"{(peak / entry - 1) * 100:+.1f}%" if entry and peak else "n/a"
         lines.append(f"  #{p['id']} {p['mint']} ${p['size_usd']:.2f} opened {_ago(p['opened_at'], now)}  "
-                     f"price {chg:+.1f}% vs entry, peak {((p['peak_price'] or 0) / p['entry_price'] - 1) * 100:+.1f}%"
+                     f"price {chg} vs entry, peak {peak_change}"
                      f"{', TP taken' if p['tp_done'] else ''}  net {upnl:+.4f} SOL"
                      f"{'  EXIT PENDING: ' + p['pending_exit'] if p['pending_exit'] else ''}")
 
@@ -132,9 +182,9 @@ async def build_status(db: Database, s: Settings) -> str:
     for d in dec:
         vs = await db.fetchall("SELECT agent, vote, confidence, guard, error FROM votes WHERE candidate_id=? "
                                "ORDER BY agent", [d["id"]])
-        vtxt = "  ".join(f"{v['agent']}={v['vote']}/{v['confidence']:.2f}"
+        vtxt = "  ".join(f"{v['agent']}={v['vote']}/{v['confidence'] or 0:.2f}"
                          f"{'(guard)' if v['guard'] else ''}{'(err)' if v['error'] else ''}" for v in vs)
         when = datetime.fromtimestamp(d["ts"], timezone.utc).strftime("%H:%M")
         lines.append(f"  {when} #{d['id']} {(d['symbol'] or '?')[:10]:10s} {d['decision']:4s} "
                      f"conf {d['mean_confidence'] or 0:.2f}  {vtxt}  | {d['gate_reason']}")
-    return "\n".join(lines)
+    return redact("\n".join(lines))

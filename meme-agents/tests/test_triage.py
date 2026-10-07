@@ -103,5 +103,7 @@ def test_prose_then_vote_and_failures_fail_open(tmp_path):
 def test_first_call_estimate_uses_triage_prices(tmp_path):
     s = _settings(tmp_path)
     cheap = triage_first_call_usd(s, "x" * 3000)
-    assert 0.003 < cheap < 0.006   # ~1000 tokens in at $1.25/M worst case + 600 out at $5/M
-    assert triage_first_call_usd(_settings(tmp_path, TRIAGE_PRICE_OUT_PER_MTOK="50"), "x" * 3000) > 5 * cheap
+    # bytes / BYTES_PER_TOKEN + framing in at the 1.25x cache-write price, plus the full 600 out
+    assert cheap > (3000 / 2 * 1.25 + 600 * 5.0) / 1e6
+    dear = triage_first_call_usd(_settings(tmp_path, TRIAGE_PRICE_OUT_PER_MTOK="50"), "x" * 3000)
+    assert dear - cheap == pytest.approx(600 * (50 - 5) / 1e6)

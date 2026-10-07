@@ -11,6 +11,7 @@ Live requires ALL of:
 from __future__ import annotations
 
 import json
+from math import isfinite
 from typing import Awaitable, Callable
 
 from solders.keypair import Keypair
@@ -41,6 +42,8 @@ def static_checks(s: Settings) -> Keypair | None:
     if mode == "paper":
         return None
     problems = []
+    if not isfinite(s.LIVE_MAX_WALLET_SOL) or not 0 < s.LIVE_MAX_WALLET_SOL <= 0.5:
+        problems.append("LIVE_MAX_WALLET_SOL must be finite, positive, and no more than 0.5 SOL")
     if s.LIVE_CONFIRM != CONFIRM_PHRASE:
         problems.append(f"LIVE_CONFIRM must equal {CONFIRM_PHRASE}")
     kp = None
@@ -69,6 +72,8 @@ async def check_live_startup(s: Settings, balance_sol: Callable[[str], Awaitable
         bal = await balance_sol(pubkey)
     except Exception as e:
         raise LiveRefused(f"refusing to start live mode: could not read wallet balance ({type(e).__name__})") from None
+    if not isinstance(bal, (int, float)) or not isfinite(bal) or bal < 0:
+        raise LiveRefused("refusing to start live mode: wallet balance must be finite and nonnegative")
     if bal > s.LIVE_MAX_WALLET_SOL:
         raise LiveRefused(f"refusing to start live mode: wallet {pubkey} holds {bal:.4f} SOL > "
                           f"{s.LIVE_MAX_WALLET_SOL} SOL limit")

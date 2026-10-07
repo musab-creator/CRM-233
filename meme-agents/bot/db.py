@@ -1,6 +1,8 @@
 """SQLite storage (aiosqlite, WAL). One connection, writes serialized by aiosqlite's thread."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 from typing import Any, Iterable
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 CREATE INDEX IF NOT EXISTS ix_trades_mint_ts ON trades(mint, ts);
 CREATE INDEX IF NOT EXISTS ix_trades_ts ON trades(ts);
+CREATE INDEX IF NOT EXISTS ix_trades_identity ON trades(signature,mint,trader,side);
 
 CREATE TABLE IF NOT EXISTS prefilter_results (
     id INTEGER PRIMARY KEY, mint TEXT, ts REAL, passed INTEGER, reason TEXT, metrics TEXT
@@ -85,6 +88,7 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_attempts INTEGER DEFAULT 0, next_exit_at REAL
 );
 CREATE INDEX IF NOT EXISTS ix_pos_status ON positions(status, kind);
+CREATE INDEX IF NOT EXISTS ix_pos_candidate ON positions(candidate_id,kind,status);
 
 CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY, position_id INTEGER, ts REAL, side TEXT, reason TEXT,
@@ -144,6 +148,94 @@ class Database:
     def __init__(self, path: str | Path):
         self.path = str(path)
         self.conn: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
+        self._transaction_owner: asyncio.Task | None = None
+        self._savepoint_counter = 0
+
+    @asynccontextmanager
+    async def _access(self):
+        if self._transaction_owner is asyncio.current_task():
+            yield
+        else:
+            async with self._lock:
+                yield
+
+    async def _finish_boundary(self, operation, cancelled: list[int]):
+        """Finish queued SQLite work before releasing its lock, even during cancellation.
+
+        aiosqlite cancellation only cancels the awaiting Future; its worker may still
+        execute BEGIN/COMMIT/ROLLBACK. Shield the work and remember cancellation so the
+        transaction can report the actual outcome instead of guessing from the Future.
+        """
+        boundary = asyncio.ensure_future(operation)
+        parent = asyncio.current_task()
+        while True:
+            try:
+                return await asyncio.shield(boundary)
+            except asyncio.CancelledError:
+                if boundary.cancelled():
+                    raise
+                cancelled[0] += 1
+                parent.uncancel()
+
+    def _defer_cancellation(self, cancelled: list[int]) -> None:
+        if cancelled[0]:
+            # The commit is already durable. Let this await chain return so callers can
+            # update their memory synchronously, then deliver cancellation at the next
+            # event-loop turn/await. Raising here would falsely make callers roll back
+            # memory after a committed position or fill.
+            asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Commit a group atomically; unrelated tasks cannot commit its partial writes."""
+        if self.conn is None:
+            raise RuntimeError("Database is not open")
+        task = asyncio.current_task()
+        if self._transaction_owner is task:
+            self._savepoint_counter += 1
+            name = f"bot_savepoint_{self._savepoint_counter}"
+            cancelled = [0]
+            await self._finish_boundary(self.conn.execute(f"SAVEPOINT {name}"), cancelled)
+            try:
+                if cancelled[0]:
+                    raise asyncio.CancelledError
+                yield self
+            except BaseException:
+                await self._finish_boundary(self.conn.execute(f"ROLLBACK TO SAVEPOINT {name}"), cancelled)
+                await self._finish_boundary(self.conn.execute(f"RELEASE SAVEPOINT {name}"), cancelled)
+                if cancelled[0]:
+                    raise asyncio.CancelledError
+                raise
+            else:
+                await self._finish_boundary(self.conn.execute(f"RELEASE SAVEPOINT {name}"), cancelled)
+                self._defer_cancellation(cancelled)
+            return
+        async with self._lock:
+            self._transaction_owner = task
+            cancelled = [0]
+            try:
+                await self._finish_boundary(self.conn.execute("BEGIN IMMEDIATE"), cancelled)
+                try:
+                    if cancelled[0]:
+                        raise asyncio.CancelledError
+                    yield self
+                except BaseException:
+                    await self._finish_boundary(self.conn.rollback(), cancelled)
+                    if cancelled[0]:
+                        raise asyncio.CancelledError
+                    raise
+                else:
+                    try:
+                        await self._finish_boundary(self.conn.commit(), cancelled)
+                    except BaseException:
+                        await self._finish_boundary(self.conn.rollback(), cancelled)
+                        if cancelled[0]:
+                            raise asyncio.CancelledError
+                        raise
+                    self._defer_cancellation(cancelled)
+            finally:
+                self._transaction_owner = None
 
     async def open(self) -> "Database":
         if self.path != ":memory:":
@@ -163,30 +255,41 @@ class Database:
                 await self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     async def close(self) -> None:
-        if self.conn:
-            await self.conn.commit()
-            await self.conn.close()
-            self.conn = None
+        if self._transaction_owner is asyncio.current_task():
+            raise RuntimeError("Cannot close database inside a transaction")
+        async with self._access():
+            if self.conn:
+                await self.conn.close()
+                self.conn = None
 
     # --- generic -------------------------------------------------------------
     async def execute(self, sql: str, params: Iterable[Any] = ()) -> int:
-        cur = await self.conn.execute(sql, tuple(params))
-        await self.conn.commit()
-        return cur.lastrowid
+        if self._transaction_owner is not asyncio.current_task():
+            async with self.transaction():
+                rowid = await self.execute(sql, params)
+            return rowid
+        async with self.conn.execute(sql, tuple(params)) as cur:
+            return cur.lastrowid
 
     async def executemany(self, sql: str, rows: list[tuple]) -> None:
         if rows:
-            await self.conn.executemany(sql, rows)
-            await self.conn.commit()
+            if self._transaction_owner is not asyncio.current_task():
+                async with self.transaction():
+                    await self.executemany(sql, rows)
+                return
+            async with self.conn.executemany(sql, rows):
+                pass
 
     async def fetchall(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
-        async with self.conn.execute(sql, tuple(params)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+        async with self._access():
+            async with self.conn.execute(sql, tuple(params)) as cur:
+                return [dict(r) for r in await cur.fetchall()]
 
     async def fetchone(self, sql: str, params: Iterable[Any] = ()) -> dict | None:
-        async with self.conn.execute(sql, tuple(params)) as cur:
-            r = await cur.fetchone()
-            return dict(r) if r else None
+        async with self._access():
+            async with self.conn.execute(sql, tuple(params)) as cur:
+                r = await cur.fetchone()
+                return dict(r) if r else None
 
     async def insert(self, table: str, row: dict) -> int:
         cols = ",".join(row)
@@ -224,8 +327,9 @@ class Database:
     async def insert_trades(self, rows: list[tuple]) -> None:
         await self.executemany(
             "INSERT INTO trades (signature,mint,trader,side,sol,tokens,price_sol,v_sol,v_tokens,mcap_sol,pool,ts)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
+            " SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ? IS NULL OR ?='' OR NOT EXISTS "
+            "(SELECT 1 FROM trades WHERE signature=? AND mint=? AND trader=? AND side=?)",
+            [(*r, r[0], r[0], r[0], r[1], r[2], r[3]) for r in rows],
         )
 
     async def recent_trades(self, mint: str, limit: int = 50) -> list[dict]:
@@ -241,5 +345,8 @@ class Database:
 
     async def prune_trades(self, before_ts: float) -> None:
         await self.execute(
-            "DELETE FROM trades WHERE ts < ? AND mint NOT IN (SELECT mint FROM candidates)", [before_ts]
+            "DELETE FROM trades WHERE ts < ? "
+            "AND NOT EXISTS (SELECT 1 FROM candidates c WHERE c.mint=trades.mint AND c.status='pending') "
+            "AND NOT EXISTS (SELECT 1 FROM positions p WHERE p.mint=trades.mint AND p.status IN ('pending','open'))",
+            [before_ts]
         )

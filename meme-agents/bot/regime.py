@@ -10,6 +10,7 @@ failing call never widens risk. The regime never creates a BUY; it only shrinks 
 from __future__ import annotations
 
 import logging
+import asyncio
 from dataclasses import asdict, dataclass, field
 
 import anthropic
@@ -158,14 +159,18 @@ async def run_regime(client: anthropic.AsyncAnthropic | None, s: Settings, snap:
     import json
     system = [{"type": "text", "text": PROMPT, "cache_control": {"type": "ephemeral"}}]
     messages = [{"role": "user", "content": "Market snapshot (the bot's own data):\n" + json.dumps(snap, default=str)}]
-    reserve = worst_case_call_usd(s, system, [REGIME_TOOL], messages, price_in=s.TRIAGE_PRICE_IN_PER_MTOK,
-                                  price_out=s.TRIAGE_PRICE_OUT_PER_MTOK, max_tokens=400)
     try:
-        await budget.reserve(reserve)
+        reserve = worst_case_call_usd(s, system, [REGIME_TOOL], messages, price_in=s.TRIAGE_PRICE_IN_PER_MTOK,
+                                      price_out=s.TRIAGE_PRICE_OUT_PER_MTOK, max_tokens=400)
+        reservation = await budget.reserve(reserve)
     except BudgetExceeded as e:
         fallback.error = f"llm budget: {e}"
         return fallback
-    cost = 0.0
+    except ValueError as e:
+        fallback.error = f"invalid LLM input: {e}"
+        return fallback
+    cost = reserve
+    usage_known = False
     try:
         try:
             resp = await client.messages.create(model=s.REGIME_MODEL, max_tokens=400, system=system,
@@ -176,9 +181,18 @@ async def run_regime(client: anthropic.AsyncAnthropic | None, s: Settings, snap:
                                 getattr(u, "cache_creation_input_tokens", 0) or 0,
                                 getattr(u, "cache_read_input_tokens", 0) or 0,
                                 s.TRIAGE_PRICE_IN_PER_MTOK, s.TRIAGE_PRICE_OUT_PER_MTOK)
+            usage_known = True
         finally:
-            await budget.settle(reserve, cost, "regime")
-        for b in resp.content:
+            detail = "regime" + ("; estimated: usage unknown" if not usage_known else "")
+            await asyncio.shield(budget.settle(reservation, cost, detail))
+        if resp.stop_reason in ("max_tokens", "refusal"):
+            fallback.error = f"model {resp.stop_reason}"
+            fallback.cost_usd = cost
+            return fallback
+        terminal = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+        if len(terminal) > 1:
+            raise ValueError("submit_regime must be exactly one terminal tool call")
+        for b in terminal:
             if getattr(b, "type", None) == "tool_use" and b.name == "submit_regime":
                 r = validate_regime(b.input, s)
                 r.at, r.cost_usd = now, cost

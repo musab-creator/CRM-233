@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from solders.keypair import Keypair
+from solders.transaction import VersionedTransaction
 
 from bot.db import Database
-from bot.live.executor import LiveExecutionError, LiveExecutor
+from bot.live.executor import LiveExecutionError, LiveExecutionUnknown, LiveExecutor
 from bot.paper import Fill, PaperExecutor, entry_fill, exit_fill
 from bot.positions import PositionManager
 from bot.risk import RiskManager
@@ -22,6 +23,8 @@ class FakeChain:
         self.sol = sol
         self.tok: dict[str, float] = {}
         self.status = "ok"
+        self.receipts = {}
+        self.owner = None
 
     async def balance_sol(self, pubkey):
         return self.sol
@@ -32,6 +35,12 @@ class FakeChain:
 
     async def signature_status(self, sig):
         return self.status
+
+    async def rpc(self, method, params):
+        if method == "simulateTransaction":
+            return {"value": {"err": None, "accounts": [{"lamports": round(self.sol * 1e9)}]}}
+        assert method == "getTransaction"
+        return self.receipts.get(params[0])
 
 
 class SendingRpc:
@@ -44,12 +53,25 @@ class SendingRpc:
 
     async def send_raw_transaction(self, raw, opts=None):
         self.sent += 1
+        sol_before, tokens_before = self.chain.sol, dict(self.chain.tok)
         if self.effect:
             self.effect(self.chain)
-        return SimpleNamespace(value=f"SIG{self.sent}")
+        signature = str(VersionedTransaction.from_bytes(raw).signatures[0])
+        def balances(values):
+            return [{"mint": mint, "owner": self.chain.owner,
+                     "uiTokenAmount": {"amount": str(round(tokens * 1e6)), "decimals": 6}}
+                    for mint, tokens in values.items()]
+        self.chain.receipts[signature] = {
+            "transaction": {"message": {"accountKeys": [{"pubkey": self.chain.owner}]}},
+            "meta": {"err": None, "fee": 5000,
+                     "preBalances": [round(sol_before * 1e9)],
+                     "postBalances": [round(self.chain.sol * 1e9)],
+                     "preTokenBalances": balances(tokens_before),
+                     "postTokenBalances": balances(self.chain.tok)}}
+        return SimpleNamespace(value=signature)
 
     async def simulate_transaction(self, *a, **k):
-        raise AssertionError("sending mode must not simulate")
+        raise AssertionError("sending simulation must use the shared Helius limiter/credit tracker")
 
     async def close(self):
         pass
@@ -62,6 +84,7 @@ async def _executor(s, chain):
     kp = Keypair()
     http = FakeHttp(unsigned_tx(kp))
     ex = LiveExecutor(s, db, http, kp, is_graduated=lambda m: False, chain=chain)
+    chain.owner = ex.pubkey
     await ex.rpc.close()
     ex.rpc = SendingRpc(chain)
     ex.poll_s = 0.01
@@ -78,9 +101,9 @@ def test_send_buy_reconciles_against_the_wallet(s):
             c.tok[MINT] = 480_000.0
         ex.rpc.effect = landed
         f = await ex.buy(MINT, 0.07, 1e-7)
-        assert f.tokens == 480_000.0 and f.sol == pytest.approx(0.0712) and f.tx_sig == "SIG1"
+        assert f.tokens == 480_000.0 and f.sol == pytest.approx(0.0712) and f.tx_sig
         rows = await db.fetchall("SELECT sent, ok, signature FROM live_tx")
-        assert rows and all(r["sent"] == 1 for r in rows) and rows[-1]["ok"] == 1
+        assert rows and rows[0]["sent"] == 0 and rows[-1]["sent"] == 1 and rows[-1]["ok"] == 1
         await db.close()
     asyncio.run(go())
 
@@ -114,15 +137,17 @@ def test_partial_exit_sells_a_percentage(s):
     asyncio.run(go())
 
 
-def test_retry_after_a_landed_sell_does_not_sell_again(s):
+def test_untracked_wallet_changes_never_fabricate_a_sell_fill(s):
     async def go():
         chain = FakeChain()
         chain.tok[MINT] = 0.0  # the earlier attempt landed after we gave up on it
         db, http, ex = await _executor(s, chain)
-        f = await ex.sell(MINT, 480_000.0, 1e-7, fraction=1.0)
-        assert ex.rpc.sent == 0 and http.posts == [] and f.tokens == 480_000.0
+        with pytest.raises(LiveExecutionUnknown, match="without a tracked sell signature"):
+            await ex.sell(MINT, 480_000.0, 1e-7, fraction=1.0)
+        assert ex.rpc.sent == 0 and http.posts == []
         chain.tok[MINT] = 240_000.0  # half already sold by an earlier take-profit attempt
-        await ex.sell(MINT, 240_000.0, 1e-7, fraction=0.5)
+        with pytest.raises(LiveExecutionUnknown, match="without a tracked sell signature"):
+            await ex.sell(MINT, 240_000.0, 1e-7, fraction=0.5)
         assert ex.rpc.sent == 0
         await db.close()
     asyncio.run(go())
