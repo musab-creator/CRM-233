@@ -582,8 +582,8 @@ def render(checks: list[Check], probe_out: dict | None) -> str:
         st = probe_out["stream"]
         lines += ["", "== live probe ==",
                   f"stream: {st['launches']} launches ({st['launches_per_min']}/min), {st['migrations']} migrations, "
-                  (f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches, "
-                   f"{st['reconnects']} reconnects" + (f" after drops {st['drops']}" if st['drops'] else "")),
+                  f"{st['trades_received']} trades for {st['launches_subscribed_for_trades']} subscribed launches, "
+                  f"{st['reconnects']} reconnects" + (f" after drops {st['drops']}" if st['drops'] else ""),
                   f"missing create fields: {st['create_fields_missing'] or 'none'}; create pools: {st['create_pools']}",
                   f"create fields: {st['create_fields_seen']}; skipped creates: "
                   f"{st['creates_skipped_not_pumpfun_curve']}, e.g. {json.dumps(st['sample_skipped_create'], default=str)}; "

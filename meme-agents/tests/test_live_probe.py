@@ -14,7 +14,7 @@ from solders.system_program import TransferParams, transfer
 from solders.transaction import VersionedTransaction
 
 from bot.live.executor import LiveExecutionError, check_transaction
-from bot.preflight import capture_stream, key_shape, probe_trade_local, summarize_stream
+from bot.preflight import Check, capture_stream, key_shape, probe_trade_local, render, summarize_stream
 
 
 def _tx(kp: Keypair, lamports: int, extra=()):
@@ -135,3 +135,16 @@ def test_capture_stream_gives_up_after_max_reconnects_instead_of_raising(monkeyp
     cap = asyncio.run(capture_stream("wss://pumpportal.test", seconds=30, max_reconnects=2))
     assert cap["creates"] == [] and cap["reconnects"] == 2 and len(cap["drops"]) == 3
     assert summarize_stream(cap)["launches"] == 0
+
+
+def test_render_prints_the_stream_line_with_and_without_drops():
+    checks = [Check("anthropic", "fail", "401; stored key shape: sk-ant-api... (an Anthropic API key), 108 chars", True)]
+    quiet = summarize_stream({"creates": [_create("A")], "trades": {}, "seconds": 150})
+    text = render(checks, {"stream": quiet, "assumptions": {"pumpportal_stream_stayed_up": True}})
+    assert "FAIL  anthropic" in text and "(required)" in text
+    assert "1 launches (0.4/min), 0 migrations, 0 trades for 0 subscribed launches, 0 reconnects" in text
+    assert "after drops" not in text and "pumpportal_stream_stayed_up: True" in text
+    dropped = summarize_stream({"creates": [], "trades": {}, "seconds": 150, "reconnects": 2,
+                                "drops": ["40s: ConnectionClosedError: no close frame received or sent"]})
+    text = render([], {"stream": dropped, "assumptions": {}})
+    assert "2 reconnects after drops ['40s: ConnectionClosedError" in text
