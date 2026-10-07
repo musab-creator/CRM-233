@@ -14,7 +14,9 @@ from solders.system_program import TransferParams, transfer
 from solders.transaction import VersionedTransaction
 
 from bot.live.executor import LiveExecutionError, check_transaction
-from bot.preflight import Check, capture_stream, key_shape, probe_trade_local, render, summarize_stream
+from bot import preflight
+from bot.preflight import (Check, capture_stream, key_shape, merge_retry, probe_trade_local, render,
+                           run_checks, run_checks_with_retry, summarize_stream)
 
 
 def _tx(kp: Keypair, lamports: int, extra=()):
@@ -148,3 +150,38 @@ def test_render_prints_the_stream_line_with_and_without_drops():
                                 "drops": ["40s: ConnectionClosedError: no close frame received or sent"]})
     text = render([], {"stream": dropped, "assumptions": {}})
     assert "2 reconnects after drops ['40s: ConnectionClosedError" in text
+
+
+def test_run_checks_only_runs_the_named_checks_and_merge_retry_keeps_both_messages():
+    s = SimpleNamespace(DEXSCREENER_URL="", DEX_TOKENS_RPS=1, DEX_BOOSTS_RPS=1, RUGCHECK_URL="", RUGCHECK_RPS=1,
+                        is_live=False, PUMPPORTAL_TRADE_STREAM="off", X_BEARER_TOKEN="", PUMPPORTAL_API_KEY="")
+    rows = asyncio.run(run_checks(s, http=None, only={"x api", "pumpportal trade stream"}))  # no network calls
+    assert [c.name for c in rows] == ["x api", "pumpportal trade stream"]
+    assert rows[0].status == "warn" and rows[1].status == "skip"
+    first = [Check("rugcheck", "fail", "HTTP 400", True), Check("anthropic", "fail", "401", True),
+             Check("helius", "pass", "ok", True)]
+    merged = merge_retry(first, [Check("rugcheck", "pass", "BONK report", True)])
+    assert merged[0].status == "pass" and "passed on retry" in merged[0].detail
+    assert merged[1] == first[1] and merged[2] == first[2]
+    twice = merge_retry(first, [Check("rugcheck", "fail", "HTTP 400 again", True)])
+    assert twice[0].status == "fail" and "HTTP 400 | retry: HTTP 400 again" in twice[0].detail
+
+
+def test_required_failures_are_retried_once_except_the_anthropic_key(monkeypatch):
+    calls = []
+
+    async def fake_run_checks(s, http, need_llm=True, only=None):
+        calls.append(only)
+        if only is None:
+            return [Check("dexscreener: SOL/USD", "fail", "no wSOL pair price", True),
+                    Check("rugcheck", "fail", "HTTP 400", True),
+                    Check("anthropic", "fail", "401", True),
+                    Check("news feeds", "fail", "0 headlines", False)]
+        return [Check(name, "pass", "ok", True) for name in sorted(only)]
+
+    monkeypatch.setattr(preflight, "run_checks", fake_run_checks)
+    rows = asyncio.run(run_checks_with_retry(None, None, pause=0))
+    assert calls == [None, {"dexscreener: SOL/USD", "rugcheck"}]  # anthropic and optional rows are not retried
+    by = {c.name: c for c in rows}
+    assert by["dexscreener: SOL/USD"].status == "pass" and by["rugcheck"].status == "pass"
+    assert by["anthropic"].status == "fail" and by["news feeds"].status == "fail"

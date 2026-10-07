@@ -127,7 +127,12 @@ def _helius(s: Settings, http: httpx.AsyncClient) -> Helius:
     return Helius(http, s.helius_rpc(), s.HELIUS_API_URL, s.HELIUS_API_KEY, s.HELIUS_RPC_RPS, s.HELIUS_ENHANCED_RPS)
 
 
-async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True) -> list[Check]:
+RETRY_PAUSE_S = 20.0  # a required check that fails is tried once more after this pause
+
+
+async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True,
+                     only: set[str] | None = None) -> list[Check]:
+    """Run every check (or just the names in `only`) concurrently; each becomes a Check row."""
     dex = DexScreener(http, s.DEXSCREENER_URL, s.DEX_TOKENS_RPS, s.DEX_BOOSTS_RPS)
     rug = Rugcheck(http, s.RUGCHECK_URL, s.RUGCHECK_RPS)
     need_helius = s.is_live or s.PUMPPORTAL_TRADE_STREAM != "all"
@@ -211,19 +216,51 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
         return "pass", (f"key set; budget {s.PUMPPORTAL_DAILY_BUDGET_SOL} SOL/day "
                         f"(~{int(s.PUMPPORTAL_DAILY_BUDGET_SOL / s.PUMPPORTAL_SOL_PER_TRADE):,} trades)")
 
-    return list(await asyncio.gather(
-        _check("dexscreener: SOL/USD", True, sol_price()),
-        _check("dexscreener: boosts", False, boosts()),
-        _check("rugcheck", True, rugcheck()),
-        _check("pumpportal websocket", True, pumpportal()),
-        _check("helius", need_helius, helius()),
-        _check("anthropic", need_llm, anthropic_key()),
-        _check("news feeds", False, news()),
-        _check("jupiter", False, jupiter()),
-        _check("telegram", False, check_telegram(s, http)),
-        _check("x api", False, x_api()),
-        _check("pumpportal trade stream", s.PUMPPORTAL_TRADE_STREAM != "off", trade_stream()),
-    ))
+    table = [
+        ("dexscreener: SOL/USD", True, sol_price),
+        ("dexscreener: boosts", False, boosts),
+        ("rugcheck", True, rugcheck),
+        ("pumpportal websocket", True, pumpportal),
+        ("helius", need_helius, helius),
+        ("anthropic", need_llm, anthropic_key),
+        ("news feeds", False, news),
+        ("jupiter", False, jupiter),
+        ("telegram", False, lambda: check_telegram(s, http)),
+        ("x api", False, x_api),
+        ("pumpportal trade stream", s.PUMPPORTAL_TRADE_STREAM != "off", trade_stream),
+    ]
+    return list(await asyncio.gather(*(_check(name, required, make()) for name, required, make in table
+                                       if only is None or name in only)))
+
+
+def merge_retry(first: list[Check], retried: list[Check]) -> list[Check]:
+    """Replace a failed row with its retry; a row that failed twice keeps both messages."""
+    again = {c.name: c for c in retried}
+    out = []
+    for c in first:
+        r = again.get(c.name)
+        if r is None:
+            out.append(c)
+        elif r.status == "fail":
+            out.append(Check(c.name, "fail", f"{c.detail} | retry: {r.detail}"[:300], c.required))
+        else:
+            out.append(Check(c.name, r.status, f"{r.detail} (passed on retry)", c.required))
+    return out
+
+
+async def run_checks_with_retry(s: Settings, http: httpx.AsyncClient, need_llm: bool = True,
+                                pause: float = RETRY_PAUSE_S) -> list[Check]:
+    """One retry for required checks that fail: DexScreener and Rugcheck answer the shared GitHub
+    runner addresses with an empty or 400 reply now and then (run 37678516104), and one hiccup
+    must not abort an hour-long acceptance run. Anthropic rejecting a key is not retried: it is
+    deterministic, and the retry would only delay the answer."""
+    checks = await run_checks(s, http, need_llm)
+    again = {c.name for c in checks if c.required and c.status == "fail" and c.name != "anthropic"}
+    if not again:
+        return checks
+    log.warning("required checks failed, retrying once in %.0fs: %s", pause, ", ".join(sorted(again)))
+    await asyncio.sleep(pause)
+    return merge_retry(checks, await run_checks(s, http, need_llm, only=again))
 
 
 # --- live-data probe ---------------------------------------------------------------------------
@@ -604,7 +641,7 @@ def render(checks: list[Check], probe_out: dict | None) -> str:
 
 async def run_preflight(s: Settings, do_probe: bool = False, seconds: float = 150, need_llm: bool = True) -> int:
     async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "meme-agents/0.1"}) as http:
-        checks = await run_checks(s, http, need_llm)
+        checks = await run_checks_with_retry(s, http, need_llm)
         probe_out = None
         if do_probe:
             try:
