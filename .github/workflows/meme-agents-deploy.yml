@@ -1,0 +1,81 @@
+name: meme-agents deploy
+
+# Updates the bot on your server after a push to the branch it tracks: runs the unit tests on
+# the runner, then connects over SSH and runs deploy/update.sh there (pull, reinstall, restart).
+# Setup is described in meme-agents/deploy/VPS.md under "Automatic updates". It ends with five
+# repository secrets (Settings -> Secrets and variables -> Actions): VPS_HOST, VPS_PORT,
+# VPS_USER, VPS_KNOWN_HOSTS and VPS_SSH_KEY. The key can run deploy/update.sh and nothing else,
+# and the server ignores pushes to branches other than the one it has checked out. Without the
+# secrets the workflow does nothing (ci.yml runs the test suite on every push regardless).
+
+on:
+  push:
+    branches: [main, claude/solana-meme-trading-agents-lfzoer]
+    paths:
+      - "meme-agents/**"
+      - ".github/workflows/meme-agents-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meme-agents-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Update the server
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: meme-agents
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is a server configured?
+        id: cfg
+        env:
+          KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          KNOWN: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$KEY" ] || [ -z "$HOST" ] || [ -z "$KNOWN" ]; then
+            echo "::notice::VPS_SSH_KEY, VPS_HOST or VPS_KNOWN_HOSTS is not set: nothing deployed. deploy/VPS.md explains the setup."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.cfg.outputs.ok == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: meme-agents/requirements.txt
+
+      - name: Unit tests (a red build never reaches the server)
+        if: steps.cfg.outputs.ok == 'true'
+        run: |
+          pip install -r requirements.txt
+          python -m pytest -q
+
+      - name: Update the server over SSH
+        if: steps.cfg.outputs.ok == 'true'
+        env:
+          KEY: ${{ secrets.VPS_SSH_KEY }}
+          HOST: ${{ secrets.VPS_HOST }}
+          KNOWN: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_LOGIN: ${{ secrets.VPS_USER || 'bot' }}
+          PORT: ${{ secrets.VPS_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          trap 'rm -f ~/.ssh/deploy_key' EXIT
+          [[ "$GITHUB_REF_NAME" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "unsupported branch name" >&2; exit 2; }
+          ssh -i ~/.ssh/deploy_key -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=20 "$VPS_LOGIN@$HOST" "deploy $GITHUB_REF_NAME $GITHUB_SHA"
