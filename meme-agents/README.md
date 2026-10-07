@@ -144,6 +144,14 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 4. **Consensus gate.** The bot buys only if all three agents vote BUY and their mean confidence
    is at least 0.65. Every vote is stored in `votes`, including PASS votes, errors and costs.
    Every gate result is stored in `candidates`.
+   **What a vote means** depends on `GATE_NEUTRAL_VOTES` (default on). Strict mode (`false`)
+   asks Scout "is there organic attention?" and Hunter "is there a live catalyst?", and a token
+   a few minutes old almost never has either, so in two days of live data Scout voted BUY 0
+   times in 179 and nothing traded. Neutral mode asks each agent "did you find a reason not to
+   buy in your area?": spam, bots or a deceptive name are a PASS from Scout, a stale or invented
+   catalyst a PASS from Hunter, and "nothing either way" is a BUY at confidence 0.5 to 0.6.
+   Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence floor then means
+   Analyst's on-chain evidence has to carry the decision, and the veto stage still runs.
 
    **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
    so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a

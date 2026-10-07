@@ -43,7 +43,7 @@ async def run_triage(client: anthropic.AsyncAnthropic, s: Settings, context: str
     total = 0.0
     turns = 0
     try:
-        for attempt in range(2):  # one retry if the model answers in prose instead of calling the tool
+        for attempt in range(2):  # one retry if the reply is cut off by max_tokens
             reserve = worst_case_call_usd(s, system, [vt], messages, price_in=s.TRIAGE_PRICE_IN_PER_MTOK,
                                           price_out=s.TRIAGE_PRICE_OUT_PER_MTOK, max_tokens=s.TRIAGE_MAX_TOKENS)
             try:
@@ -55,7 +55,8 @@ async def run_triage(client: anthropic.AsyncAnthropic, s: Settings, context: str
             try:
                 resp = await client.messages.create(
                     model=s.TRIAGE_MODEL, max_tokens=s.TRIAGE_MAX_TOKENS, system=system, tools=[vt],
-                    tool_choice={"type": "auto"}, messages=messages, cache_control={"type": "ephemeral"},
+                    tool_choice={"type": "tool", "name": "submit_vote"},   # never a prose reply
+                    messages=messages, cache_control={"type": "ephemeral"},
                     timeout=s.LLM_TIMEOUT_S)
                 u = resp.usage
                 cost = llm_cost_usd(u.input_tokens or 0, u.output_tokens or 0,

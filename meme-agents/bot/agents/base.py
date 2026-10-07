@@ -201,11 +201,16 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
     messages: list[dict] = [{"role": "user", "content": context}]
     total_cost = 0.0
     turns = 0
+    force_vote = False   # set after a prose-only reply: the next turn may only call submit_vote
     try:
         for turn in range(s.LLM_MAX_TURNS):
             last = turn == s.LLM_MAX_TURNS - 1
             if last and turn > 0:
                 _append_user_text(messages, "Final turn: call submit_vote now with what you have.")
+            # The final turn, and any turn after a reply without a tool call, forces submit_vote:
+            # a text answer there would waste the whole evaluation on "no vote after max turns".
+            tool_choice = ({"type": "tool", "name": "submit_vote"} if (last or force_vote)
+                           else {"type": "auto"})
             reserve = worst_case_call_usd(s, system, tools, messages)
             try:
                 reservation = await budget.reserve(reserve)
@@ -218,7 +223,7 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
             try:
                 resp = await client.messages.create(
                     model=s.LLM_MODEL, max_tokens=s.LLM_MAX_TOKENS, system=system,
-                    tools=tools, tool_choice={"type": "auto"},
+                    tools=tools, tool_choice=tool_choice,
                     messages=messages, cache_control={"type": "ephemeral"},
                     timeout=s.LLM_TIMEOUT_S,
                 )
@@ -254,6 +259,7 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                                                  s.AGENT_MIN_GROUNDING)
             if not uses:
                 messages.append({"role": "user", "content": "Call submit_vote to give your decision."})
+                force_vote = True
                 continue
             results = await asyncio.gather(*[_run_tool(spec.impl.get(b.name), b.name, dict(b.input or {}))
                                              for b in uses])

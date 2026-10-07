@@ -11,7 +11,7 @@ from ..feeds.dexscreener import summarize_pair
 from ..feeds.rugcheck import pool_accounts
 from .base import AgentSpec
 from .forensics import funding_graph, wallet_profile
-from .prompts import ROLE_PROMPTS
+from .prompts import ROLE_PROMPTS, role_prompt
 from .social import author_stats
 
 
@@ -87,7 +87,7 @@ def scout_spec(ctx: ToolContext) -> AgentSpec:
         _tool("dexscreener_profile", "Project links and socials listed on DexScreener for a mint.", MINT_ARG),
         _tool("dexscreener_boosts", "Latest paid DexScreener boosts on Solana, and whether this token is boosted."),
     ]
-    return AgentSpec("scout", ROLE_PROMPTS["scout"], tools,
+    return AgentSpec("scout", role_prompt("scout", ctx.s.GATE_NEUTRAL_VOTES), tools,
                      {"x_search": x_search, "dexscreener_profile": dexscreener_profile,
                       "dexscreener_boosts": dexscreener_boosts})
 
@@ -123,7 +123,7 @@ def hunter_spec(ctx: ToolContext) -> AgentSpec:
               {"handle": {"type": "string"}}, ["handle"]),
         _tool("news_feed", f"Crypto and general news headlines from the last {int(ctx.s.CATALYST_WINDOW_MIN)} min."),
     ]
-    return AgentSpec("hunter", ROLE_PROMPTS["hunter"], tools,
+    return AgentSpec("hunter", role_prompt("hunter", ctx.s.GATE_NEUTRAL_VOTES), tools,
                      {"x_user_timeline": x_user_timeline, "news_feed": news_feed})
 
 
@@ -203,7 +203,7 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
               "5-minute momentum).",
               {**MINT_ARG, "limit": {"type": "integer", "description": "10-200, default 80"}}),
     ]
-    return AgentSpec("analyst", ROLE_PROMPTS["analyst"], tools,
+    return AgentSpec("analyst", role_prompt("analyst", ctx.s.GATE_NEUTRAL_VOTES), tools,
                      {"rugcheck": rugcheck, "holders": holders, "dexscreener_pair": dexscreener_pair,
                       "recent_trades": recent_trades}, with_size=True)
 

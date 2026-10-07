@@ -174,7 +174,7 @@ async def run_regime(client: anthropic.AsyncAnthropic | None, s: Settings, snap:
     try:
         try:
             resp = await client.messages.create(model=s.REGIME_MODEL, max_tokens=400, system=system,
-                                                tools=[REGIME_TOOL], tool_choice={"type": "auto"},
+                                                tools=[REGIME_TOOL], tool_choice={"type": "tool", "name": "submit_regime"},
                                                 messages=messages, timeout=s.LLM_TIMEOUT_S)
             u = resp.usage
             cost = llm_cost_usd(u.input_tokens or 0, u.output_tokens or 0,

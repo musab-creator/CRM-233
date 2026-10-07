@@ -114,6 +114,7 @@ class Settings:
 
     # --- consensus -------------------------------------------------------------
     CONSENSUS_MIN_MEAN_CONFIDENCE: float = 0.65
+    GATE_NEUTRAL_VOTES: bool = True           # Scout/Hunter: "nothing found" is a neutral BUY (0.5-0.6), not a PASS
 
     # --- paper costs -----------------------------------------------------------
     PUMPFUN_FEE_PCT: float = 1.0

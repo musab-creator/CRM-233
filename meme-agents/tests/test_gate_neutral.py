@@ -1,0 +1,117 @@
+"""GATE_NEUTRAL_VOTES prompts, and forced submit_vote / submit_regime tool choice: the model can
+no longer answer in prose and burn the evaluation (the live cause of 90 triage errors in a day)."""
+import asyncio
+from types import SimpleNamespace
+
+
+from bot.agents.base import AgentSpec, run_agent
+from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, role_prompt
+from bot.agents.triage import run_triage
+from bot.budget import Budget
+from bot.config import Settings, load_settings
+from bot.db import Database
+from bot.regime import run_regime
+
+
+def test_role_prompt_variants():
+    for name in ("scout", "hunter", "analyst"):
+        strict, neutral = role_prompt(name, False), role_prompt(name, True)
+        assert strict == ROLE_PROMPTS[name] and neutral == NEUTRAL_PROMPTS[name] and strict != neutral
+        assert f"Your role: {name.title()}" in strict and f"Your role: {name.title()}" in neutral
+        assert "submit_vote" in neutral and "untrusted data" in neutral
+    # strict: no catalyst / no attention means PASS; neutral: it is a low-confidence BUY
+    assert "No catalyst found still means PASS" in role_prompt("hunter")
+    assert "No catalyst found still means PASS" not in role_prompt("hunter", True)
+    assert "neutral" in role_prompt("hunter", True) and "0.5-0.6" in role_prompt("scout", True)
+    assert "Most candidates should be PASS" in role_prompt("scout") and "Most candidates" not in role_prompt("scout", True)
+    # the veto and triage prompts are unchanged by the flag
+    for name in ("triage", "forensics", "social"):
+        assert role_prompt(name, True) == ROLE_PROMPTS[name]
+
+
+def test_setting_defaults_on_and_parses(tmp_path):
+    assert Settings().GATE_NEUTRAL_VOTES is True
+    env = tmp_path / ".env"
+    env.write_text("GATE_NEUTRAL_VOTES=false\n")
+    assert load_settings(env, overrides={"LOG_FILE": ""}).GATE_NEUTRAL_VOTES is False
+
+
+def test_specs_follow_the_flag(s):
+    from bot.agents.tools import ToolContext, analyst_spec, hunter_spec, scout_spec
+    def ctx(flag):
+        s.GATE_NEUTRAL_VOTES = flag
+        return ToolContext(s, None, None, None, None, None, None, {"mint": "m"})
+    assert scout_spec(ctx(True)).system == NEUTRAL_PROMPTS["scout"]
+    assert scout_spec(ctx(False)).system == ROLE_PROMPTS["scout"]
+    assert hunter_spec(ctx(True)).system == NEUTRAL_PROMPTS["hunter"]
+    assert analyst_spec(ctx(False)).system == ROLE_PROMPTS["analyst"]
+
+
+class RecordingClient:
+    """Returns canned responses and records every create() call's keyword arguments."""
+
+    def __init__(self, responses):
+        self.messages = self
+        self.responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
+def _usage():
+    return SimpleNamespace(input_tokens=10, output_tokens=10, cache_creation_input_tokens=0, cache_read_input_tokens=0)
+
+
+def _tool(name="submit_vote", vote="PASS"):
+    data = {"vote": vote, "confidence": 0.8, "reasons": ["r"], "evidence": []}
+    if name == "submit_regime":
+        data = {"mode": "normal", "size_multiplier": 1, "reasons": []}
+    return SimpleNamespace(content=[SimpleNamespace(type="tool_use", id="t1", name=name, input=data)],
+                           stop_reason="tool_use", usage=_usage())
+
+
+def _prose():
+    return SimpleNamespace(content=[SimpleNamespace(type="text", text="Let me think...")],
+                           stop_reason="end_turn", usage=_usage())
+
+
+def test_triage_and_regime_force_their_tool(s):
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            c = RecordingClient([_tool()])
+            v = await run_triage(c, s, "ctx", Budget(db, "llm", 5, "day"))
+            assert v.vote == "PASS" and v.error is None
+            assert c.calls[0]["tool_choice"] == {"type": "tool", "name": "submit_vote"}
+            c = RecordingClient([_tool("submit_regime")])
+            r = await run_regime(c, s, {"sol_change_1h_pct": 0}, Budget(db, "llm", 5, "day"), 1)
+            assert r.mode == "normal" and r.error is None
+            assert c.calls[0]["tool_choice"] == {"type": "tool", "name": "submit_regime"}
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_agent_forces_vote_after_prose_and_on_final_turn(s):
+    s.LLM_MAX_TURNS = 3
+    spec = AgentSpec("scout", "Your role: Scout", [], {})
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            # prose on turn 0 -> turn 1 forces submit_vote
+            c = RecordingClient([_prose(), _tool(vote="PASS")])
+            v = await run_agent(c, s, spec, "ctx", Budget(db, "llm", 5, "day"))
+            assert v.vote == "PASS" and v.error is None and v.turns == 2
+            assert c.calls[0]["tool_choice"] == {"type": "auto"}
+            assert c.calls[1]["tool_choice"] == {"type": "tool", "name": "submit_vote"}
+            # the final turn is always forced, even without an earlier prose reply
+            s.LLM_MAX_TURNS = 1
+            c = RecordingClient([_tool(vote="PASS")])
+            v = await run_agent(c, s, spec, "ctx", Budget(db, "llm", 5, "day"))
+            assert v.vote == "PASS" and c.calls[0]["tool_choice"] == {"type": "tool", "name": "submit_vote"}
+        finally:
+            await db.close()
+    asyncio.run(go())

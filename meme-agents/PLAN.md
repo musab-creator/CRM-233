@@ -164,6 +164,22 @@ Added after the build, when research showed a change in PumpPortal's data API:
     gate's size (never below `POSITION_MIN_USD`); `off` skips the entry and records a
     `regime_off` event, the way the STOP file does. The rule in `rule_regime` gives the same three
     answers deterministically and takes over whenever the model call fails.
+28. **Neutral votes for Scout and Hunter** (`GATE_NEUTRAL_VOTES`, default on). The brief's gate
+    is unanimous, and the first two days of live data showed what strict unanimity does with
+    agents whose question is "is there attention / a catalyst?": Scout voted BUY 0 times in 179,
+    Hunter 3, Analyst 27, and the gate never opened, while the shadow book recorded 289 outcomes.
+    Scout's PASSes also carried no information (75% of them were losers against an 80% base
+    rate), because a token a few minutes old has no social footprint yet. The gate stays
+    unanimous; what changes is the question. Scout and Hunter now vote PASS when they find
+    something against the token and BUY at 0.5 to 0.6 when they find nothing either way, so
+    Analyst (BUY lift 1.71x in the same data) has to supply the confidence that lifts the mean
+    over 0.65, and the forensics and social vetoes still run on every BUY. `false` restores the
+    strict prompts.
+29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
+    force their single tool with `tool_choice`, and a committee agent is forced to call
+    `submit_vote` on its final turn and on any turn after a reply without a tool call. Before
+    this, Haiku's prose replies produced 90 triage errors in a day; each error fails open and
+    sends the candidate to the committee at about thirty times the cost.
 
 ## File tree
 
