@@ -27,7 +27,7 @@ from .feeds.dexscreener import DexScreener, summarize_pair
 from .feeds.helius import Helius, RpcError
 from .feeds.http import HttpError
 from .feeds.news import NewsFeed
-from .feeds.prices import SolPrice
+from .feeds.prices import SolPrice, chained, coingecko_sol_usd
 from .feeds.pumpchain import HeliusChain
 from .feeds.pumpportal import PumpPortalFeed
 from .feeds.rugcheck import Rugcheck
@@ -98,7 +98,10 @@ class Engine:
         self.llm = llm if llm is not None else (
             anthropic.AsyncAnthropic(api_key=s.ANTHROPIC_API_KEY, max_retries=2) if s.ANTHROPIC_API_KEY else None)
         self.tg = Telegram(self.http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID)
-        self.sol_price = SolPrice(self.dex.sol_usd, 60)
+        sources = [self.dex.sol_usd]
+        if s.SOL_USD_FALLBACK_URL:
+            sources.append(lambda: coingecko_sol_usd(self.http, s.SOL_USD_FALLBACK_URL))
+        self.sol_price = SolPrice(chained(*sources), 60)
         self.risk = RiskManager(s, self.started_at, db=self.db)
         self.executor = PaperExecutor(s)
         self.positions: PositionManager | None = None

@@ -1,4 +1,6 @@
-"""SOL/USD reference price, refreshed from DexScreener's wrapped-SOL pairs.
+"""SOL/USD reference price, refreshed from DexScreener's wrapped-SOL pairs, with CoinGecko as the
+fallback when DexScreener answers with no pair at all (it did so for a GitHub runner's shared
+address twice in a row on 2026-10-07).
 
 One wrong reading matters: the price sizes positions, converts the bankroll and feeds the
 curve-depth liquidity rule and the emergency exit. Live data has shown a single $166 tick
@@ -18,6 +20,40 @@ HISTORY_S = 24 * 3600
 
 MAX_JUMP = 0.20     # a reading this far from the last accepted one ...
 CONFIRM_READS = 3   # ... is accepted only after this many such readings in a row
+
+
+async def coingecko_sol_usd(http, url: str) -> float | None:
+    """CoinGecko's free simple-price endpoint: {"solana": {"usd": 115.9}}."""
+    from .http import request_json
+    data = await request_json(http, "GET", url, retries=1, timeout=10)
+    try:
+        v = float(((data or {}).get("solana") or {}).get("usd") or 0)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def chained(*fetchers):
+    """A price fetch that tries each source in turn: the first positive reading wins, a source
+    that returns nothing or raises hands over to the next. Returns None only when all fail; the
+    last error is re-raised only if no source answered at all."""
+    async def fetch() -> float | None:
+        error = None
+        for i, f in enumerate(fetchers):
+            try:
+                v = await f()
+            except Exception as e:  # noqa: BLE001 - any source failure means "try the next"
+                error = e
+                log.warning("SOL/USD source %d failed: %s", i, e)
+                continue
+            if v:
+                if i:
+                    log.info("SOL/USD %.2f from fallback source %d", v, i)
+                return v
+        if error is not None:
+            raise error
+        return None
+    return fetch
 
 
 class SolPrice:

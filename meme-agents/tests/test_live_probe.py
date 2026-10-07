@@ -80,6 +80,8 @@ def test_key_shape_describes_a_key_without_revealing_it():
     assert "Admin API key" in key_shape("sk-ant-admin01-abc")
     assert "login token" in key_shape("sk-ant-oat01-abc")
     assert "not an Anthropic API key" in key_shape("sk-proj-abc")
+    odd = key_shape("sk-ant-sid01-" + "y" * 93)
+    assert odd.startswith("shape: sk-ant-sid01-... (unfamiliar") and "yyyy" not in odd and "106 chars" in odd
     assert "quote characters" in key_shape('"sk-ant-api03-abc"')
     assert "line break" in key_shape("sk-ant-api03-abc\ndef")
 
@@ -185,3 +187,43 @@ def test_required_failures_are_retried_once_except_the_anthropic_key(monkeypatch
     by = {c.name: c for c in rows}
     assert by["dexscreener: SOL/USD"].status == "pass" and by["rugcheck"].status == "pass"
     assert by["anthropic"].status == "fail" and by["news feeds"].status == "fail"
+
+
+def test_sol_usd_falls_back_to_the_next_source_only_when_the_first_gives_nothing():
+    from bot.feeds.prices import chained
+
+    calls = []
+
+    async def dex_empty():
+        calls.append("dex")
+        return None
+
+    async def dex_ok():
+        calls.append("dex")
+        return 121.0
+
+    async def gecko():
+        calls.append("gecko")
+        return 118.5
+
+    async def broken():
+        raise RuntimeError("HTTP 429")
+
+    assert asyncio.run(chained(dex_ok, gecko)()) == 121.0 and calls == ["dex"]
+    calls.clear()
+    assert asyncio.run(chained(dex_empty, gecko)()) == 118.5 and calls == ["dex", "gecko"]
+    assert asyncio.run(chained(broken, gecko)()) == 118.5          # an error hands over too
+    assert asyncio.run(chained(dex_empty, dex_empty)()) is None     # nothing answered, no error
+    with pytest.raises(RuntimeError):
+        asyncio.run(chained(broken, dex_empty)())                   # nothing answered, error kept
+
+
+def test_coingecko_reader_parses_the_simple_price_shape(monkeypatch):
+    from bot.feeds import prices
+
+    async def fake_request_json(http, method, url, **kw):
+        assert "coingecko" in url and method == "GET"
+        return {"solana": {"usd": 115.9}}
+
+    monkeypatch.setattr("bot.feeds.http.request_json", fake_request_json)
+    assert asyncio.run(prices.coingecko_sol_usd(None, "https://api.coingecko.com/x")) == 115.9

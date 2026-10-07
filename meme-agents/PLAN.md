@@ -186,6 +186,13 @@ Added after the build, when research showed a change in PumpPortal's data API:
     `pumpportal_stream_stayed_up`; ingest already reconnected. Preflight's Anthropic check now
     also reports the stored key's shape (kind by public prefix, length, stray quotes or line
     breaks) on a 401, since a GitHub secret can be compared with a server .env no other way.
+31. **DexScreener can answer a whole run with nothing.** From a GitHub runner's shared address
+    it returned no wSOL pair, no boosts and no pairs for 105 fresh launches, twice in a row,
+    while a minute earlier it had answered normally. SOL/USD therefore has a second source
+    (`SOL_USD_FALLBACK_URL`, CoinGecko's free simple-price endpoint) that is read only when
+    DexScreener gives no pair; preflight reports the fallback as a warning instead of a
+    failure. Pair data for candidates still comes from DexScreener alone; the curve from
+    Helius is the primary source for liquidity and price anyway.
 
 ## File tree
 

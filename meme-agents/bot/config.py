@@ -79,6 +79,8 @@ class Settings:
     PUMPPORTAL_WS: str = "wss://pumpportal.fun/api/data"
     PUMPPORTAL_TRADE_URL: str = "https://pumpportal.fun/api/trade-local"
     DEXSCREENER_URL: str = "https://api.dexscreener.com"
+    # used only when DexScreener returns no wrapped-SOL pair (empty = DexScreener only)
+    SOL_USD_FALLBACK_URL: str = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
     RUGCHECK_URL: str = "https://api.rugcheck.xyz/v1"
     HELIUS_RPC_URL: str = "https://mainnet.helius-rpc.com/?api-key={key}"
     HELIUS_API_URL: str = "https://api-mainnet.helius-rpc.com/v0"

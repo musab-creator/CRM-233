@@ -35,6 +35,7 @@ from .feeds.dexscreener import WSOL, DexScreener
 from .feeds.helius import Helius
 from .feeds.http import HttpError
 from .feeds.news import NewsFeed
+from .feeds.prices import coingecko_sol_usd
 from .feeds.pumpchain import INITIAL_VIRTUAL_SOL, INITIAL_VIRTUAL_TOKENS, HeliusChain
 from .feeds.rugcheck import Rugcheck, normalise, pool_accounts, top10_pct
 from .util import redact
@@ -139,7 +140,13 @@ async def run_checks(s: Settings, http: httpx.AsyncClient, need_llm: bool = True
 
     async def sol_price():
         v = await dex.sol_usd()
-        return ("pass", f"SOL/USD {v:.2f}") if v else ("fail", "no wSOL pair price")
+        if v:
+            return "pass", f"SOL/USD {v:.2f}"
+        if s.SOL_USD_FALLBACK_URL:
+            fb = await coingecko_sol_usd(http, s.SOL_USD_FALLBACK_URL)
+            if fb:
+                return "warn", f"SOL/USD {fb:.2f} from the fallback source: DexScreener returned no wSOL pair"
+        return "fail", "no wSOL pair price" + (" and the fallback source gave none" if s.SOL_USD_FALLBACK_URL else "")
 
     async def boosts():
         rows = await dex.boosts()
@@ -272,8 +279,12 @@ def key_shape(key: str) -> str:
              ("sk-ant-admin", "sk-ant-admin... (an Anthropic Admin API key: it cannot call the Messages API)"),
              ("sk-ant-oat", "sk-ant-oat... (a Claude login token, not an API key)"),
              ("sk-ant-", "sk-ant-... (unfamiliar Anthropic key variant)")]
-    kind = next((desc for prefix, desc in kinds if key.startswith(prefix)),
-                "does not start with sk-ant- (not an Anthropic API key)")
+    kind = next((desc for prefix, desc in kinds if key.startswith(prefix)), None)
+    if kind is None:
+        kind = "does not start with sk-ant- (not an Anthropic API key)"
+    elif kind.startswith("sk-ant-... "):
+        head = key.split("-", 3)  # the public prefix only: "sk-ant-<variant>-"
+        kind = f"{'-'.join(head[:3])}-... (unfamiliar Anthropic key variant; API keys start sk-ant-api)"
     issues = []
     if key != key.strip():
         issues.append("surrounding whitespace")
