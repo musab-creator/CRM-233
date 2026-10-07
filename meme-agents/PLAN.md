@@ -89,7 +89,10 @@ Added by me (each one is a config value unless it says otherwise):
     read from chain) × SOL/USD. That is the depth of an AMM pool holding the same SOL. At
     SOL = $120 the $8k bar means about 33 SOL in the curve, which is stricter than the 15 SOL
     inflow rule. A reported liquidity is never overridden. Set it to `false` to trade only
-    graduated tokens.
+    graduated tokens. Since 7 Oct 2026 the same estimate also stands in when DexScreener lists
+    no pair for a curve token at all: that evening it answered every address with nothing for
+    hours, and in the acceptance run 90 of 171 stage-2 checks were blocked by "no dexscreener
+    pair" alone. A graduated token still needs its pool pair, since it has no curve.
 17. **No `.env` library:** `bot/config.py` parses `.env` itself, because the brief allows no
     extra framework.
 

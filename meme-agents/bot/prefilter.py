@@ -81,7 +81,18 @@ def stage2(rug: dict | None, pair: dict | None, s: Settings, curve_liq_usd: floa
         if (rug.get("top10_pct") or 0) >= s.PF_MAX_TOP10_PCT:
             r.append(f"top10 {rug['top10_pct']:.1f}% >= {s.PF_MAX_TOP10_PCT}%")
     if not pair:
-        r.append("no dexscreener pair")
+        if s.PF_CURVE_LIQUIDITY_FALLBACK and curve_liq_usd is not None:
+            # DexScreener lists most curve launches within minutes, but during its outages it
+            # answers nothing at all (2026-10-07: 90 of 171 stage-2 checks in one hour were blocked
+            # by this rule alone while every other rule passed). On the bonding curve its pair
+            # carries no liquidity figure anyway, so the curve's own depth stands in. A graduated
+            # token has no curve estimate and still needs its pool pair.
+            m.update({"liquidity_usd": curve_liq_usd, "liquidity_source": "curve_estimate",
+                      "dex": None, "pair": None, "fdv": None, "dexscreener_pair": "missing"})
+            if curve_liq_usd < s.PF_MIN_LIQUIDITY_USD:
+                r.append(f"liquidity ${curve_liq_usd:,.0f} < ${s.PF_MIN_LIQUIDITY_USD:,.0f}")
+        else:
+            r.append("no dexscreener pair")
     else:
         liq = (pair.get("liquidity") or {}).get("usd")
         source = "dexscreener"

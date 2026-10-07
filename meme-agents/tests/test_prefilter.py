@@ -75,8 +75,20 @@ def test_stage2_rejects_danger_authorities_concentration_liquidity(s):
     assert stage2(rug(top10_pct=34.9), PAIR, s).passed
     assert not stage2(rug(), {"liquidity": {"usd": 7_999}}, s).passed
     assert stage2(rug(), {"liquidity": {"usd": 8_000}}, s).passed
-    assert "no dexscreener pair" in stage2(rug(), None, s).reason
+    assert "no dexscreener pair" in stage2(rug(), None, s).reason          # no curve estimate either
     assert "unavailable" in stage2(None, PAIR, s).reason
+
+
+def test_stage2_without_a_dexscreener_pair_falls_back_to_the_curve_depth(s):
+    deep = stage2(rug(), None, s, curve_liq_usd=20_000.0)
+    assert deep.passed and deep.metrics["liquidity_source"] == "curve_estimate"
+    assert deep.metrics["dexscreener_pair"] == "missing" and deep.metrics["liquidity_usd"] == 20_000.0
+    shallow = stage2(rug(), None, s, curve_liq_usd=1_000.0)
+    assert not shallow.passed and "liquidity $1,000 < $8,000" in shallow.reason
+    s.PF_CURVE_LIQUIDITY_FALLBACK = False
+    assert "no dexscreener pair" in stage2(rug(), None, s, curve_liq_usd=20_000.0).reason
+    # a graduated token has no curve estimate (curve_liquidity_usd returns None) and still needs its pool
+    assert "no dexscreener pair" in stage2(rug(), None, s, curve_liq_usd=None).reason
 
 
 def test_thresholds_are_config(s):

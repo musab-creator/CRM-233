@@ -93,9 +93,10 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    Inflow must come from at least one on-chain curve read. Before that read, the only inflow
    the bot knows is the dev's own launch buy.
    DexScreener reports no liquidity for pump.fun bonding-curve pairs (the live probe found it on
-   0 of 59). For those, the liquidity rule uses the curve's depth instead: 2 × its real SOL
-   reserve × SOL/USD, or about 33 SOL in the curve for $8k at SOL = $120. Set
-   `PF_CURVE_LIQUIDITY_FALLBACK=false` to trade graduated tokens only (PLAN.md, assumption 16).
+   0 of 59), and during its outages it lists no pair at all. For a token still on the curve the
+   liquidity rule then uses the curve's depth instead: 2 × its real SOL reserve × SOL/USD, or
+   about 33 SOL in the curve for $8k at SOL = $120. A graduated token always needs its pool pair.
+   Set `PF_CURVE_LIQUIDITY_FALLBACK=false` to trade graduated tokens only (PLAN.md, assumption 16).
 3. **Agents.** A cheap **triage** screen runs first, then three Claude calls run in parallel.
    Each has its own tools and must finish with a strict `submit_vote` call:
    `{"vote","confidence","reasons","evidence"}`. The Analyst also returns `size_usd`.
