@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot.agents.triage import run_triage, triage_first_call_usd, triage_skips
+from bot.agents.base import Vote
+from bot.agents.triage import hard_red_flags, run_triage, triage_first_call_usd, triage_skips, verify_triage
 from bot.budget import Budget
 from bot.config import load_settings
 from bot.db import Database
@@ -107,3 +108,55 @@ def test_first_call_estimate_uses_triage_prices(tmp_path):
     assert cheap > (3000 / 2 * 1.25 + 600 * 5.0) / 1e6
     dear = triage_first_call_usd(_settings(tmp_path, TRIAGE_PRICE_OUT_PER_MTOK="50"), "x" * 3000)
     assert dear - cheap == pytest.approx(600 * (50 - 5) / 1e6)
+
+
+def _ctx(flow=None, rug=None, live=None, pf=None):
+    return {"flow": flow or {}, "rugcheck": rug or {}, "live": live or {}, "prefilter": pf or {}}
+
+
+def test_hard_red_flags_recompute_the_prompt_rules_from_the_data():
+    # the live misreads of 7 Oct: no flag in the data, so no skip
+    assert hard_red_flags(_ctx(flow={"effective_holders": 12.5, "effective_buyers": 40})) == []        # CATE
+    assert hard_red_flags(_ctx(flow={"dev_sold_pct_of_bought": 100.0, "early_buyer_retention": 0.0})) == []  # NOBO
+    assert hard_red_flags(_ctx(flow={"dev_sold_pct_of_bought": 94.6})) == []                          # Colony
+    # the rules that do count
+    assert "concentration" in hard_red_flags(_ctx(flow={"effective_holders": 9.9}))[0]
+    assert "bundling" in hard_red_flags(_ctx(flow={"same_slot_as_launch_buyers": 6}))[0]              # FF
+    assert "bundling" in hard_red_flags(_ctx(flow={"max_same_size_cluster_wallets": 5}))[0]
+    assert "bundling" in hard_red_flags(_ctx(flow={"bundle_like_share_of_launch_minute": 0.21}))[0]
+    assert hard_red_flags(_ctx(flow={"bundle_like_share_of_launch_minute": 0.1667, "same_slot_as_launch_buyers": 2})) == []
+    still = {"sniper_top3_share_of_launch_minute": 0.5572, "snipers_still_holding": "2/3"}            # CLOVER
+    assert "snipers" in hard_red_flags(_ctx(flow=still))[0]
+    gone = {"sniper_top3_share_of_launch_minute": 0.586, "snipers_still_holding": "0/3"}
+    assert hard_red_flags(_ctx(flow=gone)) == []                                                      # exited: no flag
+    assert "snipers" in hard_red_flags(_ctx(flow={"sniper_top3_sol": 1.309, "launch_minute_buy_sol": 2.567,
+                                                   "snipers_still_holding": "1/3"}))[0]               # TRUMPCAT
+    assert "rugcheck" in hard_red_flags(_ctx(rug={"risks": [{"name": "Creator history of rugged tokens",
+                                                              "level": "danger"}]}))[0]
+    assert hard_red_flags(_ctx(rug={"risks": [{"name": "Low Liquidity", "level": "warn"}]})) == []
+    assert "momentum" in hard_red_flags(_ctx(flow={"net_flow_sol_5m": -3.0, "net_flow_sol_prev_5m": 12.0}))[0]
+    assert "momentum" in hard_red_flags(_ctx(flow={"drawdown_from_peak_pct": 41.0}))[0]
+    assert hard_red_flags(_ctx(flow={"net_flow_sol_5m": 2.0, "net_flow_sol_prev_5m": 12.0, "drawdown_from_peak_pct": 39})) == []
+    assert "shrinking" in hard_red_flags(_ctx(pf={"unique_buyers": 100}, live={"unique_buyers": 60}))[0]
+    assert hard_red_flags(_ctx(pf={"unique_buyers": 100}, live={"unique_buyers": 71})) == []
+    # nulls are never flags
+    assert hard_red_flags(_ctx(flow={"effective_holders": None, "same_slot_as_launch_buyers": None,
+                                     "snipers_still_holding": None, "sniper_top3_share": None})) == []
+    assert hard_red_flags({}) == []
+
+
+def test_verify_triage_downgrades_an_unbacked_pass_and_keeps_a_backed_one(tmp_path):
+    s = _settings(tmp_path)
+    unbacked = verify_triage(Vote("triage", "PASS", 0.75, ["effective holders 12.5 below 10"], ["effective_holders 12.5"]),
+                             _ctx(flow={"effective_holders": 12.5}))
+    assert unbacked.vote == "BUY" and unbacked.raw_vote == "PASS" and "without a computed hard red flag" in unbacked.guard
+    assert not triage_skips(unbacked, s)                      # the committee runs
+    backed = verify_triage(Vote("triage", "PASS", 0.78, ["bundled launch"], ["same_slot_as_launch_buyers 6"]),
+                           _ctx(flow={"same_slot_as_launch_buyers": 6}))
+    assert backed.vote == "PASS" and backed.guard is None and triage_skips(backed, s)
+    assert any(e.startswith("computed: bundling") for e in backed.evidence)
+    # BUY votes and errors pass through untouched
+    buy = verify_triage(Vote("triage", "BUY", 0.65), _ctx())
+    assert buy.vote == "BUY" and buy.guard is None
+    err = verify_triage(Vote("triage", error="llm budget: spent"), _ctx())
+    assert err.vote == "PASS" and err.error and err.guard is None and not triage_skips(err, s)

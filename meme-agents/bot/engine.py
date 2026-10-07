@@ -16,7 +16,7 @@ import httpx
 
 from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs, build_veto_specs
-from .agents.triage import run_triage, triage_first_call_usd, triage_skips
+from .agents.triage import run_triage, triage_first_call_usd, triage_skips, verify_triage
 from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
 from .config import Settings, validate_settings
@@ -509,7 +509,10 @@ class Engine:
         triage = None
         if self.llm is not None and self.s.TRIAGE_ENABLED:
             # the cheap screen: a confident PASS here spends nothing on the three agents
-            triage = await run_triage(self.llm, self.s, context, self.llm_budget)
+            triage = verify_triage(await run_triage(self.llm, self.s, context, self.llm_budget), ctx_data)
+            if triage.guard:
+                log.info("TRIAGE PASS overruled #%d %s %s: %s (said: %s)", cid, ctx_data.get("symbol"), mint,
+                         triage.guard, (triage.reasons or ["no reason given"])[0][:160])
             await self._record_vote(cid, mint, triage)
             if triage_skips(triage, self.s):
                 reason = f"triage: {(triage.reasons or ['no reason given'])[0][:200]}"

@@ -106,7 +106,10 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
      cost about $0.13 per candidate. It may skip only on hard red flags already in the data
      (snipers still holding a third of the inflow, bundled buys, dev sold half or more together
      with one of those, fewer than 10 effective holders, momentum reversed). The creator selling
-     on its own is not a flag: in the recorded outcomes those tokens did not do worse. Errors, budget stops and unsure votes let the
+     on its own is not a flag: in the recorded outcomes those tokens did not do worse. A skip must
+     also be backed by one of those flags recomputed from the data in code; a PASS that cites a
+     flag the numbers do not contain (seen live: "12.5 effective holders is below 10") is
+     downgraded to BUY and the committee decides. Errors, budget stops and unsure votes let the
      candidate through. Its vote is stored like the others, so the report scores its skips
      against the shadow book. `TRIAGE_ENABLED=false` turns it off.
    - **Scout (المحقق):** `x_search`, `dexscreener_profile`, `dexscreener_boosts`. It judges

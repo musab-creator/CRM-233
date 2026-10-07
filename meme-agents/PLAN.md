@@ -210,6 +210,17 @@ Added after the build, when research showed a change in PumpPortal's data API:
     signals; dev selling counts only together with a sniper or bundling flag. Five-minute net
     flow turning negative after a positive previous window is the momentum flag instead. To be
     re-checked against the report once a week of neutral-gate data exists.
+33. **A triage skip needs a red flag the code can find in the data.** On the first live evening
+    Haiku skipped CATE for "effective holders 12.5, well below the threshold of 10" and NOBO for
+    dev selling plus zero retention, the exact pair the prompt demotes to weak signals. A model
+    reading a number backwards cannot be prompted away, so `hard_red_flags()` recomputes the
+    prompt's deterministic flags (rugged creator history, snipers above a third and still holding,
+    bundling, fewer than 10 effective buyers or holders, five-minute net flow turning negative or
+    drawdown beyond 40%, buyers or inflow 30% below the pre-filter scan) from the same fields the
+    model saw, leniently and never from a null. A PASS with none of them becomes a BUY with the
+    reason in `guard`, so the committee decides; a backed PASS carries the computed flags in its
+    evidence. The two judgment flags (copycat name, "far below the scan" by eye) cannot skip
+    alone any more; Scout checks copies in the committee.
 
 ## File tree
 
