@@ -61,6 +61,64 @@ class LiveExecutionUnknown(LiveExecutionError):
     """May have landed: keep its intent and reconcile, never rebuild or invent a fill."""
 
 
+def check_transaction(msg, payer, max_sol_debit: float) -> dict:
+    """Static checks on a remotely built transaction before it is signed.
+
+    The wallet must be the only required signer and the fee payer; every program must be a
+    static account key; compute-budget instructions must be well formed; and the explicit
+    native-SOL debits from the wallet (system transfers and account creations), plus the
+    priority fee and base fee, must fit `max_sol_debit`. Raises LiveExecutionError, else
+    returns what it found (also used by `python -m bot preflight --probe`).
+    """
+    if msg.header.num_required_signatures != 1 or not msg.account_keys or msg.account_keys[0] != payer:
+        raise LiveExecutionError("remote transaction has an unexpected fee payer or required signer")
+    debit_lamports = 0
+    compute_limit = 1_400_000
+    compute_price = 0
+    seen_compute = set()
+    programs: list[str] = []
+    for ix in msg.instructions:
+        if ix.program_id_index >= len(msg.account_keys):
+            # The program itself must be a static key; lookup-table contents aren't signed here.
+            raise LiveExecutionError("remote transaction program is not a static account key")
+        program = msg.account_keys[ix.program_id_index]
+        programs.append(str(program))
+        if program == COMPUTE_BUDGET_ID:
+            data = bytes(ix.data)
+            if not data or data[0] not in (1, 2, 3, 4) or data[0] in seen_compute:
+                raise LiveExecutionError("remote transaction has malformed or duplicate compute instructions")
+            seen_compute.add(data[0])
+            if data[0] == 2:
+                if len(data) != 5:
+                    raise LiveExecutionError("remote transaction has a malformed compute limit")
+                compute_limit = int.from_bytes(data[1:], "little")
+                if not 0 < compute_limit <= 1_400_000:
+                    raise LiveExecutionError("remote transaction has an invalid compute limit")
+            elif data[0] == 3:
+                if len(data) != 9:
+                    raise LiveExecutionError("remote transaction has a malformed compute price")
+                compute_price = int.from_bytes(data[1:], "little")
+            elif len(data) != 5:
+                raise LiveExecutionError("remote transaction has a malformed compute instruction")
+            continue
+        if program != SYSTEM_PROGRAM_ID:
+            continue
+        data = bytes(ix.data)
+        if len(data) < 4:
+            raise LiveExecutionError("remote transaction has a malformed system instruction")
+        opcode = int.from_bytes(data[:4], "little")
+        if ix.accounts and ix.accounts[0] == 0:
+            if opcode not in (0, 2) or len(data) < 12:
+                raise LiveExecutionError("remote transaction has an unsupported wallet system instruction")
+            debit_lamports += int.from_bytes(data[4:12], "little")
+    priority_lamports = (compute_limit * compute_price + 999_999) // 1_000_000
+    if debit_lamports + priority_lamports + 5000 > int(max_sol_debit * LAMPORTS):
+        raise LiveExecutionError("remote transaction exceeds the authorized SOL spending limit")
+    return {"instructions": len(msg.instructions), "programs": sorted(set(programs)),
+            "explicit_debit_sol": debit_lamports / LAMPORTS, "priority_fee_sol": priority_lamports / LAMPORTS,
+            "compute_limit": compute_limit, "max_sol_debit": max_sol_debit}
+
+
 class LiveExecutor:
     mode = "live"
 
@@ -89,7 +147,8 @@ class LiveExecutor:
         """`amount`: SOL (buy), tokens, or a percentage string like "100%" (sell)."""
         body = {"publicKey": self.pubkey, "action": action, "mint": mint, "amount": amount,
                 "denominatedInSol": "true" if in_sol else "false",
-                "slippage": self.s.ENTRY_SLIPPAGE_PCT if action == "buy" else self.s.EXIT_SLIPPAGE_PCT,
+                # PumpPortal documents slippage as a whole percentage
+                "slippage": max(1, int(round(self.s.ENTRY_SLIPPAGE_PCT if action == "buy" else self.s.EXIT_SLIPPAGE_PCT))),
                 "priorityFee": round(self.s.NETWORK_FEE_SOL * 0.8, 6), "pool": "auto"}
         r = await self.http.post(self.s.PUMPPORTAL_TRADE_URL, data=body, timeout=20)
         if r.status_code != 200:
@@ -99,52 +158,9 @@ class LiveExecutor:
         return self._checked_sign(tx, max_debit)
 
     def _checked_sign(self, tx: VersionedTransaction, max_sol_debit: float) -> VersionedTransaction:
-        """Reject foreign payers/signers and excessive explicit native-SOL debits."""
-        msg = tx.message
-        if (msg.header.num_required_signatures != 1 or not msg.account_keys
-                or msg.account_keys[0] != self._kp.pubkey()):
-            raise LiveExecutionError("remote transaction has an unexpected fee payer or required signer")
-        debit_lamports = 0
-        compute_limit = 1_400_000
-        compute_price = 0
-        seen_compute = set()
-        for ix in msg.instructions:
-            if ix.program_id_index >= len(msg.account_keys):
-                # The program itself must be a static key; lookup-table contents aren't signed here.
-                raise LiveExecutionError("remote transaction program is not a static account key")
-            program = msg.account_keys[ix.program_id_index]
-            if program == COMPUTE_BUDGET_ID:
-                data = bytes(ix.data)
-                if not data or data[0] not in (1, 2, 3, 4) or data[0] in seen_compute:
-                    raise LiveExecutionError("remote transaction has malformed or duplicate compute instructions")
-                seen_compute.add(data[0])
-                if data[0] == 2:
-                    if len(data) != 5:
-                        raise LiveExecutionError("remote transaction has a malformed compute limit")
-                    compute_limit = int.from_bytes(data[1:], "little")
-                    if not 0 < compute_limit <= 1_400_000:
-                        raise LiveExecutionError("remote transaction has an invalid compute limit")
-                elif data[0] == 3:
-                    if len(data) != 9:
-                        raise LiveExecutionError("remote transaction has a malformed compute price")
-                    compute_price = int.from_bytes(data[1:], "little")
-                elif len(data) != 5:
-                    raise LiveExecutionError("remote transaction has a malformed compute instruction")
-                continue
-            if program != SYSTEM_PROGRAM_ID:
-                continue
-            data = bytes(ix.data)
-            if len(data) < 4:
-                raise LiveExecutionError("remote transaction has a malformed system instruction")
-            opcode = int.from_bytes(data[:4], "little")
-            if ix.accounts and ix.accounts[0] == 0:
-                if opcode not in (0, 2) or len(data) < 12:
-                    raise LiveExecutionError("remote transaction has an unsupported wallet system instruction")
-                debit_lamports += int.from_bytes(data[4:12], "little")
-        priority_lamports = (compute_limit * compute_price + 999_999) // 1_000_000
-        if debit_lamports + priority_lamports + 5000 > int(max_sol_debit * LAMPORTS):
-            raise LiveExecutionError("remote transaction exceeds the authorized SOL spending limit")
-        return VersionedTransaction(msg, [self._kp])
+        """Reject foreign payers/signers and excessive explicit native-SOL debits, then sign."""
+        check_transaction(tx.message, self._kp.pubkey(), max_sol_debit)
+        return VersionedTransaction(tx.message, [self._kp])
 
     async def build_jupiter(self, input_mint: str, output_mint: str, amount_raw: int) -> tuple[VersionedTransaction, str]:
         if not self.s.JUPITER_API_KEY:

@@ -11,7 +11,8 @@ against them:
   * Rugcheck: report fields, risk levels, whether the curve sits in topHolders;
   * Helius (if HELIUS_API_KEY is set): curve accounts decode (virtual reserves keep the
     constant product), holder counts, and a rebuilt launch trade matches its create event;
-  * PumpPortal trade-local builds a transaction for a throwaway wallet (built, never signed).
+  * PumpPortal trade-local builds a transaction for a throwaway wallet; it is put through the live
+    executor's signing checks and Helius simulateTransaction (never sent).
 The report is written to reports/preflight-YYYYmmdd-HHMMSS.json.
 """
 from __future__ import annotations
@@ -383,23 +384,50 @@ async def probe_helius(s: Settings, http: httpx.AsyncClient, creates: list[dict]
     return out
 
 
-async def probe_trade_local(s: Settings, http: httpx.AsyncClient, mint: str) -> dict:
-    """Ask PumpPortal to build a small buy for a throwaway wallet. Never signed, never sent."""
+async def probe_trade_local(s: Settings, http: httpx.AsyncClient, mint: str, kp=None, helius=None) -> dict:
+    """Ask PumpPortal to build a small buy for a throwaway wallet, then put that real transaction
+    through the same checks the live executor applies before signing (`check_transaction`), and,
+    with Helius, through the same `simulateTransaction` call. The throwaway wallet holds nothing,
+    so the simulation is expected to fail on funds; what this proves is that the request formats
+    are accepted and the checks accept a genuine PumpPortal transaction. Nothing is ever sent."""
+    import base64
     from solders.keypair import Keypair
     from solders.transaction import VersionedTransaction
-    body = {"publicKey": str(Keypair().pubkey()), "action": "buy", "mint": mint, "amount": 0.01,
+    from .live.executor import LiveExecutionError, check_transaction
+    kp = kp or Keypair()
+    amount = 0.01
+    body = {"publicKey": str(kp.pubkey()), "action": "buy", "mint": mint, "amount": amount,
             "denominatedInSol": "true", "slippage": 10, "priorityFee": 0.0001, "pool": "auto"}
     r = await http.post(s.PUMPPORTAL_TRADE_URL, data=body, timeout=20)
     out: dict = {"http": r.status_code, "bytes": len(r.content)}
-    if r.status_code == 200:
-        try:
-            tx = VersionedTransaction.from_bytes(r.content)
-            out.update(builds=True, instructions=len(tx.message.instructions),
-                       account_keys=len(tx.message.account_keys))
-        except Exception as e:
-            out.update(builds=False, error=_err(e))
-    else:
+    if r.status_code != 200:
         out.update(builds=False, body=redact(r.text[:300]))
+        return out
+    try:
+        tx = VersionedTransaction.from_bytes(r.content)
+    except Exception as e:
+        out.update(builds=False, error=_err(e))
+        return out
+    out.update(builds=True, instructions=len(tx.message.instructions), account_keys=len(tx.message.account_keys))
+    try:
+        info = check_transaction(tx.message, kp.pubkey(), amount + s.NETWORK_FEE_SOL)
+        out.update(signing_checks="pass", explicit_debit_sol=round(info["explicit_debit_sol"], 6),
+                   priority_fee_sol=round(info["priority_fee_sol"], 6), compute_limit=info["compute_limit"],
+                   programs=info["programs"])
+    except LiveExecutionError as e:
+        out.update(signing_checks=f"FAIL: {e}")
+    if helius is not None:
+        try:
+            signed = VersionedTransaction(tx.message, [kp])
+            sim = await helius.rpc("simulateTransaction", [
+                base64.b64encode(bytes(signed)).decode(), {
+                    "encoding": "base64", "sigVerify": True, "commitment": "confirmed",
+                    "accounts": {"encoding": "base64", "addresses": [str(kp.pubkey())]}}])
+            value = (sim or {}).get("value") if isinstance(sim, dict) else None
+            out["simulate"] = {"rpc_ok": isinstance(value, dict), "err": (value or {}).get("err") if isinstance(value, dict) else str(sim)[:200],
+                               "note": "an empty throwaway wallet is expected to fail on funds; rpc_ok is the check"}
+        except Exception as e:
+            out["simulate"] = {"rpc_ok": False, "error": _err(e)}
     return out
 
 
@@ -457,7 +485,8 @@ async def probe(s: Settings, http: httpx.AsyncClient, seconds: float) -> dict:
             out["helius"] = {"error": _err(e)}
     if creates:
         try:
-            out["trade_local"] = await probe_trade_local(s, http, creates[-1]["mint"])
+            out["trade_local"] = await probe_trade_local(s, http, creates[-1]["mint"],
+                                                         helius=_helius(s, http) if s.HELIUS_API_KEY else None)
         except Exception as e:
             out["trade_local"] = {"error": _err(e)}
     # verdicts on the assumptions in PLAN.md
@@ -484,6 +513,8 @@ async def probe(s: Settings, http: httpx.AsyncClient, seconds: float) -> dict:
         else ("not checked: HELIUS_API_KEY not set" if not s.HELIUS_API_KEY else hl.get("error")),
         "launch_trade_rebuilt_from_chain_matches_create": match or None,
         "trade_local_builds_unsigned_tx": (out.get("trade_local") or {}).get("builds"),
+        "trade_local_passes_live_signing_checks": (out.get("trade_local") or {}).get("signing_checks"),
+        "trade_local_simulate_rpc_accepted": ((out.get("trade_local") or {}).get("simulate") or {}).get("rpc_ok"),
     }
     return out
 
