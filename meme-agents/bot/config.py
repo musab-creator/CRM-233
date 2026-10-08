@@ -47,13 +47,16 @@ def _csv(v: str) -> list[str]:
     return [x.strip() for x in v.split(",") if x.strip()]
 
 
+LIVE_WALLET_CEILING_SOL = 1.0   # the most LIVE_MAX_WALLET_SOL may be set to (operator's call, 8 Oct: 0.5 -> 1)
+
+
 @dataclass
 class Settings:
     # --- mode -------------------------------------------------------------------
     MODE: str = "paper"
     LIVE_CONFIRM: str = ""
     LIVE_DRY_RUN: bool = True
-    LIVE_MAX_WALLET_SOL: float = 0.5
+    LIVE_MAX_WALLET_SOL: float = 0.5          # raised to at most LIVE_WALLET_CEILING_SOL in .env on the server
     LIVE_ACCOUNT_RENT_SOL: float = 0.0025    # a buy may also pay rent for a new token account (0.00204 SOL)
 
     # --- secrets (never logged) ------------------------------------------------
@@ -321,8 +324,8 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
     if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:
         raise ConfigError("EXIT_RETRY_BASE_S must not exceed EXIT_RETRY_MAX_S")
-    if s.LIVE_MAX_WALLET_SOL > 0.5:
-        raise ConfigError("LIVE_MAX_WALLET_SOL must not exceed 0.5 SOL")
+    if s.LIVE_MAX_WALLET_SOL > LIVE_WALLET_CEILING_SOL:
+        raise ConfigError(f"LIVE_MAX_WALLET_SOL must not exceed {LIVE_WALLET_CEILING_SOL:g} SOL")
     for name in ("CONSENSUS_MIN_MEAN_CONFIDENCE", "AGENT_MIN_GROUNDING", "TRIAGE_MIN_CONFIDENCE",
                  "VETO_MIN_CONFIDENCE", "TAKE_PROFIT_SELL_FRACTION", "REGIME_MIN_MULTIPLIER"):
         if not 0 < getattr(s, name) <= 1:

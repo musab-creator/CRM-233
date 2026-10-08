@@ -369,7 +369,7 @@ Live mode starts only if **all** of these are true. Otherwise it refuses with ex
 - `LIVE_CONFIRM=I_ACCEPT_LOSSES`
 - `WALLET_PRIVATE_KEY` parses
 - `HELIUS_API_KEY` and `ANTHROPIC_API_KEY` are set
-- the wallet's on-chain balance is 0.5 SOL or less at startup
+- the wallet's on-chain balance is `LIVE_MAX_WALLET_SOL` or less at startup (default 0.5, at most 1)
 
 Orders go to PumpPortal's Local Trade API (`POST /api/trade-local`, `pool: "auto"`) and are
 signed locally with `solders`. Graduated tokens go through Jupiter Swap API v2 instead
