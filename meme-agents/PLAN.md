@@ -244,6 +244,14 @@ Added after the build, when research showed a change in PumpPortal's data API:
     Telegram offset is persisted in the database so the restart a command causes never replays
     it, and `.env` is rewritten in place so the bot's read-only bind mount on it survives.
 
+35. **A live buy may take a little more than the SOL amount and the network fee.** The first
+    real buy (Livepad, 8 Oct, $5) was refused by the pre-broadcast simulation check because the
+    transaction also paid the rent of the wallet's new token account (0.00204 SOL) and the pump.fun
+    and PumpPortal percentage fees on top of the amount. The spending limit the bot authorises
+    (`spend_limit()` in `bot/live/executor.py`, applied both statically before signing and to the
+    simulated payer debit) is now amount × (1 + fees) + `NETWORK_FEE_SOL` + `LIVE_ACCOUNT_RENT_SOL`
+    (default 0.0025 SOL). Anything beyond that is still refused before broadcast.
+
 ## File tree
 
 ```

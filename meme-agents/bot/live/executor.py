@@ -61,6 +61,16 @@ class LiveExecutionUnknown(LiveExecutionError):
     """May have landed: keep its intent and reconcile, never rebuild or invent a fill."""
 
 
+def spend_limit(side: str, sol_in: float, s) -> float:
+    """The most a transaction may take from the wallet. A buy spends `sol_in` plus the pump.fun
+    and PumpPortal percentage fees on top, the network fee, and the rent of a token account the
+    wallet may not have yet (the first buy of any token). A sell only pays fees and, on some
+    routes, a wrapped-SOL account it closes again."""
+    fees = (s.PUMPFUN_FEE_PCT + s.PUMPPORTAL_FEE_PCT) / 100
+    spend = sol_in * (1 + fees) if side == "buy" else 0.0
+    return spend + s.NETWORK_FEE_SOL + s.LIVE_ACCOUNT_RENT_SOL
+
+
 def check_transaction(msg, payer, max_sol_debit: float) -> dict:
     """Static checks on a remotely built transaction before it is signed.
 
@@ -154,7 +164,7 @@ class LiveExecutor:
         if r.status_code != 200:
             raise LiveExecutionError(f"trade-local HTTP {r.status_code}: {r.text[:200]}")
         tx = VersionedTransaction.from_bytes(r.content)
-        max_debit = (float(amount) if in_sol else 0.0) + self.s.NETWORK_FEE_SOL
+        max_debit = spend_limit(action, float(amount) if in_sol else 0.0, self.s)
         return self._checked_sign(tx, max_debit)
 
     def _checked_sign(self, tx: VersionedTransaction, max_sol_debit: float) -> VersionedTransaction:
@@ -180,7 +190,8 @@ class LiveExecutor:
         if not data.get("requestId"):
             raise LiveExecutionError("jupiter order returned no requestId")
         tx = VersionedTransaction.from_bytes(base64.b64decode(data["transaction"], validate=True))
-        max_debit = (amount_raw / LAMPORTS if input_mint == WSOL else 0.0) + self.s.NETWORK_FEE_SOL
+        max_debit = spend_limit("buy" if input_mint == WSOL else "sell",
+                                amount_raw / LAMPORTS if input_mint == WSOL else 0.0, self.s)
         return self._checked_sign(tx, max_debit), data["requestId"]
 
     def _use_jupiter(self, mint: str) -> bool:
@@ -355,7 +366,7 @@ class LiveExecutor:
             if not isinstance(after_lamports, int) or after_lamports < 0:
                 raise ValueError("simulation returned an invalid payer balance")
             after = after_lamports / LAMPORTS
-            allowed = (amount if side == "buy" else 0.0) + self.s.NETWORK_FEE_SOL
+            allowed = spend_limit(side, amount, self.s)
             if not isfinite(before) or before - after > allowed + 1e-9:
                 raise ValueError("simulated payer debit exceeds the authorized SOL spending limit")
         except Exception as e:

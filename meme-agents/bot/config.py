@@ -54,6 +54,7 @@ class Settings:
     LIVE_CONFIRM: str = ""
     LIVE_DRY_RUN: bool = True
     LIVE_MAX_WALLET_SOL: float = 0.5
+    LIVE_ACCOUNT_RENT_SOL: float = 0.0025    # a buy may also pay rent for a new token account (0.00204 SOL)
 
     # --- secrets (never logged) ------------------------------------------------
     ANTHROPIC_API_KEY: str = field(default="", repr=False)

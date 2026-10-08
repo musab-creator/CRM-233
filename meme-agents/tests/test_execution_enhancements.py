@@ -489,3 +489,32 @@ def test_landed_buy_journal_reconciles_before_restart_stop_can_cancel(s, tmp_pat
         finally:
             await db.close()
     asyncio.run(go())
+
+
+def test_simulated_spend_allows_fees_and_token_account_rent_but_not_more(s):
+    """The first live buy was refused: a real pump.fun buy pays rent for the wallet's new token
+    account and the percentage fees on top of the SOL amount, which the old limit did not allow."""
+    from bot.live.executor import spend_limit
+    assert spend_limit("buy", 0.025, s) == pytest.approx(0.025 * 1.015 + 0.005 + 0.0025)
+    assert spend_limit("sell", 0.025, s) == pytest.approx(0.005 + 0.0025)
+
+    async def go(debit_sol: float):
+        chain = FakeChain()
+        db, http, ex = await _executor(s, chain)
+        before = await chain.balance_sol(ex.pubkey)
+        original_rpc = chain.rpc
+
+        async def simulation(method, params):
+            if method == "simulateTransaction":
+                return {"value": {"err": None, "accounts": [{"lamports": int((before - debit_sol) * 1e9)}]}}
+            return await original_rpc(method, params)
+
+        chain.rpc = simulation
+        try:
+            await ex._check_simulated_spend(await ex.build_pumpportal("buy", "MintAddr", 0.07, True), "buy", 0.07)
+        finally:
+            await db.close()
+
+    asyncio.run(go(0.07 * 1.015 + 0.004 + 0.000005 + 0.00203928))   # amount, fees, priority, base fee, rent
+    with pytest.raises(LiveExecutionError, match="spending limit"):
+        asyncio.run(go(0.07 + 0.013))                                  # a quarter more than fees and rent explain
