@@ -194,8 +194,9 @@ Added after the build, when research showed a change in PumpPortal's data API:
     the neutral 0.6 instead of flipped to PASS: the unverified part is the extra confidence, not
     the look. From 0.7 up a BUY claims attention or a catalyst and is guarded in full. Scout's PASS
     is for a bot *pattern* (Pao, 8 Oct: eight signal bots in three minutes); one or two automated
-    listing posts are the background every launch gets and leave the vote neutral (CUSTOM, 8 Oct,
-    was a PASS on one such post; the Analyst's PASS was the one that mattered).
+    listing posts, and the launcher's own announcement, are the background every launch gets and
+    leave the vote neutral (CUSTOM, 8 Oct, was a PASS on one listing bot; Sworn on the launcher's
+    one post, a +6% shadow). Sock-puppet communities run by the launcher stay a PASS.
 29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
     force their single tool with `tool_choice`, and a committee agent is forced to call
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before
