@@ -60,6 +60,15 @@ class Curve:
         return self.v_sol / self.v_tokens if self.v_tokens > 0 else None
 
 
+def plausible_curve(c: Curve) -> bool:
+    """A pump.fun curve starts at 30 virtual SOL against 1.073B virtual tokens and completes near
+    115 SOL against 280M. One live read (#784, 8 Oct) came back at 281x the token's price, far
+    outside anything a curve can reach; the bounds are loose enough for a non-standard curve and
+    tight enough to drop a corrupt read before it reaches the price history."""
+    return (0.1 * INITIAL_VIRTUAL_TOKENS <= c.v_tokens <= 1.5 * INITIAL_VIRTUAL_TOKENS
+            and 0.5 * INITIAL_VIRTUAL_SOL <= c.v_sol <= 20 * INITIAL_VIRTUAL_SOL)
+
+
 def decode_curve(data: bytes | None) -> Curve | None:
     """Bonding-curve account bytes -> Curve, or None if it is not a bonding-curve account."""
     if not data or len(data) < 49 or data[:8] != CURVE_DISCRIMINATOR:

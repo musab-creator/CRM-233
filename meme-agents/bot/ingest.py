@@ -20,6 +20,7 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .db import Database
+from .feeds.pumpchain import plausible_curve
 from .util import now_s
 
 log = logging.getLogger("bot.ingest")
@@ -142,8 +143,8 @@ class Ingestor:
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
-        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "migrations": 0,
-                      "other_launchpads": 0}
+        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "curve_rejected": 0,
+                      "migrations": 0, "other_launchpads": 0}
 
     # --- message handling -----------------------------------------------------
     async def handle(self, msg: dict, ts: float | None = None) -> None:
@@ -286,6 +287,12 @@ class Ingestor:
             st.graduated, st.progress = True, 1.0
             st.real_sol = max(st.real_sol or 0.0, c.real_sol, c.v_sol - INITIAL_VIRTUAL_SOL)
             self._mark_dirty(mint)
+            return False
+        if not plausible_curve(c):
+            # a corrupt read must not become a tick, a snapshot or the token's market cap
+            self.stats["curve_rejected"] += 1
+            log.warning("%s: rejecting implausible curve read v_sol=%.4g v_tokens=%.4g real_sol=%.4g (last price %s)",
+                        mint, c.v_sol, c.v_tokens, c.real_sol, f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")
             return False
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
