@@ -1,0 +1,1175 @@
+{
+  "name": "DR — 01 Content Calendar Publisher",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Scheduled publisher\n\nPulls due posts from the CRM, writes a caption per platform with Claude, runs the Florida compliance gate, then publishes to Facebook, Instagram and Google Business Profile.\n\n**Fails closed.** If the compliance endpoint is unreachable or returns anything other than `pass`, nothing publishes and the team is emailed.\n\nRequired env vars are listed in `automation/n8n/.env.example`.",
+        "height": 320,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-overview",
+      "name": "About this workflow",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-crmBaseUrl",
+              "name": "crmBaseUrl",
+              "value": "https://REPLACE-WITH-YOUR-CRM-HOST",
+              "type": "string"
+            },
+            {
+              "id": "cfg-metaGraphVersion",
+              "name": "metaGraphVersion",
+              "value": "v23.0",
+              "type": "string"
+            },
+            {
+              "id": "cfg-fbPageId",
+              "name": "fbPageId",
+              "value": "REPLACE_WITH_FACEBOOK_PAGE_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-igUserId",
+              "name": "igUserId",
+              "value": "REPLACE_WITH_INSTAGRAM_BUSINESS_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpAccountId",
+              "name": "gbpAccountId",
+              "value": "REPLACE_WITH_GBP_ACCOUNT_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-gbpLocationId",
+              "name": "gbpLocationId",
+              "value": "REPLACE_WITH_GBP_LOCATION_ID",
+              "type": "string"
+            },
+            {
+              "id": "cfg-anthropicModel",
+              "name": "anthropicModel",
+              "value": "claude-opus-5",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertEmail",
+              "name": "alertEmail",
+              "value": "REPLACE_WITH_ALERT_EMAIL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-alertFromEmail",
+              "name": "alertFromEmail",
+              "value": "REPLACE_WITH_FROM_EMAIL",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 13 * * 1,3,5"
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Mon/Wed/Fri 9am ET",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        60,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/queue",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "5"
+            },
+            {
+              "name": "claim",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "http-get-queue",
+      "name": "Get Due Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per (post, platform) pair. If the CRM returns nothing, this node\n// emits zero items and the rest of the workflow is skipped — that is the\n// normal \"no posts due\" path, not an error.\nconst jobs = [];\n\nfor (const item of $input.all()) {\n  for (const job of item.json.jobs ?? []) {\n    jobs.push({\n      json: {\n        postId: job.postId,\n        platform: job.platform,\n        theme: job.theme,\n        targetCity: job.targetCity,\n        media: job.media ?? [],\n        googleCta: job.googleCta ?? null,\n        existingCaption: job.existingCaption,\n        prompt: job.prompt,\n        hasImage: (job.media ?? []).length > 0,\n      },\n    });\n  }\n\n  for (const warning of item.json.warnings ?? []) {\n    console.warn('CRM warning:', warning);\n  }\n}\n\nreturn jobs;"
+      },
+      "id": "code-expand-jobs",
+      "name": "Expand Into Platform Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-needs-caption",
+              "leftValue": "={{ $json.existingCaption }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-needs-caption",
+      "name": "Caption Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $('Config').first().json.anthropicModel || 'claude-opus-5', max_tokens: 4000, system: $json.prompt.system, messages: [{ role: 'user', content: $json.prompt.user }], output_config: { effort: 'low', format: { type: 'json_schema', schema: $json.prompt.schema } } }) }}",
+        "options": {
+          "timeout": 180000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi"
+      },
+      "id": "http-claude-caption",
+      "name": "Write Caption (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "anthropicApi": {
+          "id": "REPLACE_WITH_ANTHROPIC_CREDENTIAL_ID",
+          "name": "DR Anthropic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Structured outputs mean the text block is already valid JSON matching the\n// schema in src/lib/social/prompt.ts — no prose to strip. Two failure modes\n// still need handling: a safety refusal (HTTP 200, stop_reason 'refusal') and\n// a truncated response (stop_reason 'max_tokens').\nconst job = $('Expand Into Platform Jobs').item.json;\nconst res = $json;\n\nfunction fail(reason) {\n  return { json: { ...job, caption: '', captionError: reason } };\n}\n\nif (res.error) {\n  return fail(`Anthropic API error: ${res.error.type ?? 'unknown'} — ${res.error.message ?? ''}`);\n}\n\nif (res.stop_reason === 'refusal') {\n  return fail(`Model declined the request (${res.stop_details?.category ?? 'no category'}).`);\n}\n\nif (res.stop_reason === 'max_tokens') {\n  return fail('Response hit max_tokens and is truncated — raise max_tokens or shorten the brief.');\n}\n\nconst textBlock = (res.content ?? []).find((b) => b.type === 'text');\nif (!textBlock) {\n  return fail('No text block in the model response.');\n}\n\nlet parsed;\ntry {\n  parsed = JSON.parse(textBlock.text);\n} catch (e) {\n  return fail(`Model output was not valid JSON: ${e.message}`);\n}\n\nreturn {\n  json: {\n    ...job,\n    caption: parsed.caption,\n    hook: parsed.hook,\n    modelSaysInsuranceTopic: parsed.mentions_insurance_claim === true,\n    captionError: null,\n    usage: res.usage ?? null,\n  },\n};"
+      },
+      "id": "code-parse-caption",
+      "name": "Parse Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// A human already wrote this caption in the CRM — skip generation entirely.\nreturn {\n  json: {\n    ...$json,\n    caption: $json.existingCaption,\n    hook: String($json.existingCaption).split('\\n')[0],\n    modelSaysInsuranceTopic: false,\n    captionError: null,\n  },\n};"
+      },
+      "id": "code-use-existing",
+      "name": "Use Human-Written Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 2,
+        "options": {}
+      },
+      "id": "merge-captions",
+      "name": "All Captions",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1580,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/compliance-check",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ postId: $json.postId, platform: $json.platform, caption: $json.caption, hasImage: $json.hasImage }) }}",
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "http-compliance",
+      "name": "Florida Compliance Gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        100
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Fail closed. Anything that is not an explicit `pass` — a blocked caption, a\n// needs_review caption, a 500 from the CRM, a network timeout — stops here.\n// The cost of a wrong publish is up to $10,000 per violation under\n// Fla. Stat. 489.147; the cost of a missed post is one late post.\nconst job = $('All Captions').item.json;\nconst gate = $json;\n\nconst reachedGate = typeof gate.status === 'string';\nconst status = reachedGate ? gate.status : 'blocked';\n\nconst findings = reachedGate\n  ? (gate.findings ?? [])\n  : [{ code: 'GATE_UNREACHABLE', severity: 'blocker', message: `Compliance endpoint did not answer: ${gate.error?.message ?? gate.message ?? 'unknown error'}` }];\n\nif (job.captionError) {\n  findings.unshift({ code: 'CAPTION_FAILED', severity: 'blocker', message: job.captionError });\n}\n\nconst blockers = findings.filter((f) => f.severity === 'blocker');\nconst reviews = findings.filter((f) => f.severity === 'review');\n\nreturn {\n  json: {\n    ...job,\n    complianceStatus: job.captionError ? 'blocked' : status,\n    finalCaption: gate.caption ?? job.caption,\n    findings,\n    blockerSummary: blockers.map((f) => `${f.code}: ${f.message}`).join(' | '),\n    reviewSummary: reviews.map((f) => `${f.code}: ${f.message}`).join(' | '),\n  },\n};"
+      },
+      "id": "code-evaluate-gate",
+      "name": "Evaluate Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-cleared",
+              "leftValue": "={{ $json.complianceStatus }}",
+              "rightValue": "pass",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-cleared",
+      "name": "Cleared to Publish?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "sw-fb",
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "facebook",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "facebook"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "sw-ig",
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "instagram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "instagram"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "sw-gbp",
+                    "leftValue": "={{ $json.platform }}",
+                    "rightValue": "google_business",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "google_business"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "switch-platform",
+      "name": "Route by Platform",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        2460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Facebook\n\nA post with a photo goes to `/{page-id}/photos` (`url` + `caption`). A text-only post goes to `/{page-id}/feed` (`message`).\n\nNeeds a **Page** access token with `pages_manage_posts` and `pages_read_engagement`. Generate a System User token in Business Manager so it does not expire every 60 days.",
+        "height": 260,
+        "width": 340,
+        "color": 5
+      },
+      "id": "note-facebook",
+      "name": "Facebook notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2520,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.fbPageId }}/{{ $json.hasImage ? 'photos' : 'feed' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.hasImage ? { url: $json.media[0].url, caption: $json.finalCaption, published: true } : { message: $json.finalCaption }) }}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
+      },
+      "id": "http-fb-publish",
+      "name": "Publish to Facebook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2700,
+        -60
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Instagram\n\nPublishing is always two calls: create a media container, then publish it by `creation_id`. The container is not ready immediately, so the workflow waits and checks `status_code` before publishing.\n\n`image_url` must be a **publicly reachable HTTPS JPEG** — Instagram fetches it server-side. A signed URL that expires, or anything behind auth, fails here.",
+        "height": 300,
+        "width": 340,
+        "color": 6
+      },
+      "id": "note-instagram",
+      "name": "Instagram notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2520,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.igUserId }}/media",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ image_url: $json.media[0].url, caption: $json.finalCaption }) }}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
+      },
+      "id": "http-ig-container",
+      "name": "Create IG Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2700,
+        440
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 20
+      },
+      "id": "wait-ig",
+      "name": "Wait for Container",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2920,
+        440
+      ],
+      "webhookId": "dr-ig-container-wait"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $json.id }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "status_code,status"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
+      },
+      "id": "http-ig-status",
+      "name": "Check Container Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3140,
+        440
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-ig-ready",
+              "leftValue": "={{ $json.status_code }}",
+              "rightValue": "FINISHED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-ig-ready",
+      "name": "Container Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 40
+      },
+      "id": "wait-ig-longer",
+      "name": "Wait Longer",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3360,
+        620
+      ],
+      "webhookId": "dr-ig-container-wait-2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $('Config').first().json.metaGraphVersion || 'v23.0' }}/{{ $('Config').first().json.igUserId }}/media_publish",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ creation_id: $('Create IG Container').item.json.id }) }}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi"
+      },
+      "id": "http-ig-publish",
+      "name": "Publish IG Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3580,
+        520
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "REPLACE_WITH_META_CREDENTIAL_ID",
+          "name": "DR Meta Page Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Google Business Profile\n\nLocal posts still live on the v4 API (`mybusiness.googleapis.com/v4/.../localPosts`) — the newer split APIs do not cover them.\n\nAccess tokens last an hour, so the workflow exchanges the stored refresh token on every run rather than caching one.",
+        "height": 260,
+        "width": 340,
+        "color": 3
+      },
+      "id": "note-google",
+      "name": "Google notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2520,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://mybusiness.googleapis.com/v4/accounts/{{ $('Config').first().json.gbpAccountId }}/locations/{{ $('Config').first().json.gbpLocationId }}/localPosts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({ languageCode: 'en-US', summary: $('Route by Platform').item.json.finalCaption, topicType: 'STANDARD' }, ($('Route by Platform').item.json.media || []).length ? { media: [{ mediaFormat: 'PHOTO', sourceUrl: $('Route by Platform').item.json.media[0].url }] } : {}, $('Route by Platform').item.json.googleCta ? { callToAction: Object.assign({ actionType: $('Route by Platform').item.json.googleCta.actionType }, $('Route by Platform').item.json.googleCta.url ? { url: $('Route by Platform').item.json.googleCta.url } : {}) } : {})) }}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api"
+      },
+      "id": "http-gbp-publish",
+      "name": "Publish Google Business Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2920,
+        1060
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "googleOAuth2Api": {
+          "id": "REPLACE_WITH_GOOGLE_CREDENTIAL_ID",
+          "name": "DR Google Business Profile"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Every publish branch lands here. Each platform reports success differently,\n// so normalise into the one shape the CRM expects.\nconst res = $json;\nconst platform = $('Route by Platform').item.json.platform;\nconst job = $('Route by Platform').item.json;\n\nlet status = 'failed';\nlet platformPostId;\nlet permalink;\nlet error;\n\nif (res.error) {\n  // Meta returns { error: { message, type, code } }; Google returns\n  // { error: { code, message, status } }. Both are covered by reading .message.\n  error = res.error.message ?? JSON.stringify(res.error);\n} else if (platform === 'facebook' && (res.post_id || res.id)) {\n  status = 'published';\n  platformPostId = res.post_id ?? res.id;\n  permalink = `https://www.facebook.com/${platformPostId}`;\n} else if (platform === 'instagram' && res.id) {\n  status = 'published';\n  platformPostId = res.id;\n} else if (platform === 'google_business' && res.name) {\n  status = 'published';\n  platformPostId = res.name;\n  permalink = res.searchUrl;\n} else {\n  error = `Unrecognised response from ${platform}: ${JSON.stringify(res).slice(0, 400)}`;\n}\n\nreturn {\n  json: {\n    postId: job.postId,\n    platform,\n    status,\n    platformPostId,\n    permalink,\n    error,\n    caption: job.finalCaption,\n  },\n};"
+      },
+      "id": "code-normalize",
+      "name": "Normalise Publish Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/publish-result",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "http-report-result",
+      "name": "Report Result to CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4040,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Held posts still get reported so the CRM shows the reason next to the post\n// instead of it silently sitting in the queue.\nreturn {\n  json: {\n    postId: $json.postId,\n    platform: $json.platform,\n    status: 'blocked',\n    error: $json.blockerSummary || $json.reviewSummary || 'Held for review',\n    caption: $json.finalCaption,\n    complianceStatus: $json.complianceStatus,\n    findings: $json.findings,\n    targetCity: $json.targetCity,\n  },\n};"
+      },
+      "id": "code-held",
+      "name": "Build Hold Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.crmBaseUrl }}/api/social/publish-result",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ postId: $json.postId, platform: $json.platform, status: 'blocked', error: $json.error, caption: $json.caption }) }}",
+        "options": {
+          "timeout": 30000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "http-report-hold",
+      "name": "Report Hold to CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2700,
+        260
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "DR CRM Automation Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Config').first().json.alertFromEmail }}",
+        "toEmail": "={{ $('Config').first().json.alertEmail }}",
+        "subject": "=[Diversity Roofing] Social post held — {{ $('Build Hold Notice').item.json.platform }} / {{ $('Build Hold Notice').item.json.postId }}",
+        "emailFormat": "text",
+        "text": "=A scheduled social post did not publish.\n\nPost:      {{ $('Build Hold Notice').item.json.postId }}\nPlatform:  {{ $('Build Hold Notice').item.json.platform }}\nCity:      {{ $('Build Hold Notice').item.json.targetCity }}\nStatus:    {{ $('Build Hold Notice').item.json.complianceStatus }}\n\nWhy it was held:\n{{ ($('Build Hold Notice').item.json.findings || []).map(f => '- [' + f.severity + '] ' + f.code + ': ' + f.message).join('\\n') }}\n\nCaption as written:\n---\n{{ $('Build Hold Notice').item.json.caption }}\n---\n\nEdit and approve it in the CRM under Marketing, or fix the brief and let the\nnext scheduled run pick it up.",
+        "options": {}
+      },
+      "id": "email-hold-alert",
+      "name": "Email the Team",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2920,
+        260
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_SMTP_CREDENTIAL_ID",
+          "name": "Diversity Roofing SMTP"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "trigger-subworkflow",
+      "name": "Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        60,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Two ways in\n\n**Schedule** — the normal Mon/Wed/Fri run.\n\n**Called by another workflow** — workflow 02 enqueues a job-completion post with `scheduledFor: now`, then calls this workflow so it goes out immediately. One publisher, many producers: the Meta and Google API mechanics live here and nowhere else.",
+        "height": 240,
+        "width": 340,
+        "color": 7
+      },
+      "id": "note-entry",
+      "name": "Entry points",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        260
+      ]
+    }
+  ],
+  "connections": {
+    "Mon/Wed/Fri 9am ET": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Due Posts": {
+      "main": [
+        [
+          {
+            "node": "Expand Into Platform Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Into Platform Jobs": {
+      "main": [
+        [
+          {
+            "node": "Caption Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Caption Needed?": {
+      "main": [
+        [
+          {
+            "node": "Write Caption (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Use Human-Written Caption",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Caption (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Parse Caption",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Caption": {
+      "main": [
+        [
+          {
+            "node": "All Captions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Use Human-Written Caption": {
+      "main": [
+        [
+          {
+            "node": "All Captions",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "All Captions": {
+      "main": [
+        [
+          {
+            "node": "Florida Compliance Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Florida Compliance Gate": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Gate": {
+      "main": [
+        [
+          {
+            "node": "Cleared to Publish?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleared to Publish?": {
+      "main": [
+        [
+          {
+            "node": "Route by Platform",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Hold Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Hold Notice": {
+      "main": [
+        [
+          {
+            "node": "Report Hold to CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Hold to CRM": {
+      "main": [
+        [
+          {
+            "node": "Email the Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Platform": {
+      "main": [
+        [
+          {
+            "node": "Publish to Facebook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create IG Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Publish Google Business Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish to Facebook": {
+      "main": [
+        [
+          {
+            "node": "Normalise Publish Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create IG Container": {
+      "main": [
+        [
+          {
+            "node": "Wait for Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Container": {
+      "main": [
+        [
+          {
+            "node": "Check Container Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Container Status": {
+      "main": [
+        [
+          {
+            "node": "Container Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Container Ready?": {
+      "main": [
+        [
+          {
+            "node": "Publish IG Media",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait Longer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait Longer": {
+      "main": [
+        [
+          {
+            "node": "Publish IG Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish IG Media": {
+      "main": [
+        [
+          {
+            "node": "Normalise Publish Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Google Business Post": {
+      "main": [
+        [
+          {
+            "node": "Normalise Publish Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise Publish Result": {
+      "main": [
+        [
+          {
+            "node": "Report Result to CRM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Get Due Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
