@@ -125,12 +125,20 @@ def test_hard_red_flags_recompute_the_prompt_rules_from_the_data():
     assert "bundling" in hard_red_flags(_ctx(flow={"max_same_size_cluster_wallets": 5}))[0]
     assert "bundling" in hard_red_flags(_ctx(flow={"bundle_like_share_of_launch_minute": 0.21}))[0]
     assert hard_red_flags(_ctx(flow={"bundle_like_share_of_launch_minute": 0.1667, "same_slot_as_launch_buyers": 2})) == []
-    still = {"sniper_top3_share_of_launch_minute": 0.5572, "snipers_still_holding": "2/3"}            # CLOVER
+    still = {"sniper_top3_sol": 22.631, "net_inflow_sol": 40.0, "snipers_still_holding": "2/3"}       # CLOVER: 57%
     assert "snipers" in hard_red_flags(_ctx(flow=still))[0]
-    gone = {"sniper_top3_share_of_launch_minute": 0.586, "snipers_still_holding": "0/3"}
+    gone = {"sniper_top3_sol": 49.175, "net_inflow_sol": 83.9, "snipers_still_holding": "0/3"}
     assert hard_red_flags(_ctx(flow=gone)) == []                                                      # exited: no flag
-    assert "snipers" in hard_red_flags(_ctx(flow={"sniper_top3_sol": 1.309, "launch_minute_buy_sol": 2.567,
-                                                   "snipers_still_holding": "1/3"}))[0]               # TRUMPCAT
+    # the launch minute's own share is not the test: three of six early buyers holding 68% of a 1.9 SOL
+    # minute on a token that has since taken 20 SOL is an ordinary launch (review of aaf789b)
+    ordinary = {"sniper_top3_sol": 1.3, "launch_minute_buy_sol": 1.9, "sniper_top3_share_of_launch_minute": 0.6842,
+                "net_inflow_sol": 20.0, "snipers_still_holding": "1/3"}
+    assert hard_red_flags(_ctx(flow=ordinary)) == []
+    assert hard_red_flags(_ctx(flow={"sniper_top3_share_of_launch_minute": 0.9, "snipers_still_holding": "3/3"})) == []
+    assert "snipers" in hard_red_flags(_ctx(flow={"sniper_top3_sol": 1.309, "snipers_still_holding": "1/3"},
+                                            live={"net_inflow_sol": 3.0}))[0]                          # 44% of inflow
+    assert "snipers" in hard_red_flags(_ctx(flow={"sniper_top3_share": 0.31, "snipers_still_holding": "1/3"}))[0]
+    assert hard_red_flags(_ctx(flow={"sniper_top3_share": 0.30, "snipers_still_holding": "3/3"})) == []
     assert "rugcheck" in hard_red_flags(_ctx(rug={"risks": [{"name": "Creator history of rugged tokens",
                                                               "level": "danger"}]}))[0]
     assert hard_red_flags(_ctx(rug={"risks": [{"name": "Low Liquidity", "level": "warn"}]})) == []

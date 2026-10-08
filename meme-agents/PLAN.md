@@ -214,7 +214,9 @@ Added after the build, when research showed a change in PumpPortal's data API:
     Haiku skipped CATE for "effective holders 12.5, well below the threshold of 10" and NOBO for
     dev selling plus zero retention, the exact pair the prompt demotes to weak signals. A model
     reading a number backwards cannot be prompted away, so `hard_red_flags()` recomputes the
-    prompt's deterministic flags (rugged creator history, snipers above a third and still holding,
+    prompt's deterministic flags (rugged creator history, the top three launch-minute buyers holding
+    a third or more of the token's whole net inflow and still in (their share of the launch minute
+    itself is always large and is not the test),
     bundling, fewer than 10 effective buyers or holders, five-minute net flow turning negative or
     drawdown beyond 40%, buyers or inflow 30% below the pre-filter scan) from the same fields the
     model saw, leniently and never from a null. A PASS with none of them becomes a BUY with the

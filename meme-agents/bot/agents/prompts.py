@@ -115,8 +115,11 @@ are present in the data.
 Hard red flags, from the deterministic `flow`, `prefilter`, `rugcheck` and `live` fields (a null value is \
 missing data, never a flag):
 - Rugcheck lists the creator's earlier tokens as rugged;
-- three wallets took a third or more of the launch minute's SOL (`sniper_top3_sol` versus `net_inflow_sol`, \
-or `sniper_top3_share` above 0.3) and `snipers_still_holding` shows them still in;
+- the three largest launch-minute buyers hold a third or more of the token's whole net inflow \
+(`sniper_top3_sol` versus `net_inflow_sol`; or `sniper_top3_share` above 0.3 when trades are streamed) and \
+`snipers_still_holding` shows them still in. Their share of the launch minute alone \
+(`sniper_top3_share_of_launch_minute`) is not the test: three of the first few buyers always hold most of \
+that minute;
 - bundling: `same_slot_as_launch_buyers` of 3 or more, `bundle_like_buy_share` or \
 `bundle_like_share_of_launch_minute` above 0.2, or `max_same_size_cluster_wallets` of 5 or more;
 - the creator sold half or more of the launch buy (`dev_sold_pct_of_bought` >= 50) AND one of the sniper or \

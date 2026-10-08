@@ -61,14 +61,18 @@ def hard_red_flags(ctx: dict) -> list[str]:
         if "rugged" in str(r.get("name", "")).lower():
             flags.append(f"rugcheck: {r.get('name')}")
             break
-    share = max((v for v in (_num(flow, "sniper_top3_share"), _num(flow, "sniper_top3_share_of_launch_minute"))
-                 if v is not None), default=None)
+    # The prompt's sniper rule: the top three launch-minute buyers' SOL against the token's whole net
+    # inflow (chain mode), or `sniper_top3_share` (streamed mode: their share of all buying since
+    # launch). The launch minute's own total is NOT the denominator: three of the first handful of
+    # buyers always hold most of that minute (review of aaf789b: 0.5-0.7 on ordinary launches), so
+    # `sniper_top3_share_of_launch_minute` and `launch_minute_buy_sol` are deliberately not used.
+    share = _num(flow, "sniper_top3_share")
     top3 = _num(flow, "sniper_top3_sol")
-    base = _num(flow, "launch_minute_buy_sol") or _num(live, "net_inflow_sol") or _num(pf, "net_inflow_sol")
-    sol_share = top3 / base if top3 is not None and base else None
+    inflow = _num(flow, "net_inflow_sol") or _num(live, "net_inflow_sol") or _num(pf, "net_inflow_sol")
+    sol_share = top3 / inflow if top3 is not None and inflow else None
     concentrated = (share is not None and share > 0.3) or (sol_share is not None and sol_share >= 1 / 3)
     if concentrated and _holding_count(flow.get("snipers_still_holding")) >= 1:
-        flags.append(f"snipers: top3 share {share if share is not None else round(sol_share, 3)}, "
+        flags.append(f"snipers: top3 share {share if share is not None else round(sol_share, 3)} of net inflow, "
                      f"still holding {flow.get('snipers_still_holding')}")
     same_slot = _num(flow, "same_slot_as_launch_buyers")
     bundle = max((v for v in (_num(flow, "bundle_like_buy_share"), _num(flow, "bundle_like_share_of_launch_minute"))
