@@ -192,7 +192,10 @@ Added after the build, when research showed a change in PumpPortal's data API:
     A Scout or Hunter BUY between 0.6 and 0.7 on evidence the matcher cannot credit (DESK95, 8 Oct:
     Scout at 0.62 on "one link-only post", counts of 0 and 1 that the matcher ignores) is held to
     the neutral 0.6 instead of flipped to PASS: the unverified part is the extra confidence, not
-    the look. From 0.7 up a BUY claims attention or a catalyst and is guarded in full.
+    the look. From 0.7 up a BUY claims attention or a catalyst and is guarded in full. Scout's PASS
+    is for a bot *pattern* (Pao, 8 Oct: eight signal bots in three minutes); one or two automated
+    listing posts are the background every launch gets and leave the vote neutral (CUSTOM, 8 Oct,
+    was a PASS on one such post; the Analyst's PASS was the one that mattered).
 29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
     force their single tool with `tool_choice`, and a committee agent is forced to call
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before

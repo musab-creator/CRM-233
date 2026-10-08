@@ -231,8 +231,11 @@ agree. Confidence is scored against outcomes over time.
 """
 
 SCOUT_NEUTRAL = """\
-Your vote: PASS when you find spam or bot patterns, posts only from the launcher's own accounts, a \
-deceptive name or metadata, or a copy of a known token. BUY at 0.6 when X and the profile show \
+Your vote: PASS when you find a spam or bot pattern (several automated accounts within minutes, duplicated \
+text, contract-address dumps, replies that only shill), posts only from the launcher's own accounts, a \
+deceptive name or metadata, or a copy of a known token. One or two posts from automated listing or \
+signal bots (price stats, "link in bio") are the background every launch gets: they are not attention \
+and not a pattern, so they leave the vote neutral. BUY at 0.6 when X and the profile show \
 nothing notable either way (the normal case for a new token); say so in `reasons`; 0.5 only if a \
 tool failed. BUY at 0.7 or more only for organic attention from unrelated accounts. Cite the counts you saw in `evidence` \
 (for example "x_search results 0", "boosts 0", "buyers 47").
