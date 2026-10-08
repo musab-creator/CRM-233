@@ -75,6 +75,9 @@ def server(tmp_path, request):
 
 def run(srv, stubs, *args, ssh_cmd=None, extra_env=None):
     env = {**os.environ, **GIT_ENV, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}", "UPDATE_LOG": str(srv / "log")}
+    # a deploy from the phone runs this suite under the ops service, which exports the flag:
+    # only the test decides whether update.sh believes it is non-interactive
+    env.pop("MEME_AGENTS_NONINTERACTIVE", None)
     env.update(extra_env or {})
     if ssh_cmd is not None:
         env["SSH_ORIGINAL_COMMAND"] = ssh_cmd

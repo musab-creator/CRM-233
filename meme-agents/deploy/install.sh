@@ -94,7 +94,8 @@ if [ ! -f .env ]; then
   echo "created .env from .env.example: add your keys (KEYS.md says where to get each one)"
 fi
 chmod 600 .env
-"$VENV_DIR/bin/python" -m pytest -q
+# the suite checks update.sh in both modes itself; a deploy from the phone must not leak the ops service's flag into it
+env -u MEME_AGENTS_NONINTERACTIVE "$VENV_DIR/bin/python" -m pytest -q
 fi
 
 if [ "$SYSTEMD" = 1 ]; then
