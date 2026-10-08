@@ -177,7 +177,8 @@ def test_queue_round_trip_and_the_executor_checks_again(tmp_path, _isolated):
     done = {r["id"]: r for r in ops.watch_once(s, runner)}
     assert sorted(done) == ["../../escaped", "1-set", "2-shell", "3-restart", "4-update", "7-args", "8-ts", "9-list", "a-min"]
     assert [r["ok"] for r in done.values()].count(True) == 1 and done["../../escaped"]["ok"]
-    assert [a for a, _ in runner.calls] == [["bash", str(s.path(".") / "deploy" / "update.sh")]]
+    # nothing ran but update.sh (plus a read of the bot's state afterwards)
+    assert [a for a, _ in runner.calls if a[:2] != ["systemctl", "show"]] == [["bash", str(s.path(".") / "deploy" / "update.sh")]]
     assert "cannot be changed from the phone" in done["1-set"]["output"]
     assert "unknown action" in done["2-shell"]["output"]
     assert "already 10 min old when the ops service came up" in done["3-restart"]["output"]
@@ -221,7 +222,8 @@ def test_requests_made_while_the_service_runs_never_expire(tmp_path, monkeypatch
     [res] = ops.watch_once(s, runner, since=ops.service_up_since(s))   # the next round picks the restart up
     assert res["action"] == "restart" and res["ok"], res["output"]
     assert res["started"] - t0 >= ops.TIMEOUT_S["update"] and res["started"] - ops.MAX_REQUEST_AGE_S > t0 + 300
-    assert [a[0] for a, _ in runner.calls] == ["bash", "sudo", "systemctl"]
+    # update.sh, a read of the bot's state after it, then the restart and its settle check
+    assert [a[0] for a, _ in runner.calls] == ["bash", "systemctl", "sudo", "systemctl"]
     # a request made before the service came up, and long before, is the one that is refused
     (ops.ops_dir(s) / "0-old.request").write_text(json.dumps({"id": "0-old", "action": "restart", "args": {},
                                                                "ts": t0 - ops.MAX_REQUEST_AGE_S - 1}))
@@ -783,3 +785,40 @@ def test_no_new_privs_is_read_reported_and_fails_a_restart_at_once(tmp_path, _is
     # the watcher writes that file itself at start (this process has no such flag)
     info = ops.write_info(s)
     assert info["pid"] == os.getpid() and ops.watcher_info(s)["no_new_privs"] in (False, None)
+
+
+def test_update_starts_a_bot_that_had_crashed_but_leaves_a_stopped_one_alone(tmp_path, _isolated):
+    """update.sh leaves a bot that was not running as it found it. The rescue's /update runs while
+    the bot is down (crashed, or refused to start): that one must come back on the new code."""
+    s = _settings(tmp_path)
+    update = ["bash", str(s.path(".") / "deploy" / "update.sh")]
+    restart = ["sudo", "-n", "systemctl", "restart", "meme-agents"]
+
+    ops.request(s, "update", who="telegram-rescue")
+    runner = FakeRunner(_isolated, states=["failed", "active"])
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"], res["output"]
+    assert [a for a, _ in runner.calls if a[:2] != ["systemctl", "show"]] == [update, restart]
+    assert "the bot was down before the update (failed); starting it on the new code" in res["output"]
+
+    ops.request(s, "update")
+    runner = FakeRunner(_isolated, states=["inactive"])             # stopped on purpose: stays stopped
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"] and [a for a, _ in runner.calls if a[:2] != ["systemctl", "show"]] == [update]
+    assert "starting it" not in res["output"]
+
+    ops.request(s, "update")
+    plain = FakeRunner(_isolated)
+
+    def failing(argv, timeout, cwd, tick=None):
+        if argv[-1].endswith("update.sh"):
+            plain.calls.append((argv, timeout))
+            return 1, "deployment failed; restoring the previous code and environment"
+        return plain(argv, timeout, cwd, tick)
+    [res] = ops.watch_once(s, failing)
+    assert not res["ok"] and res["code"] == 1 and [a for a, _ in plain.calls] == [update]   # no state read, no restart
+
+    ops.request(s, "update")
+    runner = FakeRunner(_isolated, states=["failed", "failed"])     # the new code does not start either
+    [res] = ops.watch_once(s, runner)
+    assert not res["ok"] and "the bot is not active after the restart (failed)" in res["output"]

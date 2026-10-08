@@ -636,7 +636,16 @@ def _execute(s: Settings, req: dict, runner, started: float) -> dict:
     if action == "update":
         mark_pause()
         code = run(["bash", str(app / "deploy" / "update.sh")], TIMEOUT_S["update"])
-        return finish(code == 0, code)
+        if code != 0:
+            return finish(False, code)
+        # update.sh leaves a bot that was not running as it found it. One that had crashed or
+        # refused to start (systemd: failed) was not stopped on purpose: start it on the new code.
+        # This is the rescue's /update while the bot is down (bot/rescue.py).
+        if _unit_state(run_raw) != "failed":
+            return finish(True, 0)
+        out.append("the bot was down before the update (failed); starting it on the new code")
+        ok, code = _restart(s, run, run_raw, tick, out)
+        return finish(ok, code)
     if action == "set":
         backup_env(s)
         record_change(s, args["key"])
@@ -658,6 +667,13 @@ def _execute(s: Settings, req: dict, runner, started: float) -> dict:
     mark_pause()
     ok, code = _restart(s, run, run_raw, tick, out)
     return finish(ok, code)
+
+
+def _unit_state(run_raw) -> str:
+    """The bot unit's ActiveState now, in one read ("unknown" when systemctl cannot say)."""
+    code, text = run_raw(["systemctl", "show", "-p", "ActiveState", "--value", SERVICE], 20)
+    text = (text or "").strip()
+    return text.splitlines()[-1].strip() if code == 0 and text else "unknown"
 
 
 def _settle(run_raw, tick, limit: float = RESTART_SETTLE_S) -> str:
