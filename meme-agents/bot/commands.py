@@ -54,7 +54,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("report", "the full report, all time and today"),
     ("trades", "the last closed trades"),
     ("why", "/why [id]: every vote on the latest decision (or candidate #id) with its reasons"),
-    ("log", "the last lines of the bot's log"),
+    ("log", "/log [n] [word]: the last n lines of the bot's log, or the last n that contain word"),
     ("settings", "the current settings (read-only)"),
     ("pause", "no new entries; open positions keep running"),
     ("resume", "allow entries again (clears pause and the kill switch)"),
@@ -145,9 +145,17 @@ class TelegramCommands:
         if name == "why":
             return await self._why(int(arg) if arg.isdigit() else None), None
         if name == "log":
-            n = int(arg) if arg.isdigit() else 30
-            lines = tail_lines(self.s.path(self.s.LOG_FILE), max(5, min(80, n))) if self.s.LOG_FILE else []
-            return ("".join(lines).rstrip() or "no log file"), None
+            words = arg.split()
+            n = next((int(w) for w in words if w.isdigit()), 30)
+            needle = next((w.lower() for w in words if not w.isdigit()), None)
+            n = max(5, min(80, n))
+            if not self.s.LOG_FILE:
+                lines = []
+            elif needle:
+                lines = [ln for ln in tail_lines(self.s.path(self.s.LOG_FILE), 5000) if needle in ln.lower()][-n:]
+            else:
+                lines = tail_lines(self.s.path(self.s.LOG_FILE), n)
+            return ("".join(lines).rstrip() or ("no log file" if not self.s.LOG_FILE else f"nothing matches {needle}")), None
         if name == "settings":
             vals = [f"{k}={getattr(self.s, k)}" for k in SHOWN_SETTINGS if hasattr(self.s, k)]
             return ("current settings (running values; /set changes the operational ones, keys and the live-mode "

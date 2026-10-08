@@ -223,3 +223,27 @@ def test_why_lists_every_fill_and_flags_the_spike(tmp_path):
     assert "⚠️ price spike: nearest stored trade buy 0.6000 SOL / 500 tokens = 1.200e-03 (pump)" in spiked
     assert "trailing stop @ 1.310e-06 (x0.8851 entry)" in spiked and spiked.count("⚠️") == 1
     assert "stop loss @ 6.000e-08 (x0.6 entry)" in real and "⚠️" not in real
+
+
+def test_log_filters_by_word(tmp_path):
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _msg, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path, LOG_FILE=str(tmp_path / "bot.log"))
+    (tmp_path / "bot.log").write_text("".join(
+        f"line {i}" + (" holding curve mark 1.4e-03\n" if i % 10 == 0 else "\n") for i in range(100)))
+    http = FakeHttp([[_msg(1, "/log 3 HOLDING"), _msg(2, "/log holding 3"), _msg(3, "/log 5"), _msg(4, "/log nope")]])
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await TelegramCommands(Telegram(http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s).poll_once()
+        finally:
+            await db.close()
+    asyncio.run(go())
+    sent = [j["text"] for m, j in http.posts if m == "sendMessage"]
+    # n is clamped to at least 5, as the plain /log always was
+    assert sent[0] == "\n".join(f"line {i} holding curve mark 1.4e-03" for i in (50, 60, 70, 80, 90))
+    assert sent[1] == sent[0]
+    assert sent[2] == "line 95\nline 96\nline 97\nline 98\nline 99"
+    assert sent[3] == "nothing matches nope"
