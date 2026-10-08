@@ -111,3 +111,41 @@ def test_status_names_the_cause_of_agent_errors(tmp_path):
     text = asyncio.run(run())
     assert "agent errors today: budget 2 (" in text
     assert "scout=PASS/0.00(err:budget)" in text and "hunter=PASS/0.60 " in text
+
+
+def test_why_shows_every_vote_with_its_reasons_and_the_shadow_outcome(tmp_path):
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _msg, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+    http = FakeHttp([[_msg(1, "/why"), _msg(2, "/why 999"), _msg(3, "/why 1")]])
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "M" * 32, "symbol": "DESK95", "created_at": now_s() - 9000})
+            cid = await db.insert("candidates", {"mint": "M" * 32, "ts": now_s() - 8000, "metrics": "{}",
+                                                 "status": "evaluated", "decision": "PASS", "mean_confidence": 0.65,
+                                                 "gate_reason": "PASS from scout(guard: BUY evidence grounding 0.31 < 0.5)"})
+            await db.insert("votes", {"candidate_id": cid, "mint": "M" * 32, "agent": "analyst", "vote": "BUY",
+                                      "confidence": 0.72, "reasons": ["Rugcheck score 1, creator still holds 2%"],
+                                      "ts": now_s()})
+            await db.insert("votes", {"candidate_id": cid, "mint": "M" * 32, "agent": "scout", "vote": "PASS",
+                                      "confidence": 0.62, "guard": "BUY evidence grounding 0.31 < 0.5",
+                                      "reasons": ["Three posts from unrelated accounts", "no bot pattern"], "ts": now_s()})
+            await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": "M" * 32, "candidate_id": cid,
+                                          "creator": "C", "status": "closed", "size_usd": 5.0, "cost_sol": 0.04,
+                                          "proceeds_sol": 0.028, "pnl_usd": -1.5, "exit_reason": "stop_loss",
+                                          "opened_at": now_s() - 7000, "closed_at": now_s() - 1000})
+            tc = TelegramCommands(Telegram(http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            await tc.poll_once()
+        finally:
+            await db.close()
+    asyncio.run(go())
+    sent = [j["text"] for m, j in http.posts if m == "sendMessage"]
+    assert len(sent) == 3 and sent[0] == sent[2] and sent[1] == "no candidate #999"
+    text = sent[0]
+    assert text.startswith("#1 DESK95 " + "M" * 32) and "PASS (mean conf 0.65) · PASS from scout(guard" in text
+    assert "analyst: BUY 0.72\n  - Rugcheck score 1" in text
+    assert "scout: PASS 0.62 (guard: BUY evidence grounding 0.31 < 0.5)\n  - Three posts" in text
+    assert "shadow $5: -$1.50 (-30%) · stop loss · held" in text

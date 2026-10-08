@@ -133,7 +133,7 @@ def test_command_loop_sets_menu_and_stops(tmp_path):
     asyncio.run(go())
     assert http.posts[0][0] == "setMyCommands"
     assert [c["command"] for c in http.posts[0][1]["commands"]] == [
-        "panel", "status", "digest", "report", "trades", "log", "settings", "pause", "resume", "stop",
+        "panel", "status", "digest", "report", "trades", "why", "log", "settings", "pause", "resume", "stop",
         "update", "restart", "set", "dryrun", "ops", "help"]
 
 

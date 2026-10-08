@@ -57,7 +57,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
-| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
+| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/why [id]` (every vote on the latest decision, or candidate #id, with its reasons and what the shadow did), `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
 
 ## How a token moves through the pipeline
 
@@ -248,7 +248,7 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   - DEGRADED: the last 6 agent votes all failed, for example because the Anthropic key expired.
 - **Telegram control panel.** With Telegram set up, the bot long-polls its own messages (no open
   port). `/panel` shows buttons; the commands behind them are `/status`, `/digest` (this hour so
-  far), `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
+  far), `/report`, `/trades`, `/why [id]`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
   positions keep their exits), `/resume` (clears a Telegram pause and the STOP file, never the
   bot's own loss-cap pause), `/stop` (writes the STOP file) and `/help`, only from
   `TELEGRAM_CHAT_ID`. Commands from any other chat are logged and ignored; commands sent while

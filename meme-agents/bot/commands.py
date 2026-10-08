@@ -15,8 +15,10 @@ wallet cap, turn dry run off or touch a key: those stay in `.env` on the server.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import deque
+from datetime import datetime, timezone
 
 import httpx
 
@@ -51,6 +53,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("digest", "this hour so far: trades, open positions, spend"),
     ("report", "the full report, all time and today"),
     ("trades", "the last closed trades"),
+    ("why", "/why [id]: every vote on the latest decision (or candidate #id) with its reasons"),
     ("log", "the last lines of the bot's log"),
     ("settings", "the current settings (read-only)"),
     ("pause", "no new entries; open positions keep running"),
@@ -79,7 +82,7 @@ SHOWN_SETTINGS = (
     "REGIME_REFRESH_MIN", "TELEGRAM_DIGEST", "HELIUS_MONTHLY_CREDITS",
 )
 PANEL = [[("Status", "status"), ("Digest", "digest"), ("Report", "report")],
-         [("Trades", "trades"), ("Log", "log"), ("Settings", "settings")],
+         [("Trades", "trades"), ("Why", "why"), ("Log", "log"), ("Settings", "settings")],
          [("Pause", "pause"), ("Resume", "resume"), ("Stop", "confirm:stop")],
          [("Update", "confirm:update"), ("Restart", "confirm:restart"), ("Dry run ON", "confirm:dryrun")],
          [("Ops", "ops")]]
@@ -139,6 +142,8 @@ class TelegramCommands:
             return render_text(await build_report(self.db, self.s)), None
         if name == "trades":
             return await self._trades(10), None
+        if name == "why":
+            return await self._why(int(arg) if arg.isdigit() else None), None
         if name == "log":
             n = int(arg) if arg.isdigit() else 30
             lines = tail_lines(self.s.path(self.s.LOG_FILE), max(5, min(80, n))) if self.s.LOG_FILE else []
@@ -289,6 +294,54 @@ class TelegramCommands:
             out.append(f"{'✅' if pnl > 0 else '❌'} {usd(pnl)}{ret} {p['symbol'] or p['mint'][:6]} · "
                        f"{(p['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
         return "\n".join(out)
+
+    async def _why(self, cid: int | None) -> str:
+        """One decision in full: every vote with its first reasons, the gate's verdict, and what the
+        shadow position did afterwards. The status shows only votes and confidences; this is for
+        reading why the gate stays shut."""
+        if cid is None:
+            row = await self.db.fetchone("SELECT id FROM candidates WHERE decision IS NOT NULL ORDER BY ts DESC LIMIT 1")
+            if not row:
+                return "no decisions yet"
+            cid = row["id"]
+        c = await self.db.fetchone("SELECT c.*, m.symbol FROM candidates c LEFT JOIN mints m ON m.mint=c.mint "
+                                   "WHERE c.id=?", [cid])
+        if not c:
+            return f"no candidate #{cid}"
+        if not c["decision"]:
+            return f"#{cid} {c['symbol'] or ''} {c['mint']}: {c['status']}, no decision" + (
+                f" ({c['gate_reason']})" if c["gate_reason"] else "")
+        when = datetime.fromtimestamp(float(c["ts"]), timezone.utc).strftime("%Y-%m-%d %H:%M")
+        lines = [f"#{cid} {c['symbol'] or '?'} {c['mint']}",
+                 f"{when}Z: {c['decision']} (mean conf {float(c['mean_confidence'] or 0):.2f}) · {c['gate_reason']}"]
+        votes = await self.db.fetchall("SELECT agent, vote, confidence, guard, error, reasons FROM votes "
+                                       "WHERE candidate_id=? ORDER BY id", [cid])
+        for v in votes:
+            reasons = v["reasons"]
+            if isinstance(reasons, str):
+                try:
+                    reasons = json.loads(reasons)
+                except ValueError:
+                    reasons = [reasons]
+            head = f"{v['agent']}: {v['vote']} {float(v['confidence'] or 0):.2f}"
+            if v["guard"]:
+                head += f" (guard: {v['guard']})"
+            if v["error"]:
+                head += f" (error: {str(v['error'])[:100]})"
+            lines.append(head)
+            lines += [f"  - {str(r)[:220]}" for r in (reasons or [])[:2]]
+        shadow = await self.db.fetchone("SELECT status, size_usd, cost_sol, proceeds_sol, pnl_usd, exit_reason, "
+                                        "opened_at, closed_at FROM positions WHERE candidate_id=? AND kind='shadow' "
+                                        "ORDER BY id DESC LIMIT 1", [cid])
+        if shadow and shadow["status"] == "closed":
+            ret = (f" ({(float(shadow['proceeds_sol'] or 0) / shadow['cost_sol'] - 1) * 100:+.0f}%)"
+                   if shadow["cost_sol"] else "")
+            held = fmt_hold((shadow["closed_at"] or 0) - (shadow["opened_at"] or shadow["closed_at"] or 0))
+            lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {usd(float(shadow['pnl_usd'] or 0))}{ret} · "
+                         f"{(shadow['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
+        elif shadow:
+            lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {shadow['status']}")
+        return redact("\n".join(lines))
 
     # --- polling -----------------------------------------------------------------------
     def _authorized(self, chat: str, cmd: str, who: str) -> bool:
