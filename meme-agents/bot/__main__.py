@@ -239,10 +239,17 @@ def main(argv: list[str] | None = None) -> int:
             print(redact(f"config error: {e}"), file=sys.stderr)
             return 2
         # The ops service must stay up on a broken .env: a /set from the phone is how it gets repaired.
-        from .config import Settings
-        print(redact(f"config error: {e}; the ops service runs with default paths so that /set can repair .env"),
+        from .config import ROOT, Settings, load_dotenv
+        print(redact(f"config error: {e}; the ops service runs with default settings so that /set can repair .env"),
               file=sys.stderr)
         s = Settings()
+        try:                                    # the paths still come from .env, so the queue is where the bot looks
+            raw = load_dotenv(ROOT / ".env")
+            for name in ("DB_PATH", "LOG_FILE", "STOP_FILE", "REPORTS_DIR"):
+                if raw.get(name):
+                    setattr(s, name, raw[name])
+        except ConfigError:
+            pass
     register_secrets(getattr(s, field.name) for field in fields(s) if not field.repr)
     # Only long-running commands write the log file.
     try:

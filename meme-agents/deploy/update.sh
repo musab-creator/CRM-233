@@ -77,7 +77,8 @@ cleanup() {
 }
 rollback() {
   code=$?
-  trap - ERR
+  [ "$code" != 0 ] || code=1
+  trap - ERR TERM INT HUP
   set +e
   echo "deployment failed; restoring the previous code and environment" >&2
   restore_failed=0
@@ -98,7 +99,7 @@ rollback() {
   exit "$code"
 }
 trap cleanup EXIT
-trap rollback ERR
+trap rollback ERR TERM INT HUP   # a deadline from the ops service must restore, not just clean up
 git worktree add --quiet --detach "$STAGE" "$after"
 echo "validating $branch: ${before:0:12} -> ${after:0:12}"
 git log --oneline --no-decorate --max-count=20 "$before..$after"

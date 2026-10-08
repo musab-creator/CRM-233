@@ -20,7 +20,7 @@ from collections import deque
 
 import httpx
 
-from .config import Settings
+from .config import _FALSE, Settings
 from .db import Database
 from .digest import fmt_hold, hour_start, hourly_digest, usd
 from .ops import (
@@ -170,7 +170,7 @@ class TelegramCommands:
             if not notes:
                 return "nothing was paused; entries are allowed", None
             if notes[0].startswith("still paused"):
-                return notes[0] + " (a loss-cap pause ends with a restart of the service)", None
+                return notes[0] + " (/restart reset ends a loss-cap pause; a plain /restart keeps it)", None
             return "; ".join(notes) + ". New entries allowed again", None
         if name == "stop":
             path = self.s.path(self.s.STOP_FILE)
@@ -200,6 +200,8 @@ class TelegramCommands:
             key, sep, value = arg.partition("=")
             if not sep:
                 return "use /set KEY=VALUE; /set alone lists the keys and their limits", None
+            if key.strip().upper() == "LIVE_DRY_RUN" and value.strip().lower() not in _FALSE:
+                return await self.answer("dryrun", "on")         # same checks as /dryrun on (open positions)
             try:
                 value = validate_set(key, value, current_settings(self.s))
             except OpsError as e:
@@ -261,17 +263,16 @@ class TelegramCommands:
                 if res.get("ok") and res.get("action") == "set" and not args.get("restart"):
                     markup = keyboard([[("Restart now", "confirm:restart")]])
                 ok = await (self.tg.send(text, reply_markup=markup) if markup else self.tg.send_long(text))
+                if ok:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    sent += 1
+                elif now_s() - float(res.get("finished") or 0) > RESULT_GIVE_UP_S:
+                    quarantine(path, "Telegram kept refusing it")
             except Exception as e:                # a result file the bot cannot make sense of
                 quarantine(path, f"unreadable result: {type(e).__name__}: {e}")
-                continue
-            if ok:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                sent += 1
-            elif now_s() - float(res.get("finished") or 0) > RESULT_GIVE_UP_S:
-                quarantine(path, "Telegram kept refusing it")
         return sent
 
     async def _trades(self, n: int) -> str:

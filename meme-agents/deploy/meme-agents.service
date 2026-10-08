@@ -5,8 +5,9 @@
 #   sudo systemctl stop meme-agents        stop; open paper positions are kept and resumed
 #   journalctl -u meme-agents -f           follow the log (also in logs/bot.log)
 #
-# A daily-loss pause survives an unclean crash/watchdog restart. An intentional clean stop
-# followed by a start resets its baseline. Check `python -m bot status` before resuming.
+# A daily-loss pause survives an unclean crash/watchdog restart and a restart queued from
+# Telegram. An intentional clean stop from the shell followed by a start (or `/restart reset`)
+# resets its baseline. Check `python -m bot status` before resuming.
 
 [Unit]
 Description=meme-agents: pump.fun paper-trading bot gated by three Claude agents

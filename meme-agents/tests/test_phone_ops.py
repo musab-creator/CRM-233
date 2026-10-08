@@ -34,11 +34,14 @@ def _isolated(tmp_path, monkeypatch):
 
 
 class FakeRunner:
-    """Stands in for run_command: applies set-env.sh writes to the test .env, answers systemctl."""
+    """Stands in for run_command: applies set-env.sh writes to the test .env, answers systemctl
+    (`states` is one ActiveState answer per poll, the last one repeating), notes whether the
+    keep-pause marker was there when the restart ran, and what update.sh "printed"."""
 
-    def __init__(self, env, active=None, sudo_password=False, restart_code=0):
+    def __init__(self, env, states=("active",), sudo_password=False, restart_code=0, update_out="deployed abc123",
+                 marker=None):
         self.env, self.calls, self.sudo_password, self.restart_code = env, [], sudo_password, restart_code
-        self.active = list(active) if active is not None else [True] * 20   # one answer per is-active call
+        self.states, self.update_out, self.marker, self.marker_seen = list(states), update_out, marker, []
 
     def __call__(self, argv, timeout, cwd, tick=None):
         self.calls.append((argv, timeout))
@@ -49,11 +52,16 @@ class FakeRunner:
             lines = [ln for ln in self.env.read_text().splitlines() if not ln.startswith(key + "=")]
             self.env.write_text("\n".join([*lines, f"{key}={value}"]) + "\n")
             return 0, f"updated {key}\napply with: sudo systemctl restart meme-agents\n"
-        if argv[0] == "sudo":
-            return (1, "sudo: a password is required") if self.sudo_password else (self.restart_code, "")
-        if argv[:2] == ["systemctl", "is-active"]:
-            return (0, "active") if self.active.pop(0) else (3, "inactive")
-        return 0, "deployed abc123"
+        if argv[0] == "sudo" or argv[-1].endswith("update.sh"):
+            if self.marker is not None:
+                self.marker_seen.append(self.marker.exists())
+            if argv[0] == "sudo":
+                return (1, "sudo: a password is required") if self.sudo_password else (self.restart_code, "")
+            return 0, self.update_out
+        if argv[:3] == ["systemctl", "show", "-p"]:
+            state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            return 0, state + "\n"
+        return 0, ""
 
 
 def test_settable_allowlist_and_bounds(tmp_path):
@@ -167,13 +175,14 @@ def test_queue_round_trip_and_the_executor_checks_again(tmp_path, _isolated):
     assert [a for a, _ in runner.calls] == [["bash", str(s.path(".") / "deploy" / "update.sh")]]
     assert "cannot be changed from the phone" in done["1-set"]["output"]
     assert "unknown action" in done["2-shell"]["output"]
-    assert "already 10 min old when the ops service first saw it" in done["3-restart"]["output"]
+    assert "already 10 min old when the ops service came up" in done["3-restart"]["output"]
     assert "interrupted" in done["4-update"]["output"] and not (d / "4-update.running").exists()
     assert "args must be an object" in done["7-args"]["output"] and "args must be an object" in done["9-list"]["output"]
     assert "min old" in done["8-ts"]["output"]
     assert "POSITION_MIN_USD=16 refused: POSITION_MIN_USD must not exceed POSITION_MAX_USD" in done["a-min"]["output"]
     assert (d / "6-escape.result").exists() and not list(tmp_path.parent.glob("escaped.result"))
-    assert not list(tmp_path.glob("*.result")) and not (d / "1-set.request").exists() and (d / "5-junk.request").exists()
+    assert not list(tmp_path.glob("*.result")) and not (d / "1-set.request").exists()
+    assert not (d / "5-junk.request").exists() and (d / "5-junk.request.bad").exists()   # set aside, once
     assert ops.format_result(done["3-restart"]).startswith("❌ restart failed")
     assert ops.watch_once(s, runner) == []                                 # nothing left, nothing re-run
     nothing = {"action": "update", "args": {}, "ok": True, "output": "already at abc on main; nothing to do",
@@ -185,23 +194,39 @@ def test_queue_round_trip_and_the_executor_checks_again(tmp_path, _isolated):
     assert ops.format_result(weird).startswith("✅ set None=None") and ops.describe(weird) == "set None=None"
 
 
-def test_requests_wait_behind_a_long_update_without_expiring(tmp_path, monkeypatch, _isolated):
+def test_requests_made_while_the_service_runs_never_expire(tmp_path, monkeypatch, _isolated):
     s = _settings(tmp_path)
-    clock = [1_700_000_000.0]
+    t0 = 1_700_000_000.0
+    clock = [t0]
     monkeypatch.setattr(ops, "now_s", lambda: clock[0])
     ops.request(s, "update")
-    ops.request(s, "restart")
     runner = FakeRunner(_isolated)
 
     def slow(argv, timeout, cwd, tick=None):
         if argv[-1].endswith("update.sh"):
-            clock[0] += ops.TIMEOUT_S["update"]                        # a 25-minute build and test
+            clock[0] += 300                                           # five minutes in, the phone sends /restart
+            ops.request(s, "restart")
+            clock[0] += ops.TIMEOUT_S["update"] - 300                 # ... and the build runs 20 more minutes
         return runner(argv, timeout, cwd, tick)
 
-    done = ops.watch_once(s, slow)
-    assert [r["action"] for r in done] == ["update", "restart"] and all(r["ok"] for r in done)
+    since = ops.service_up_since(s)
+    assert since == t0
+    done = ops.watch_once(s, slow, since=since)
+    assert [r["action"] for r in done] == ["update"] and done[0]["ok"]
+    [res] = ops.watch_once(s, runner, since=ops.service_up_since(s))   # the next round picks the restart up
+    assert res["action"] == "restart" and res["ok"], res["output"]
+    assert res["started"] - t0 >= ops.TIMEOUT_S["update"] and res["started"] - ops.MAX_REQUEST_AGE_S > t0 + 300
     assert [a[0] for a, _ in runner.calls] == ["bash", "sudo", "systemctl"]
-    assert done[1]["started"] - ops.pending.__globals__["MAX_REQUEST_AGE_S"] > done[1]["finished"] - 2000  # it did wait
+    # a request made before the service came up, and long before, is the one that is refused
+    (ops.ops_dir(s) / "0-old.request").write_text(json.dumps({"id": "0-old", "action": "restart", "args": {},
+                                                               "ts": t0 - ops.MAX_REQUEST_AGE_S - 1}))
+    [res] = ops.watch_once(s, runner, since=t0)
+    assert not res["ok"] and "it was not running when it was made" in res["output"]
+    # ... while one made just before it came up still runs
+    (ops.ops_dir(s) / "1-recent.request").write_text(json.dumps({"id": "1-recent", "action": "restart", "args": {},
+                                                                  "ts": t0 - 60}))
+    [res] = ops.watch_once(s, runner, since=t0)
+    assert res["ok"]
 
 
 def test_a_set_the_bot_will_not_load_is_reverted_before_any_restart(tmp_path, _isolated):
@@ -219,34 +244,47 @@ def test_a_set_the_bot_will_not_load_is_reverted_before_any_restart(tmp_path, _i
     assert ops.format_result(res).startswith("❌ set LLM_DAILY_BUDGET_USD=7 failed")
 
 
-def test_a_restart_the_bot_does_not_survive_reverts_the_last_change(tmp_path, _isolated):
+def test_a_restart_the_bot_does_not_survive_undoes_that_one_key(tmp_path, _isolated):
     s = _settings(tmp_path, MODE="live", LIVE_DRY_RUN="false")
-    original = _isolated.read_text()
+    # dry run is never undone, whatever the restart does: the boundary is one way
     ops.request(s, "set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True})
-    runner = FakeRunner(_isolated, active=[False, False, True])         # down, still down after settling, up on revert
+    runner = FakeRunner(_isolated, states=["failed"])
     [res] = ops.watch_once(s, runner)
     assert not res["ok"] and ops.describe(res) == "dry run ON"
-    assert [a[0] for a, _ in runner.calls] == ["bash", "sudo", "systemctl", "systemctl", "sudo", "systemctl"]
-    assert "the previous .env is restored and the bot restarted again" in res["output"]
-    assert "the bot is active again on the previous settings" in res["output"]
-    assert _isolated.read_text() == original
-    # a plain /restart after a plain /set behaves the same while the backup is fresh ...
+    assert [a[0] for a, _ in runner.calls] == ["bash", "sudo", "systemctl"]
+    assert "LIVE_DRY_RUN stays on" in res["output"] and "LIVE_DRY_RUN=true" in _isolated.read_text()
+    # a /set the bot will not start on: that key goes back, hand edits made in between stay
     ops.request(s, "set", {"key": "POSITION_MAX_USD", "value": "12"})
-    runner = FakeRunner(_isolated, active=[False, False, True])
-    [res] = ops.watch_once(s, runner)
-    assert res["ok"] and "POSITION_MAX_USD=12" in _isolated.read_text()
+    [res] = ops.watch_once(s, FakeRunner(_isolated))
+    assert res["ok"] and "POSITION_MAX_USD=12" in _isolated.read_text() and (ops.ops_dir(s) / "env.change.json").exists()
+    _isolated.write_text(_isolated.read_text() + "HELIUS_API_KEY=rotated-by-hand\n")
     ops.request(s, "restart")
+    runner = FakeRunner(_isolated, states=["failed", "active"])
     [res] = ops.watch_once(s, runner)
-    assert not res["ok"] and "previous .env is restored" in res["output"] and _isolated.read_text() == original
-    # ... and not once the backup is old or equal to .env
+    assert not res["ok"] and "POSITION_MAX_USD is put back to 10 and the bot restarted again" in res["output"]
+    assert "the bot is active again with POSITION_MAX_USD=10" in res["output"]
+    assert [a for a, _ in runner.calls][2] == [*SET_ENV, "POSITION_MAX_USD=10"]
+    assert [a[0] for a, _ in runner.calls] == ["sudo", "systemctl", "bash", "sudo", "systemctl"]
+    assert "POSITION_MAX_USD=10" in _isolated.read_text() and "HELIUS_API_KEY=rotated-by-hand" in _isolated.read_text()
+    assert not (ops.ops_dir(s) / "env.change.json").exists()
+    # a /set the bot already started on is retired: a later failing restart does not touch it
+    ops.request(s, "set", {"key": "POSITION_MAX_USD", "value": "14", "restart": True})
+    [res] = ops.watch_once(s, FakeRunner(_isolated, states=["activating", "activating", "active"]))
+    assert res["ok"] and "POSITION_MAX_USD=14" in _isolated.read_text()
     ops.request(s, "restart")
-    runner = FakeRunner(_isolated, active=[False, False])
+    runner = FakeRunner(_isolated, states=["failed"])
     [res] = ops.watch_once(s, runner)
-    assert not res["ok"] and "previous .env is restored" not in res["output"] and "not active after the restart" in res["output"]
-    assert [a[0] for a, _ in runner.calls] == ["sudo", "systemctl", "systemctl"]
-    # a restart whose command timed out but whose bot is up is a success, with a note
+    assert not res["ok"] and "put back" not in res["output"] and "not active after the restart (failed)" in res["output"]
+    assert [a[0] for a, _ in runner.calls] == ["sudo", "systemctl"] and "POSITION_MAX_USD=14" in _isolated.read_text()
+    # a key that was not in .env before goes back to the bot's default
+    ops.request(s, "set", {"key": "TRAILING_STOP_PCT", "value": "40", "restart": True})
+    runner = FakeRunner(_isolated, states=["failed", "active"])
+    [res] = ops.watch_once(s, runner)
+    assert not res["ok"] and "TRAILING_STOP_PCT is put back to 30" in res["output"]
+    assert "TRAILING_STOP_PCT=30" in _isolated.read_text()
+    # systemd still retrying ("activating") is not a failure yet, and a timed-out command whose bot is up is a success
     ops.request(s, "restart")
-    runner = FakeRunner(_isolated, restart_code=124)
+    runner = FakeRunner(_isolated, states=["activating", "activating", "activating", "active"], restart_code=124)
     [res] = ops.watch_once(s, runner)
     assert res["ok"] and "reported an error but the bot is active" in res["output"]
     # no password, no retry loop: fail at once with the sudoers hint
@@ -255,6 +293,50 @@ def test_a_restart_the_bot_does_not_survive_reverts_the_last_change(tmp_path, _i
     [res] = ops.watch_once(s, runner)
     assert not res["ok"] and res["code"] == 1 and [a[0] for a, _ in runner.calls] == ["sudo"]
     assert "sudoers line" in ops.format_result(res)
+    # a planted change record undoes nothing it is not allowed to
+    (ops.ops_dir(s) / "env.change.json").write_text(json.dumps({"key": "MODE", "previous": "paper", "ts": now_s()}))
+    assert ops.last_change(s) is None
+    (ops.ops_dir(s) / "env.change.json").write_text(json.dumps({"key": "POSITION_MAX_USD", "previous": "99", "ts": now_s()}))
+    assert ops.last_change(s) is None
+
+
+def test_a_set_whose_write_fails_restores_the_backup(tmp_path, _isolated):
+    s = _settings(tmp_path)
+    original = _isolated.read_text()
+    ops.request(s, "set", {"key": "LLM_DAILY_BUDGET_USD", "value": "7"})
+
+    def cut_short(argv, timeout, cwd, tick=None):
+        _isolated.write_text("POSITION_MIN")                     # truncated mid-write, then the process died
+        return 137, ""
+
+    [res] = ops.watch_once(s, cut_short)
+    assert not res["ok"] and "the write did not complete; the previous .env is restored" in res["output"]
+    assert _isolated.read_text() == original and not (ops.ops_dir(s) / "env.change.json").exists()
+
+
+def test_the_keep_pause_marker_exists_only_while_the_restart_runs(tmp_path, _isolated):
+    s = _settings(tmp_path)
+    marker = ops.keep_pause_path(s)
+    ops.request(s, "restart", keep_pause=True)
+    runner = FakeRunner(_isolated, marker=marker)
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"] and runner.marker_seen == [True] and not marker.exists()
+    ops.request(s, "restart", keep_pause=False)                       # /restart reset
+    runner = FakeRunner(_isolated, marker=marker)
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"] and runner.marker_seen == [False] and not marker.exists()
+    ops.request(s, "update", keep_pause=True)                         # nothing to deploy: no restart, no marker left
+    runner = FakeRunner(_isolated, marker=marker, update_out="already at abc; nothing to do")
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"] and runner.marker_seen == [True] and not marker.exists()
+    ops.request(s, "restart", keep_pause=True)
+    runner = FakeRunner(_isolated, marker=marker, sudo_password=True)  # refused: the marker must not linger
+    [res] = ops.watch_once(s, runner)
+    assert not res["ok"] and not marker.exists()
+    ops.request(s, "set", {"key": "POSITION_MAX_USD", "value": "12"}, keep_pause=True)   # no restart: never marked
+    runner = FakeRunner(_isolated, marker=marker)
+    [res] = ops.watch_once(s, runner)
+    assert res["ok"] and runner.marker_seen == [] and not marker.exists()
 
 
 def test_run_command_has_no_terminal_and_kills_the_whole_process_group(tmp_path, monkeypatch):
@@ -374,20 +456,20 @@ def test_phone_commands_queue_for_the_ops_service(tmp_path, _isolated):
     assert "· update" in sent[14]["text"] and "· set POSITION_MAX_USD=15" in sent[14]["text"] and "· restart" in sent[14]["text"]
     assert sent[15]["text"] == sent[14]["text"]
     assert sent[16]["text"] == "POSITION_MIN_USD=15 refused: POSITION_MIN_USD must not exceed POSITION_MAX_USD"
-    assert sent[17]["text"].startswith("queued: dry run ON.")           # /set LIVE_DRY_RUN=on is the same flag
+    assert sent[17]["text"] == "MODE=paper: nothing is ever sent. /dryrun applies to live mode only"   # same checks as /dryrun
     assert sent[18]["text"].startswith("current settings (running values; /set changes")
     assert "LIVE_DRY_RUN=True" in sent[18]["text"]
     queued = ops.pending(s)
     assert [(r["action"], r["args"]) for r in queued] == [
-        ("update", {}), ("set", {"key": "POSITION_MAX_USD", "value": "15", "restart": False}), ("restart", {}),
-        ("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": False})]
-    assert all(r["from"] == "telegram" for r in queued) and not ops.keep_pause_path(s).exists()
+        ("update", {}), ("set", {"key": "POSITION_MAX_USD", "value": "15", "restart": False}), ("restart", {})]
+    assert all(r["from"] == "telegram" and r["keep_pause"] is False for r in queued)
 
 
 def test_dryrun_on_in_live_mode_refuses_while_positions_are_open(tmp_path, _isolated):
     s = _settings(tmp_path, MODE="live", LIVE_DRY_RUN="false")
     ops.beat(s)
-    http = FakeHttp([[_msg(1, "/dryrun on"), _msg(2, "/dryrun on force"), _msg(3, "/dryrun off")],
+    http = FakeHttp([[_msg(1, "/dryrun on"), _msg(2, "/dryrun on force"), _msg(3, "/dryrun off"),
+                      _msg(31, "/set LIVE_DRY_RUN=true")],
                      [_msg(4, "/dryrun on")]])
     eng = FakeEngine(held=2)
 
@@ -406,7 +488,8 @@ def test_dryrun_on_in_live_mode_refuses_while_positions_are_open(tmp_path, _isol
     assert sent[0]["text"].startswith("not queued: 2 open live position(s).") and "/dryrun on force" in sent[0]["text"]
     assert sent[1]["text"].startswith("queued: dry run ON.") and "2 open position(s) will be closed in paper" in sent[1]["text"]
     assert sent[2]["text"].startswith("/dryrun on is the only direction")
-    assert sent[3]["text"].startswith("queued: dry run ON.") and "closed in paper" not in sent[3]["text"]
+    assert sent[3]["text"].startswith("not queued: 2 open live position(s).")        # /set LIVE_DRY_RUN=true: same guard
+    assert sent[4]["text"].startswith("queued: dry run ON.") and "closed in paper" not in sent[4]["text"]
     assert [r["args"] for r in ops.pending(s)] == [{"key": "LIVE_DRY_RUN", "value": "true", "restart": True}] * 2
     s2 = _settings(tmp_path, MODE="live", LIVE_DRY_RUN="true")
     http = FakeHttp([[_msg(5, "/dryrun on")]])
@@ -432,29 +515,25 @@ def test_a_phone_restart_keeps_the_daily_loss_pause_unless_reset(tmp_path, _isol
         db = await Database(s.DB_PATH).open()
         try:
             tc = TelegramCommands(Telegram(http, "1:a", "42"), db, s, engine=eng)
-            out = []
             for _ in range(3):
                 await tc.poll_once()
-                out.append(ops.keep_pause_path(s).exists())
-                ops.keep_pause_path(s).unlink(missing_ok=True)
-            return out
         finally:
             await db.close()
 
-    assert asyncio.run(go()) == [True, False, True]
+    asyncio.run(go())
+    assert [r["keep_pause"] for r in ops.pending(s)] == [True, False, True] and not ops.keep_pause_path(s).exists()
     sent = [j["text"] for m, j in http.posts if m == "sendMessage"]
     assert "The daily-loss pause is kept across this restart (/restart reset would end it)" in sent[0]
     assert "This ends the daily-loss pause and restarts the loss window" in sent[1]
     assert "The daily-loss pause is kept" in sent[2]
     # the engine consumes the marker once, and ignores a stale one
-    ops.request(s, "restart", keep_pause=True)
+    ops.keep_pause_path(s).write_text("x\n")
     assert ops.consume_keep_pause(s) is True and ops.consume_keep_pause(s) is False
-    ops.request(s, "restart", keep_pause=True)
+    ops.keep_pause_path(s).write_text("x\n")
     old = time.time() - ops.KEEP_PAUSE_MAX_AGE_S - 5
     os.utime(ops.keep_pause_path(s), (old, old))
     assert ops.consume_keep_pause(s) is False and not ops.keep_pause_path(s).exists()
-    ops.request(s, "set", {"key": "POSITION_MAX_USD", "value": "12"}, keep_pause=True)   # no restart: no marker
-    assert not ops.keep_pause_path(s).exists()
+    assert ops.request(s, "set", {"key": "POSITION_MAX_USD", "value": "12"}, keep_pause=True)["keep_pause"] is False
 
 
 def test_results_reach_the_chat_and_survive_a_refused_send(tmp_path, _isolated):
@@ -496,7 +575,7 @@ def test_results_reach_the_chat_and_survive_a_refused_send(tmp_path, _isolated):
     assert sent[2]["text"].count("\n") <= 13                     # only the tail of a long output
     assert sent[3]["text"].startswith("✅ dry run ON: written to .env and the bot restarted (3 s)")
     assert sent[4]["text"].startswith("✅ set None=None")          # odd types never block the queue
-    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result"]
+    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result.bad"]
     # Telegram refusing a message keeps the file for the next round; an old one is set aside
     (d / "7-restart.result").write_text(json.dumps({**base, "id": "7-restart", "action": "restart", "ok": True,
                                                     "args": {}, "output": "active", "finished": now_s()}))
@@ -518,7 +597,7 @@ def test_results_reach_the_chat_and_survive_a_refused_send(tmp_path, _isolated):
             await db.close()
 
     assert asyncio.run(refused()) == 0
-    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result", "7-restart.result", "8-old.result.bad"]
+    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result.bad", "7-restart.result", "8-old.result.bad"]
 
 
 def test_the_telegram_offset_survives_a_restart_so_a_restart_is_not_replayed(tmp_path, _isolated):
@@ -530,17 +609,28 @@ def test_the_telegram_offset_survives_a_restart_so_a_restart_is_not_replayed(tmp
         db = await Database(s.DB_PATH).open()
         try:
             first = TelegramCommands(Telegram(http, "1:a", "42"), db, s)
+            saved = []
+            original = first.handle_update
+
+            async def handle(u):                         # the offset is on disk before the command acts
+                saved.append(await db.kv_get("telegram_offset"))
+                return await original(u)
+
+            first.handle_update = handle
             await first.poll_once()                     # the bot that queued the restart is killed right after
-            assert await db.kv_get("telegram_offset") == "42"
+            assert saved == ["42"]
             second = TelegramCommands(Telegram(http, "1:a", "42"), db, s)
-            await second._load_offset()
+            stop = asyncio.Event()
+            task = asyncio.create_task(second.run(stop))   # the restarted bot starts after 41, never re-reads it
+            await asyncio.sleep(0.05)
+            stop.set()
+            await asyncio.wait_for(task, 2)
             assert second.offset == 42
-            await second.poll_once()                    # a fresh getUpdates asks for 42, never 41 again
         finally:
             await db.close()
 
     asyncio.run(go())
-    assert [g.get("offset") for g in http.gets] == [None, 42]
+    assert [g.get("offset") for g in http.gets][:2] == [None, 42]
     assert len([r for r in ops.pending(s) if r["action"] == "restart"]) == 1
 
 
@@ -568,3 +658,77 @@ def test_ops_queue_text_and_the_cli(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr()
     assert out.out.startswith("ops service: ") and "config error: MODE must be paper or live" in out.err
     assert "so that /set can repair .env" in out.err
+
+
+def test_engine_keeps_the_loss_cap_pause_when_the_marker_is_set(tmp_path):
+    import json as _json
+
+    from bot.sim import SIM_OVERRIDES, build_sim_engine
+    base = dict(SIM_OVERRIDES, DB_PATH=str(tmp_path / "e.db"), LOG_FILE="", STOP_FILE=str(tmp_path / "STOP"),
+                REPORTS_DIR=str(tmp_path / "rep"))
+    reason = "daily loss cap hit: -25.00 USD <= -25.00 USD; restart to resume"
+
+    async def seed_and_run(marker: bool):
+        db = await Database(base["DB_PATH"]).open()
+        try:                                             # as an unclean stop left it: paused
+            await db.kv_set("risk_state:paper", _json.dumps({"started_at": now_s() - 600, "paused_reason": reason,
+                                                             "clean_stop": False}))
+        finally:
+            await db.close()
+        s = load_settings(overrides=base)
+        if marker:
+            ops.keep_pause_path(s).parent.mkdir(parents=True, exist_ok=True)
+            ops.keep_pause_path(s).write_text("x\n")
+        eng = build_sim_engine(s, 1)
+        await eng.run(0.5)                               # a clean stop (SIGTERM from a phone /restart)
+        db = await Database(base["DB_PATH"]).open()
+        try:
+            return _json.loads(await db.kv_get("risk_state:paper")), ops.keep_pause_path(s).exists()
+        finally:
+            await db.close()
+
+    state, marker_left = asyncio.run(seed_and_run(marker=True))
+    assert state["clean_stop"] is False and state["paused_reason"] == reason and not marker_left
+    state, _ = asyncio.run(seed_and_run(marker=False))
+    assert state["clean_stop"] is True
+
+
+def test_dry_run_executor_reads_the_receipt_of_a_pending_real_transaction(tmp_path):
+    from solders.keypair import Keypair
+
+    from bot.live.executor import LiveExecutor
+    from tests.test_live_executor import FakeHttp as TxHttp
+    from tests.test_live_executor import FakeRpc, unsigned_tx
+    s = _settings(tmp_path, MODE="live", LIVE_DRY_RUN="true")
+    mint = "MintAddr"
+
+    class FakeChain:
+        async def signature_status(self, sig):
+            return "ok"
+
+        async def rpc(self, method, params):
+            assert method == "getTransaction" and params[0] == "sig-real"
+            return {"transaction": {"message": {"accountKeys": [{"pubkey": pubkey}]}},
+                    "meta": {"err": None, "fee": 5000, "preBalances": [1_000_000_000], "postBalances": [949_995_000],
+                             "preTokenBalances": [],
+                             "postTokenBalances": [{"mint": mint, "owner": pubkey,
+                                                    "uiTokenAmount": {"amount": "1000000000", "decimals": 6}}]}}
+
+    kp_probe = Keypair()
+    pubkey = str(kp_probe.pubkey())
+
+    async def go2():
+        db = await Database(s.DB_PATH).open()
+        http = TxHttp(unsigned_tx(kp_probe))
+        ex = LiveExecutor(s, db, http, kp_probe, is_graduated=lambda m: False, chain=FakeChain())
+        await ex.rpc.close()
+        ex.rpc = FakeRpc()
+        intent = {"signature": "sig-real", "side": "buy", "mint": mint, "amount": 0.05, "price": 1e-7, "route": "pumpportal"}
+        await db.kv_set(ex._intent_key(mint, "buy"), json.dumps(intent))
+        fill = await ex.buy(mint, 0.05, 1e-7)
+        await db.close()
+        return fill, http, ex.rpc
+
+    fill, http, rpc = asyncio.run(go2())
+    assert fill.tx_sig == "sig-real" and fill.tokens == 1000.0 and abs(fill.sol - 0.050005) < 1e-9
+    assert http.posts == [] and rpc.simulated == []                 # no new transaction built or simulated

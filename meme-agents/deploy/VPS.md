@@ -168,10 +168,11 @@ or read a key. The service checks every request again before acting, runs nothin
 three commands above, and reports instead of re-running anything it finds half-done after its
 own restart. Requests run one at a time, so one sent during an update waits for it; a request
 the service only finds 10 minutes or more after it was made (it was not running) is refused.
-Before a `/set` the service keeps a copy of `.env`; if the bot then refuses to start on the new
-value, the copy is put back and the bot restarted again, so a setting can never lock the phone
-out. Run the installer as the bot's own user: as root it would install the service as root,
-and a `/set` would then leave `.env` unreadable for the bot.
+Before a `/set` the service notes the key and its old value; if the bot then refuses to start on
+the new value, that one key is put back (never `LIVE_DRY_RUN`, and nothing edited by hand in the
+meantime) and the bot restarted again, so a setting can never lock the phone out. The installer
+refuses to run as root or as a user other than the bot's: a `/set` would otherwise leave `.env`
+unreadable for the bot.
 
 ```bash
 sudo systemctl status meme-agents-ops     # is it running?

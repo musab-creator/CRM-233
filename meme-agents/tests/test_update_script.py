@@ -141,8 +141,11 @@ def test_the_ops_service_never_waits_for_a_sudo_password(server):
 
 def test_the_ops_service_rollback_never_waits_for_a_sudo_password_either(server):
     srv, _dev, stubs, new_sha = server
+    old_sha = git(srv, "rev-parse", "HEAD")
     r = run(srv, stubs, extra_env={"MEME_AGENTS_NONINTERACTIVE": "1", "FAIL_RESTART": "1"})
     assert r.returncode != 0 and "deployment failed" in r.stderr
+    assert git(srv, "rev-parse", "HEAD") == old_sha and (srv / "v").read_text() == "1\n"
+    assert (srv / ".venv" / "bin" / "python").exists() and not list(srv.glob(".venv-deploy.*"))
     log = (srv / "log").read_text()
     assert "sudo -n systemctl restart meme-agents" in log and "sudo -n systemctl start meme-agents" in log
     assert "sudo systemctl" not in log

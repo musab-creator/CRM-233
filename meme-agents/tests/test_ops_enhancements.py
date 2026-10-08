@@ -217,10 +217,13 @@ def _setter(tmp_path, values, content):
     return result, file
 
 
-def test_set_env_updates_duplicates_atomically_without_printing_values(tmp_path):
+def test_set_env_updates_duplicates_in_place_without_printing_values(tmp_path):
+    (tmp_path / ".env").write_text("x")
+    inode = (tmp_path / ".env").stat().st_ino
     result, file = _setter(tmp_path, ["LIVE_DRY_RUN=true", "ANTHROPIC_API_KEY=private-new-value"],
                            "LIVE_DRY_RUN=false # explanation\nLIVE_DRY_RUN=false\nANTHROPIC_API_KEY=old\n")
     assert result.returncode == 0, result.stderr
+    assert file.stat().st_ino == inode             # the bot's read-only bind mount sits on this inode
     parsed = load_dotenv(file)
     assert parsed["LIVE_DRY_RUN"] == "true" and parsed["ANTHROPIC_API_KEY"] == "private-new-value"
     assert file.read_text().count("LIVE_DRY_RUN=") == 1

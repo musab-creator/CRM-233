@@ -239,8 +239,8 @@ Added after the build, when research showed a change in PumpPortal's data API:
     one found half-done after a service restart is reported, not re-run. The service trusts
     nothing in a request file beyond what it re-validates (a result is named after the file, a
     malformed file is refused and set aside), checks a `/set` against the bot's own cross-field
-    rules, backs `.env` up and reverts a value the bot will not start on, keeps a daily-loss
-    pause across a phone restart, and refuses `/dryrun on` while live positions are open. The
+    rules, backs `.env` up and puts back the one key the bot will not start on (never
+    `LIVE_DRY_RUN`), keeps a daily-loss pause across a phone restart, and refuses `/dryrun on` while live positions are open. The
     Telegram offset is persisted in the database so the restart a command causes never replays
     it, and `.env` is rewritten in place so the bot's read-only bind mount on it survives.
 

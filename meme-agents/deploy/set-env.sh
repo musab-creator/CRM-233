@@ -60,7 +60,9 @@ fd = os.open(path, os.O_WRONLY)
 try:
     os.fchmod(fd, 0o600)
     os.ftruncate(fd, 0)
-    os.write(fd, data)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
     os.fsync(fd)
 finally:
     os.close(fd)
