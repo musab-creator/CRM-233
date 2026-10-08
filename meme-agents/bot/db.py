@@ -9,6 +9,14 @@ from typing import Any, Iterable
 
 import aiosqlite
 
+# Shadow positions with a sell booked at more than SPIKE_FACTOR times their final mark were priced
+# by a bad tick, not a run: a real runner's take-profit sits within a trailing stop of its last
+# mark. Every shadow statistic (report, regime snapshot) leaves them out.
+SPIKE_FACTOR = 20.0
+SPIKED_SHADOWS_SQL = ("SELECT f.position_id FROM fills f JOIN positions q ON q.id=f.position_id "
+                      "WHERE q.kind='shadow' AND f.side='sell' AND q.last_price>0 AND f.price>q.last_price*%g"
+                      % SPIKE_FACTOR)
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;

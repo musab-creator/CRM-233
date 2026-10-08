@@ -179,6 +179,27 @@ def test_report_leaves_out_shadows_booked_at_a_spike(s):
     assert "+39300%" not in text and "PAIR       cand" not in text
 
 
+def test_regime_snapshot_leaves_out_spiked_shadows(s):
+    from bot.regime import market_snapshot
+
+    class SP:
+        def get(self):
+            return 100.0
+
+        def change_pct(self, window, now):
+            return 0.0
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await _spiked_book(db)
+            return await market_snapshot(db, {"creates": 1, "migrations": 0}, SP(), now_s(), 0, None)
+        finally:
+            await db.close()
+    snap = asyncio.run(go())
+    assert snap["shadow_6h"] == {"closed": 1, "wins": 0, "win_rate": 0.0, "avg_return": -0.4, "pnl_usd": -2.0}
+
+
 def test_why_lists_every_fill_and_flags_the_spike(tmp_path):
     from bot.commands import TelegramCommands
     from bot.telegram import Telegram

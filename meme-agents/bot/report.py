@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .budget import utc_day
 from .config import Settings
-from .db import Database
+from .db import SPIKE_FACTOR, SPIKED_SHADOWS_SQL, Database
 from .util import now_s
 
 
@@ -49,13 +49,6 @@ def trade_metrics(pnls_usd: list[float], pnls_sol: list[float], bankroll_usd: fl
         "pnl_sol": math.fsum(pnls_sol),
     }
 
-
-# A sell booked at more than this many times the position's final mark came from a price spike,
-# not a run: a real runner's take-profit sits within a trailing stop of its last mark.
-SPIKE_FACTOR = 20.0
-SPIKED_SHADOWS_SQL = ("SELECT f.position_id FROM fills f JOIN positions q ON q.id=f.position_id "
-                      "WHERE q.kind='shadow' AND f.side='sell' AND q.last_price>0 AND f.price>q.last_price*%g"
-                      % SPIKE_FACTOR)
 
 
 async def spiked_shadow_count(db: Database) -> int:
