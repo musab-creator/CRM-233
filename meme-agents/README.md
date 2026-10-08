@@ -379,6 +379,10 @@ chat, so `/status`, `/set`, `/update` and `/restart` keep working from the phone
 positions still run when the key and config are sound. `/resume` cannot clear the lock: fix the
 cause and `/restart`.
 
+If the bot service is down for any other reason, the ops service notices within about 20
+seconds, says so in the chat, and answers `/restart` and `/update` itself until the bot is back
+(`bot/rescue.py`). Any other command gets one line saying the bot is down.
+
 Orders go to PumpPortal's Local Trade API (`POST /api/trade-local`, `pool: "auto"`) and are
 signed locally with `solders`. Graduated tokens go through Jupiter Swap API v2 instead
 (`/order` then `/execute`) when `JUPITER_API_KEY` is set.

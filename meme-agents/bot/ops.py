@@ -554,6 +554,7 @@ def _finish(s: Settings, req: dict, ok: bool, output: str, started: float, code:
     """Write the result (named after the request file, never after anything inside it), append
     it to the history and drop the request."""
     result = {"id": str(req.get("id") or ""), "action": str(req.get("action") or ""), "args": _args_of(req),
+              "from": str(req.get("from") or "telegram"),
               "ok": ok, "code": code, "output": output[-OUTPUT_KEEP:], "started": started, "finished": now_s()}
     d = ops_dir(s)
     d.mkdir(parents=True, exist_ok=True)
@@ -774,9 +775,11 @@ def watch_once(s: Settings, runner=None, lock_fd: int | None = None, since: floa
             os.close(lock_fd)
 
 
-def watch(s: Settings, runner=None, interval: float = HEARTBEAT_S, sleep=time.sleep) -> int:
+def watch(s: Settings, runner=None, interval: float = HEARTBEAT_S, sleep=time.sleep, rescue=None) -> int:
     """Run until SIGTERM/SIGINT, finishing the current request first. Returns after a deploy
-    changed the code so systemd (Restart=always) starts the watcher again on the new version."""
+    changed the code so systemd (Restart=always) starts the watcher again on the new version.
+    While the bot service is down, `rescue` (bot/rescue.py) answers /restart and /update on
+    Telegram in its place."""
     lock_fd = try_lock(s)
     if lock_fd is None:
         log.error("ops: another watcher holds %s; not starting a second one", ops_dir(s) / "watcher.lock")
@@ -800,11 +803,18 @@ def watch(s: Settings, runner=None, interval: float = HEARTBEAT_S, sleep=time.sl
         if write_info(s).get("no_new_privs"):
             log.warning("ops: %s", NNP_HINT)
         log.info("ops watcher on: queue %s, deploys %s at %s", ops_dir(s), SERVICE, (head or "?")[:12])
+        if rescue is None:
+            from .rescue import Rescue
+            rescue = Rescue(s, runner or run_command)
         while not stopping:
             for result in watch_once(s, runner, lock_fd, since):
                 if result["action"] == "update" and result["ok"] and _git_head(app) != head:
                     log.info("ops: code updated; exiting so the service starts this watcher on the new version")
                     return 0
+            try:
+                rescue.tick()
+            except Exception:                 # the rescue is a convenience; the queue must keep running
+                log.exception("ops: rescue poll failed")
             sleep(interval)
         log.info("ops watcher stopped")
         return 0
