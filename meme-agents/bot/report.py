@@ -50,6 +50,19 @@ def trade_metrics(pnls_usd: list[float], pnls_sol: list[float], bankroll_usd: fl
     }
 
 
+# A sell booked at more than this many times the position's final mark came from a price spike,
+# not a run: a real runner's take-profit sits within a trailing stop of its last mark.
+SPIKE_FACTOR = 20.0
+SPIKED_SHADOWS_SQL = ("SELECT f.position_id FROM fills f JOIN positions q ON q.id=f.position_id "
+                      "WHERE q.kind='shadow' AND f.side='sell' AND q.last_price>0 AND f.price>q.last_price*%g"
+                      % SPIKE_FACTOR)
+
+
+async def spiked_shadow_count(db: Database) -> int:
+    row = await db.fetchone(f"SELECT COUNT(DISTINCT position_id) c FROM ({SPIKED_SHADOWS_SQL})")
+    return int(row["c"] or 0) if row else 0
+
+
 async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
     """Per agent: how often its BUY vote preceded a winner (real outcome if traded, else shadow),
     how often PASS avoided a loser, the lift of its BUYs over the base win rate, and its Brier
@@ -62,7 +75,8 @@ async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
                EXISTS(SELECT 1 FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
                  AND p.status IN ('open','closed') AND (? IS NULL OR p.mode=? OR p.mode IS NULL)) AS traded,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='shadow'
-                 AND p.status='closed' ORDER BY p.closed_at DESC, p.id DESC LIMIT 1) AS shadow_pnl
+                 AND p.status='closed' AND p.id NOT IN (""" + SPIKED_SHADOWS_SQL + """)
+                 ORDER BY p.closed_at DESC, p.id DESC LIMIT 1) AS shadow_pnl
         FROM votes v WHERE NOT EXISTS (
           SELECT 1 FROM votes newer WHERE newer.candidate_id=v.candidate_id
             AND newer.agent=v.agent AND newer.id>v.id)
@@ -118,7 +132,7 @@ async def _scored_candidates(db: Database) -> list[dict]:
     cands = await db.fetchall("""
         SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
         FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
-        WHERE c.decision IS NOT NULL
+        WHERE c.decision IS NOT NULL AND p.id NOT IN (""" + SPIKED_SHADOWS_SQL + """)
           AND p.id=(SELECT q.id FROM positions q WHERE q.candidate_id=c.id
                     AND q.kind='shadow' AND q.status='closed' ORDER BY q.closed_at DESC, q.id DESC LIMIT 1)
         ORDER BY p.closed_at, p.id""")
@@ -213,7 +227,8 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     opening_equity = s.BANKROLL_USD + math.fsum(p["pnl_usd"] for p in closed
                                                if p["closed_at"] is not None and p["closed_at"] < day_start)
     shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd FROM positions WHERE kind='shadow' "
-                                        "AND status='closed' ORDER BY closed_at, id")
+                                        "AND status='closed' AND id NOT IN (" + SPIKED_SHADOWS_SQL + ") "
+                                        "ORDER BY closed_at, id")
     shadows = [p for p in shadows_recorded if all(isinstance(p[k], (int, float)) and math.isfinite(p[k])
                                                 for k in ("pnl_usd", "pnl_sol"))]
     open_pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') "
@@ -269,6 +284,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "gate_sweep": gate_sweep(scored),
         "signals": signal_check(scored),
         "shadow_extremes": await shadow_extremes(db),
+        "shadow_spiked": await spiked_shadow_count(db),
         "funnel_day": funnel,
         "spend": spend,
         "exit_reasons": exit_reasons,
@@ -291,7 +307,7 @@ async def shadow_extremes(db: Database, top: int = 5) -> dict:
     rows = await db.fetchall(
         "SELECT p.id, p.mint, p.candidate_id, m.symbol, p.cost_sol, p.pnl_sol, p.pnl_usd, p.exit_reason, "
         "p.opened_at, p.closed_at, p.entry_price, p.last_price FROM positions p LEFT JOIN mints m ON m.mint=p.mint "
-        "WHERE p.kind='shadow' AND p.status='closed'")
+        "WHERE p.kind='shadow' AND p.status='closed' AND p.id NOT IN (" + SPIKED_SHADOWS_SQL + ")")
     scored = []
     for p in rows:
         if not all(isinstance(p[k], (int, float)) and math.isfinite(p[k]) for k in ("cost_sol", "pnl_sol", "pnl_usd")) \
@@ -397,6 +413,9 @@ def render_text(r: dict) -> str:
     sh = r["shadow"]
     lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
               f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]
+    if r.get("shadow_spiked"):
+        lines.append(f"excluded {r['shadow_spiked']} shadows whose exit was booked at a price spike "
+                     f"(a sell above {SPIKE_FACTOR:g}x the final mark); their returns are not real")
     ex = r.get("shadow_extremes") or {}
     if ex.get("n"):
         share = f", the best {len(ex['best'])} carry ${ex['top_pnl_usd']:+,.0f}" + (

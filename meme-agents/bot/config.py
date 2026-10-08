@@ -143,6 +143,9 @@ class Settings:
     EMERGENCY_LIQ_DROP_PCT: float = 50.0
     LIQ_POLL_S: float = 60.0
     RUGCHECK_POLL_S: float = 300.0
+    # A mark more than this many times above or below the last one is held until a second tick
+    # confirms it; 0 disables. One bad tick must not fill a take-profit or a stop.
+    TICK_SANITY_FACTOR: float = 20.0
 
     # --- data sources -----------------------------------------------------------
     # PumpPortal streams per-token trades only to funded API keys since May 2026, at 0.01 SOL
@@ -324,6 +327,8 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
     if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:
         raise ConfigError("EXIT_RETRY_BASE_S must not exceed EXIT_RETRY_MAX_S")
+    if 0 < s.TICK_SANITY_FACTOR <= 1:
+        raise ConfigError("TICK_SANITY_FACTOR must be above 1, or 0 to disable the check")
     if s.LIVE_MAX_WALLET_SOL > LIVE_WALLET_CEILING_SOL:
         raise ConfigError(f"LIVE_MAX_WALLET_SOL must not exceed {LIVE_WALLET_CEILING_SOL:g} SOL")
     for name in ("CONSENSUS_MIN_MEAN_CONFIDENCE", "AGENT_MIN_GROUNDING", "TRIAGE_MIN_CONFIDENCE",

@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from bot.db import Database
+from bot.feeds.dexscreener import WSOL
 from bot.paper import PaperExecutor, entry_fill, exit_fill, mark_to_market
 from bot.positions import PositionManager
 from bot.risk import RiskManager
@@ -136,7 +137,8 @@ def test_silent_stream_falls_back_to_dexscreener_mark(s):
             self.price, self.liq = "1e-7", 10_000
 
         async def tokens(self, mints):
-            return {m: {"priceNative": self.price, "liquidity": {"usd": self.liq}} for m in mints}
+            return {m: {"priceNative": self.price, "liquidity": {"usd": self.liq},
+                        "quoteToken": {"address": WSOL}} for m in mints}
 
     async def go():
         db = await Database(s.DB_PATH).open()

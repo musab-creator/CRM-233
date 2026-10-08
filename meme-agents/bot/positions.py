@@ -19,12 +19,15 @@ from typing import Awaitable, Callable
 from .config import Settings
 from .db import Database
 from .exits import ExitState, check_exit
+from .feeds.dexscreener import sol_price_native
 from .live.executor import LiveExecutionUnknown
 from .paper import Fill, PaperExecutor, mark_to_market
 from .risk import RiskManager, kill_switch_active
 from .util import now_s
 
 log = logging.getLogger("bot.positions")
+
+TICK_CONFIRM_S = 300.0   # a held mark is confirmed by a second one near it within this long
 
 
 @dataclass
@@ -116,6 +119,7 @@ class PositionManager:
         self._tasks: set[asyncio.Task] = set()
         self._entry_uncertain: set[int] = set()
         self._entry_told: dict[int, str] = {}      # the last ENTRY FAILED text sent per position: once, not every tick
+        self._suspect: dict[int, tuple[float, float]] = {}   # position id -> (held mark, its ts)
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._kill_handled = False
@@ -445,6 +449,7 @@ class PositionManager:
         if self.watch_account and p.creator and not any(q.creator == p.creator for q in still):
             await self.watch_account(p.creator, False)
         self.positions.pop(p.id, None)
+        self._suspect.pop(p.id, None)
 
     def _state(self, p: Position) -> ExitState:
         return ExitState(p.entry_price, p.peak_price or p.entry_price, bool(p.tp_done), p.opened_at,
@@ -464,12 +469,38 @@ class PositionManager:
                     if ts > p.decided_at:
                         await self._fill_entry(p, price, ts)
                     continue
-                await self._on_price(p, price, ts)
+                await self._on_price(p, price, ts, str(msg.get("txType") or "stream"),
+                                     msg.get("signature") or msg.get("pool"))
 
-    async def _on_price(self, p: Position, price: float, ts: float) -> None:
+    def _implausible(self, p: Position, price: float, ts: float, source: str, detail) -> bool:
+        """A mark far from the last one is held until a second tick lands near it. One bad tick
+        (a pair quoted in the wrong token, a decode slip) must not fill a take-profit or a stop;
+        a real crash or run is confirmed by the next trade seconds later."""
+        factor = self.s.TICK_SANITY_FACTOR
+        ref = p.last_price or p.entry_price
+        if factor <= 1 or not ref or ref <= 0:
+            return False
+        if ref / factor <= price <= ref * factor:
+            self._suspect.pop(p.id, None)
+            return False
+        prev = self._suspect.get(p.id)
+        if prev and 0 <= ts - prev[1] <= TICK_CONFIRM_S and prev[0] / 3 <= price <= prev[0] * 3:
+            log.warning("#%d %s: %s mark %.3e (%.0fx the last mark %.3e) confirmed by a second tick",
+                        p.id, p.mint, source, price, price / ref, ref)
+            self._suspect.pop(p.id, None)
+            return False
+        self._suspect[p.id] = (price, ts)
+        log.warning("#%d %s: holding %s mark %.3e, %.4gx the last mark %.3e, until a second tick confirms it%s",
+                    p.id, p.mint, source, price, price / ref, ref, f" ({detail})" if detail else "")
+        return True
+
+    async def _on_price(self, p: Position, price: float, ts: float, source: str = "stream",
+                        detail: str | None = None) -> None:
         """Mark to market and run the exit rules. Caller holds the lock."""
         if (p.status != "open" or not isfinite(price) or price <= 0 or not isfinite(ts)
                 or (p.last_tick_at is not None and ts < p.last_tick_at)):
+            return
+        if self._implausible(p, price, ts, source, detail):
             return
         p.last_price, p.last_tick_at = price, ts
         p.peak_price = max(p.peak_price or price, price)
@@ -572,9 +603,9 @@ class PositionManager:
                 # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key):
                 # use DexScreener's price as the mark so stops still work.
                 stale = now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S
-                native = _num((pair or {}).get("priceNative"))
+                native = sol_price_native(pair)
                 if stale and native and p.status == "open":
-                    await self._on_price(p, native, now)
+                    await self._on_price(p, native, now, "dexscreener", (pair or {}).get("pairAddress"))
 
     async def _poll_rugcheck(self, now: float) -> None:
         if not self.rugcheck or now - self._last_rug_poll < self.s.RUGCHECK_POLL_S:

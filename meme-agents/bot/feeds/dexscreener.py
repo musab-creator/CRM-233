@@ -43,6 +43,16 @@ def best_pair(pairs: list[dict], mint: str) -> dict | None:
     return max(cands, key=lambda p: ((p.get("liquidity") or {}).get("usd") or 0))
 
 
+def sol_price_native(p: dict | None) -> float | None:
+    """`priceNative` as SOL per token, or None when the pair is not quoted in wrapped SOL.
+    DexScreener's native price is in the pair's quote token: a USDC- or USDT-quoted pair reports
+    a price about SOL/USD times too high, which once booked a +39,000% paper exit."""
+    if not p or (p.get("quoteToken") or {}).get("address") != WSOL:
+        return None
+    v = _num(p.get("priceNative"))
+    return v if v and v > 0 else None
+
+
 def summarize_pair(p: dict | None) -> dict | None:
     if not p:
         return None

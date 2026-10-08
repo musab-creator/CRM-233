@@ -330,18 +330,48 @@ class TelegramCommands:
                 head += f" (error: {str(v['error'])[:100]})"
             lines.append(head)
             lines += [f"  - {str(r)[:220]}" for r in (reasons or [])[:2]]
-        shadow = await self.db.fetchone("SELECT status, size_usd, cost_sol, proceeds_sol, pnl_usd, exit_reason, "
-                                        "opened_at, closed_at FROM positions WHERE candidate_id=? AND kind='shadow' "
-                                        "ORDER BY id DESC LIMIT 1", [cid])
+        shadow = await self.db.fetchone("SELECT id, mint, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
+                                        "exit_reason, entry_price, opened_at, closed_at FROM positions "
+                                        "WHERE candidate_id=? AND kind='shadow' ORDER BY id DESC LIMIT 1", [cid])
         if shadow and shadow["status"] == "closed":
             ret = (f" ({(float(shadow['proceeds_sol'] or 0) / shadow['cost_sol'] - 1) * 100:+.0f}%)"
                    if shadow["cost_sol"] else "")
             held = fmt_hold((shadow["closed_at"] or 0) - (shadow["opened_at"] or shadow["closed_at"] or 0))
             lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {usd(float(shadow['pnl_usd'] or 0))}{ret} · "
                          f"{(shadow['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
+            lines += await self._fill_lines(shadow)
         elif shadow:
             lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {shadow['status']}")
         return redact("\n".join(lines))
+
+    async def _fill_lines(self, pos) -> list[str]:
+        """Every fill of one position with its price against the entry, so a booked return can be
+        checked against the prices it came from. A sell far from the entry is marked and matched
+        to the stored trade nearest in time: a match names the stream trade that priced it, no
+        match means a curve read or a DexScreener mark did."""
+        fills = await self.db.fetchall("SELECT ts, side, reason, price, tokens, sol FROM fills "
+                                       "WHERE position_id=? ORDER BY id", [pos["id"]])
+        entry = float(pos["entry_price"] or 0)
+        factor = max(self.s.TICK_SANITY_FACTOR, 1.0) if self.s.TICK_SANITY_FACTOR else 20.0
+        out = []
+        for f in fills:
+            price = float(f["price"] or 0)
+            when = datetime.fromtimestamp(float(f["ts"] or 0), timezone.utc).strftime("%H:%M:%S")
+            x = f" (x{price / entry:,.4g} entry)" if entry > 0 and f["side"] == "sell" else ""
+            line = (f"  {when}Z {str(f['reason'] or f['side']).replace('_', ' ')} @ {price:.3e}{x} · "
+                    f"{float(f['tokens'] or 0):,.0f} tokens · {float(f['sol'] or 0):.4f} SOL")
+            if f["side"] == "sell" and entry > 0 and (price > entry * factor or price < entry / factor):
+                near = await self.db.fetchone(
+                    "SELECT ts, side, sol, tokens, price_sol, pool FROM trades WHERE mint=? AND ABS(ts-?)<=5 "
+                    "ORDER BY ABS(ts-?) LIMIT 1", [pos["mint"], f["ts"], f["ts"]])
+                if near:
+                    line += (f"\n    ⚠️ price spike: nearest stored trade {near['side']} {float(near['sol'] or 0):.4f} SOL / "
+                             f"{float(near['tokens'] or 0):,.0f} tokens = {float(near['price_sol'] or 0):.3e} "
+                             f"({near['pool'] or 'pump'})")
+                else:
+                    line += "\n    ⚠️ price spike: no stored trade within 5 s, so a curve read or DexScreener mark priced it"
+            out.append(line)
+        return out
 
     # --- polling -----------------------------------------------------------------------
     def _authorized(self, chat: str, cmd: str, who: str) -> bool:

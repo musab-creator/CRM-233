@@ -194,7 +194,10 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 
    Every tick (a curve move or a streamed trade) marks open positions to market. After
    graduation the price lives in the AMM pool, so a position with no tick for `LIQ_POLL_S` is
-   marked at DexScreener's price.
+   marked at DexScreener's price, and only from a pair quoted in SOL. A mark more than
+   `TICK_SANITY_FACTOR` (20) times away from the last one is held until a second tick lands
+   near it, so one bad price cannot fill a take-profit or a stop; the report leaves out shadows
+   that were booked that way before this check existed.
 6. **Exits.** These are rules only:
    - stop loss at -40%
    - at +60%, sell half, then put a 30% trailing stop on the rest
