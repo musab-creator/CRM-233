@@ -101,8 +101,11 @@ if [ "$OPS" = 1 ]; then
   sudo systemctl enable meme-agents-ops >/dev/null
   sudo systemctl restart meme-agents-ops
   echo "installed $unit (running, enabled at boot): Telegram /update, /restart, /set and /dryrun now reach this server"
-  if ! sudo -n systemctl --version >/dev/null 2>&1; then
+  # `sudo -l <command>` says whether the sudoers line covers it, without running it or prompting.
+  if ! sudo -n -l "$(command -v systemctl)" restart meme-agents >/dev/null 2>&1; then
     echo "note: restarts from the phone need the sudoers line from deploy/VPS.md, 'Control from your phone'"
+  else
+    echo "sudo allows the service restart without a password: /restart and /update will work from the phone"
   fi
 fi
 
