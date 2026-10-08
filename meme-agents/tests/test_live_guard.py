@@ -77,17 +77,5 @@ def test_json_array_key_accepted(s):
     assert str(static_checks(s).pubkey()) == str(kp.pubkey())
 
 
-def test_engine_refuses_to_start(s):
-    """End-to-end: Engine.setup raises before any feed starts."""
-    from bot.engine import Engine
-    live(s, LIVE_CONFIRM="")
-    eng = Engine(s)
-
-    async def go():
-        try:
-            await eng.setup()
-        finally:
-            await eng.db.close()
-            await eng.http.aclose()
-    with pytest.raises(LiveRefused):
-        asyncio.run(go())
+# A failed live check no longer ends the process: tests/test_live_lock.py covers the lock through
+# the simulated engine (a real Engine.setup would reach DexScreener here).
