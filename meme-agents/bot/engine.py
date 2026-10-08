@@ -35,7 +35,7 @@ from .feeds.rugcheck import Rugcheck
 from .feeds.xapi import XClient
 from .features import chain_features, flow_features
 from .ingest import Ingestor, MintState
-from .live.guard import check_live_startup
+from .live.guard import LiveRefused, check_live_startup, static_checks
 from .paper import PaperExecutor
 from .positions import PositionManager
 from .prefilter import curve_liquidity_usd, full_check, stage1
@@ -128,6 +128,7 @@ class Engine:
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
         self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
         self.regime = Regime()                   # market regime: sizes entries down or pauses them
+        self.live_lock: str | None = None        # a failed live check: entries locked, phone commands alive
         self._regime_at: float | None = None
         self.stop = asyncio.Event()
 
@@ -138,7 +139,22 @@ class Engine:
                                "stop it first (systemctl stop meme-agents, or Ctrl-C the other terminal)")
         await self.db.open()
         await self.risk.startup()
-        kp = await check_live_startup(self.s, self.helius.balance_sol)  # raises LiveRefused
+        try:
+            kp = await check_live_startup(self.s, self.helius.balance_sol)
+        except LiveRefused as e:
+            if str(e).startswith("MODE must be"):
+                raise
+            # A failed live check used to end the process, which also ended the phone commands
+            # (8 Oct: the wallet grew past its cap and a phone-only operator was locked out). The bot
+            # now runs with entries locked; exits still work when the key and config are sound.
+            self.live_lock = str(e)
+            try:
+                kp = static_checks(self.s)
+            except LiveRefused:
+                kp = None
+            self.risk.paused_reason = f"live lock: {e}; fix the cause, then /restart"
+            log.error("LIVE LOCK: %s (entries off; %s)", e,
+                      "exits of open positions still run" if kp else "no usable key, exits cannot run")
         if kp is not None:
             from .live.executor import LiveExecutor
             self.executor = LiveExecutor(self.s, self.db, self.http, kp, self._is_graduated, chain=self.helius)
@@ -150,6 +166,11 @@ class Engine:
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
+        if self.live_lock and self.tg.enabled:
+            await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
+                               + (", exits of open positions still run." if kp is not None
+                                  else " and no usable key: exits cannot run either.")
+                               + "\nFix the cause (move SOL out of the wallet, or /set and /update), then /restart.")
         if self.stream_mode != "off" and not self.s.PUMPPORTAL_API_KEY and isinstance(self.feed, PumpPortalFeed):
             log.warning("PUMPPORTAL_TRADE_STREAM=%s needs PUMPPORTAL_API_KEY: since May 2026 PumpPortal streams "
                         "per-token trades only to funded API keys. Continuing with the stream off.", self.stream_mode)

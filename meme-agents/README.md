@@ -374,6 +374,11 @@ Live mode starts only if **all** of these are true. Otherwise it refuses with ex
 - `HELIUS_API_KEY` and `ANTHROPIC_API_KEY` are set
 - the wallet's on-chain balance is `LIVE_MAX_WALLET_SOL` or less at startup (default 0.5, at most 3)
 
+When a check fails the bot still starts, with entries locked and a 🔒 LIVE LOCKED message in the
+chat, so `/status`, `/set`, `/update` and `/restart` keep working from the phone; exits of open
+positions still run when the key and config are sound. `/resume` cannot clear the lock: fix the
+cause and `/restart`.
+
 Orders go to PumpPortal's Local Trade API (`POST /api/trade-local`, `pool: "auto"`) and are
 signed locally with `solders`. Graduated tokens go through Jupiter Swap API v2 instead
 (`/order` then `/execute`) when `JUPITER_API_KEY` is set.
