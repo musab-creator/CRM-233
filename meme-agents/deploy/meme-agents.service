@@ -1,0 +1,51 @@
+# systemd unit for meme-agents. deploy/install.sh --systemd fills in @APP_DIR@ and @USER@ and
+# installs it as /etc/systemd/system/meme-agents.service.
+#
+#   sudo systemctl start meme-agents       start (paper mode unless .env unlocks live)
+#   sudo systemctl stop meme-agents        stop; open paper positions are kept and resumed
+#   journalctl -u meme-agents -f           follow the log (also in logs/bot.log)
+#
+# A daily-loss pause survives an unclean crash/watchdog restart. An intentional clean stop
+# followed by a start resets its baseline. Check `python -m bot status` before resuming.
+
+[Unit]
+Description=meme-agents: pump.fun paper-trading bot gated by three Claude agents
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=10
+
+[Service]
+Type=notify
+User=@USER@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/python -m bot run
+# Exit 2 = bad configuration or live-mode checks refused: retrying cannot fix that.
+# Exit 3 = a startup problem such as no network: retried.
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=2
+TimeoutStartSec=180
+TimeoutStopSec=150
+# the bot pings systemd every 60 s; if its event loop hangs, systemd restarts it
+WatchdogSec=300
+Environment=PYTHONUNBUFFERED=1
+
+# The parent directory must allow creating/removing STOP for Telegram /stop and /resume.
+# Keep source code, credentials and the Python environment read-only inside that directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@APP_DIR@
+ReadOnlyPaths=@APP_DIR@/bot @APP_DIR@/deploy @APP_DIR@/.env @APP_DIR@/.venv
+ReadOnlyPaths=-@APP_DIR@/tests -@APP_DIR@/requirements.txt -@APP_DIR@/pyproject.toml -@APP_DIR@/.git
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

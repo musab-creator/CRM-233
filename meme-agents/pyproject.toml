@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meme-agents-claude"
+version = "0.1.0"
+description = "Solana meme-coin paper-trading bot gated by three Claude agents"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.11,<2",
+    "httpx>=0.28,<1",
+    "websockets>=15,<18",
+    "solders>=0.26,<0.30",
+    "solana>=0.41,<0.42",
+    "aiosqlite>=0.21,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["bot", "bot.*"]

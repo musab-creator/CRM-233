@@ -1,0 +1,17 @@
+.env
+data/
+logs/
+reports/
+STOP
+STOP_SIM
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.venv-deploy.*/
+.venv-before.*/
+.env-update-*
+*.egg-info/
+build/
+dist/
+*.log

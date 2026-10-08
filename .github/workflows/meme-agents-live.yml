@@ -1,0 +1,142 @@
+name: meme-agents live paper run
+
+# Runs meme-agents against the real APIs on a GitHub-hosted runner (open internet), in PAPER
+# mode only. Two ways to start it:
+#   * add the label `live-probe` to a pull request: unit tests, preflight and the live-data probe
+#     (about 5 minutes, free);
+#   * add the label `live-paper-run`, or use "Run workflow" on the Actions tab: the same, then
+#     the brief's acceptance test (`python -m bot acceptance --minutes 60`) and the report.
+# Remove and re-add a label to run it again.
+#
+# Keys come from repository secrets (Settings -> Secrets and variables -> Actions):
+# ANTHROPIC_API_KEY and HELIUS_API_KEY, optionally X_BEARER_TOKEN. The job writes them into a
+# throwaway .env on the runner with MODE=paper. It never writes a wallet key and never uploads
+# .env; the artifact holds only data/, reports/ and logs/, and logs mask keys.
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Acceptance run length in minutes (0 = preflight and probe only)"
+        required: true
+        default: "60"
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meme-agents-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Live paper run
+    # same-repository pull requests only: a fork's code never runs here
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.label.name == 'live-probe' || github.event.label.name == 'live-paper-run'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    defaults:
+      run:
+        shell: bash
+        working-directory: meme-agents
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: meme-agents/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit tests
+        run: python -m pytest -q
+
+      - name: Choose the run length
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_MINUTES: ${{ inputs.minutes }}
+          LABEL: ${{ github.event.label.name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then m="$INPUT_MINUTES"
+          elif [ "$LABEL" = "live-paper-run" ]; then m=60
+          else m=0; fi
+          if ! [[ "$m" =~ ^[0-9]+$ ]] || [ "$m" -gt 90 ]; then echo "::error::minutes must be a whole number 0-90"; exit 1; fi
+          echo "MINUTES=$m" >> "$GITHUB_ENV"
+          echo "acceptance minutes: $m"
+
+      - name: Write .env from repository secrets (paper mode only)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+        run: |
+          umask 077
+          {
+            echo "MODE=paper"
+            for k in ANTHROPIC_API_KEY HELIUS_API_KEY X_BEARER_TOKEN; do
+              if [ -n "${!k}" ]; then echo "$k=${!k}"; fi
+            done
+          } > .env
+          has() { [ -n "${!1}" ] && echo yes || echo no; }
+          echo "HAS_LLM=$(has ANTHROPIC_API_KEY)" >> "$GITHUB_ENV"
+          echo "secrets present: ANTHROPIC_API_KEY=$(has ANTHROPIC_API_KEY) HELIUS_API_KEY=$(has HELIUS_API_KEY) X_BEARER_TOKEN=$(has X_BEARER_TOKEN)"
+
+      - name: Preflight and live-data probe (free)
+        id: preflight
+        continue-on-error: true
+        run: python -m bot preflight --probe --seconds 150 $([ "$HAS_LLM" = yes ] || echo --no-llm)
+
+      - name: Acceptance run (paper mode)
+        id: acceptance
+        if: env.MINUTES != '0' && steps.preflight.outcome == 'success'
+        run: |
+          set +e
+          python -m bot acceptance --minutes "$MINUTES" $([ "$HAS_LLM" = yes ] || echo --no-llm)
+          code=$?
+          if [ $code -eq 3 ]; then
+            echo "::warning::INCOMPLETE: no ANTHROPIC_API_KEY secret, so the agents did not vote"
+            exit 0
+          fi
+          exit $code
+
+      - name: Report on the recorded data
+        if: env.MINUTES != '0' && steps.preflight.outcome == 'success'
+        run: python -m bot report
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "## Preflight and live-data probe"
+            echo '```'
+            # `if`, not `[ ] &&`: an unmatched glob must not fail the step under bash -e
+            for f in reports/preflight-*.txt; do if [ -f "$f" ]; then head -c 60000 "$f"; fi; done
+            echo '```'
+            for f in reports/acceptance-*.md; do if [ -f "$f" ]; then cat "$f"; fi; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload data, reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meme-agents-live-${{ github.run_id }}
+          path: |
+            meme-agents/reports/
+            meme-agents/logs/
+            meme-agents/data/bot.db*
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Fail when a full run could not start
+        if: env.MINUTES != '0' && steps.preflight.outcome != 'success'
+        run: |
+          echo "::error::preflight failed (a required API is unreachable or a required secret is missing); see the summary"
+          exit 1
