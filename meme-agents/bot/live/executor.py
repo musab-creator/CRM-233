@@ -310,8 +310,12 @@ class LiveExecutor:
             sol = -sol_delta if side == "buy" else sol_delta
             if not isfinite(tokens) or tokens <= 0 or not isfinite(sol) or (side == "buy" and sol <= 0):
                 raise ValueError("receipt has no matching SOL/token movement")
-            if side == "buy" and sol > intent["amount"] + self.s.NETWORK_FEE_SOL + 1e-9:
-                # Do not conceal the loss: leave the signature quarantined for operator reconciliation.
+            if side == "buy" and sol > spend_limit("buy", intent["amount"], self.s) + 1e-9:
+                # The same allowance the transaction was simulated against (amount, percentage fees,
+                # network fee, token-account rent). Beyond it, do not conceal the loss: leave the
+                # signature quarantined for operator reconciliation. (First live buy, 8 Oct: this
+                # check still used amount + network fee and refused a receipt the simulation had
+                # passed, so the confirmed buy sat unreconciled.)
                 raise ValueError("confirmed spend exceeds the authorized SOL limit")
             fee = max(0.0, sol - intent["amount"]) if side == "buy" else int(meta.get("fee") or 0) / LAMPORTS
             fill = Fill(side, intent["price"], sol / tokens, tokens, sol, fee, sig,
