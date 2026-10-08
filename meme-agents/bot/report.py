@@ -268,6 +268,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         **_agent_section(await agent_accuracy(db, s.MODE)),
         "gate_sweep": gate_sweep(scored),
         "signals": signal_check(scored),
+        "shadow_extremes": await shadow_extremes(db),
         "funnel_day": funnel,
         "spend": spend,
         "exit_reasons": exit_reasons,
@@ -281,6 +282,36 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
             "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL "
             "ORDER BY c.ts DESC LIMIT 15"),
     }
+
+
+async def shadow_extremes(db: Database, top: int = 5) -> dict:
+    """The shape of the shadow book's returns: median, the best and worst shadows with their exit,
+    hold time and prices, and how much of the total PnL the best few carry. A mean return in the
+    hundreds of percent is either a few real runners or a few bad marks; this is how to tell."""
+    rows = await db.fetchall(
+        "SELECT p.id, p.mint, p.candidate_id, m.symbol, p.cost_sol, p.pnl_sol, p.pnl_usd, p.exit_reason, "
+        "p.opened_at, p.closed_at, p.entry_price, p.last_price FROM positions p LEFT JOIN mints m ON m.mint=p.mint "
+        "WHERE p.kind='shadow' AND p.status='closed'")
+    scored = []
+    for p in rows:
+        if not all(isinstance(p[k], (int, float)) and math.isfinite(p[k]) for k in ("cost_sol", "pnl_sol", "pnl_usd")) \
+                or p["cost_sol"] <= 0:
+            continue
+        scored.append({"id": p["id"], "candidate_id": p["candidate_id"], "symbol": p["symbol"] or (p["mint"] or "?")[:8],
+                       "ret": p["pnl_sol"] / p["cost_sol"], "pnl_usd": p["pnl_usd"], "exit": p["exit_reason"] or "?",
+                       "held_s": max(0.0, (p["closed_at"] or 0) - (p["opened_at"] or p["closed_at"] or 0)),
+                       "entry_price": p["entry_price"], "last_price": p["last_price"]})
+    if not scored:
+        return {"n": 0, "median_return": None, "best": [], "worst": [], "top_pnl_share": None, "over_10x": 0}
+    scored.sort(key=lambda r: r["ret"])
+    n = len(scored)
+    median = scored[n // 2]["ret"] if n % 2 else (scored[n // 2 - 1]["ret"] + scored[n // 2]["ret"]) / 2
+    total = math.fsum(r["pnl_usd"] for r in scored)
+    best = list(reversed(scored[-top:]))
+    top_pnl = math.fsum(r["pnl_usd"] for r in best)
+    return {"n": n, "median_return": median, "best": best, "worst": scored[:top],
+            "top_pnl_share": (top_pnl / total) if total > 0 else None, "top_pnl_usd": top_pnl,
+            "over_10x": sum(r["ret"] >= 10 for r in scored)}
 
 
 def _agent_section(acc: dict) -> dict:
@@ -366,6 +397,23 @@ def render_text(r: dict) -> str:
     sh = r["shadow"]
     lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
               f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]
+    ex = r.get("shadow_extremes") or {}
+    if ex.get("n"):
+        share = f", the best {len(ex['best'])} carry ${ex['top_pnl_usd']:+,.0f}" + (
+            f" ({ex['top_pnl_share']:.0%} of it)" if ex.get("top_pnl_share") is not None else "")
+        lines.append(f"shadow returns: median {ex['median_return']:+.1%}, {ex['over_10x']} shadows at +1000% or more{share}")
+        def _row(x):
+            held = x["held_s"]
+            held_txt = f"{held / 3600:.1f}h" if held >= 3600 else f"{held / 60:.0f}m"
+            prices = (f"  {x['entry_price']:.3g} -> {x['last_price']:.3g}"
+                      if isinstance(x.get("entry_price"), (int, float)) and isinstance(x.get("last_price"), (int, float))
+                      else "")
+            return (f"  {x['ret']:+9.0%}  {str(x['symbol'])[:10]:<10} cand {x['candidate_id'] or '?':<5} "
+                    f"{x['exit'].replace('_', ' '):<24} held {held_txt:<6} ${x['pnl_usd']:+.2f}{prices}")
+        lines.append("  best:")
+        lines += [_row(x) for x in ex["best"]]
+        lines.append("  worst:")
+        lines += [_row(x) for x in ex["worst"]]
     if r["exit_reasons"]:
         lines.append("exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
     if r["open_positions"]:
