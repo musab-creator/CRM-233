@@ -115,6 +115,7 @@ class PositionManager:
         self._inflight: set[int] = set()
         self._tasks: set[asyncio.Task] = set()
         self._entry_uncertain: set[int] = set()
+        self._entry_told: dict[int, str] = {}      # the last ENTRY FAILED text sent per position: once, not every tick
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._kill_handled = False
@@ -291,8 +292,11 @@ class PositionManager:
                     else:
                         self._entry_uncertain.discard(p.id)
                         await self._cancel_entry(p, f"entry_error: {e}", now_s())
-                if self.notify:
-                    await self.notify(f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}")
+                text = f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}"
+                if self.notify and self._entry_told.get(p.id) != text:
+                    # an uncertain entry is retried every tick; the same failure is reported once
+                    self._entry_told[p.id] = text
+                    await self.notify(text)
                 return
             async with self.lock:
                 try:
@@ -303,6 +307,7 @@ class PositionManager:
                         p.last_price = price
                     raise
                 self._entry_uncertain.discard(p.id)
+                self._entry_told.pop(p.id, None)
                 if kill_switch_active(self.s):
                     await self.queue_exit(p, "kill_switch")
         finally:
