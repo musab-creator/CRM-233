@@ -146,6 +146,12 @@ def test_hard_red_flags_recompute_the_prompt_rules_from_the_data():
     assert "momentum" in hard_red_flags(_ctx(flow={"drawdown_from_peak_pct": 41.0}))[0]
     assert hard_red_flags(_ctx(flow={"net_flow_sol_5m": 2.0, "net_flow_sol_prev_5m": 12.0, "drawdown_from_peak_pct": 39})) == []
     assert "shrinking" in hard_red_flags(_ctx(pf={"unique_buyers": 100}, live={"unique_buyers": 60}))[0]
+    # Pao, 8 Oct: DexScreener -67% on every timeframe with no chain-read drawdown is the pump being over
+    collapsed = dict(_ctx(), pair={"price_change": {"m5": -67.14, "h1": -67.14, "h6": -67.14, "h24": -67.14}})
+    assert "collapse" in hard_red_flags(collapsed)[0] and "m5 -67.14%" in hard_red_flags(collapsed)[0]
+    assert hard_red_flags(dict(_ctx(), pair={"price_change": {"m5": -49.0, "h1": 120.0}})) == []
+    assert hard_red_flags(dict(_ctx(), pair={"price_change": {"m5": None, "h1": None}})) == []
+    assert hard_red_flags(dict(_ctx(), pair={"price_change": None})) == []
     assert hard_red_flags(_ctx(pf={"unique_buyers": 100}, live={"unique_buyers": 71})) == []
     # nulls are never flags
     assert hard_red_flags(_ctx(flow={"effective_holders": None, "same_slot_as_launch_buyers": None,

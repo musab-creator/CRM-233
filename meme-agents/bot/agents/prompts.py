@@ -127,7 +127,8 @@ bundling flags above is also present. On its own the creator selling is routine 
 recorded outcomes those tokens did not do worse than the rest, so alone it is not a flag;
 - `effective_buyers` / `effective_holders` below 10;
 - momentum reversed: `net_flow_sol_5m` is negative (net outflow) after a positive `net_flow_sol_prev_5m`, \
-or `drawdown_from_peak_pct` beyond 40;
+or `drawdown_from_peak_pct` beyond 40, or DexScreener's `pair.price_change` m5 or h1 at -50% or worse (the \
+pump is over; you would buy into the dump);
 - `live` metrics far below the `prefilter` snapshot (buyers or inflow shrinking since the scan);
 - a name or symbol that is a plain copy of a major coin with nothing else to it, plus no website or socials.
 

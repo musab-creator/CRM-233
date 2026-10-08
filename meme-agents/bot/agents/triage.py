@@ -56,6 +56,7 @@ def hard_red_flags(ctx: dict) -> list[str]:
     rug = ctx.get("rugcheck") or {}
     live = ctx.get("live") or {}
     pf = ctx.get("prefilter") or {}
+    change = (ctx.get("pair") or {}).get("price_change") or {}
     flags: list[str] = []
     for r in rug.get("risks") or []:
         if "rugged" in str(r.get("name", "")).lower():
@@ -90,6 +91,12 @@ def hard_red_flags(ctx: dict) -> list[str]:
     drawdown = _num(flow, "drawdown_from_peak_pct")
     if (now5 is not None and prev5 is not None and now5 < 0 < prev5) or (drawdown is not None and drawdown > 40):
         flags.append(f"momentum: net_flow_5m {now5} after {prev5}, drawdown {drawdown}%")
+    # DexScreener's own price change: the chain-read drawdown needs the bot's price history, which a
+    # candidate a few minutes old barely has (Pao, 8 Oct: -67% on every timeframe, no drawdown field,
+    # so a right PASS ran the committee anyway)
+    worst = min((v for v in (_num(change, "m5"), _num(change, "h1")) if v is not None), default=None)
+    if worst is not None and worst <= -50:
+        flags.append(f"collapse: DexScreener price change m5 {change.get('m5')}%, h1 {change.get('h1')}%")
     for key in ("unique_buyers", "net_inflow_sol"):
         before, after = _num(pf, key), _num(live, key)
         if before and after is not None and after < 0.7 * before:
