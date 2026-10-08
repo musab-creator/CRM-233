@@ -235,8 +235,14 @@ Added after the build, when research showed a change in PumpPortal's data API:
     in it, `LIVE_DRY_RUN` only turns on, and the gate threshold cannot go below the brief's
     0.65. So a phone in the wrong hands can deploy tested code from the tracked branch, restart,
     and move numbers inside their limits, but cannot enable real sends, raise the wallet cap or
-    read a secret. Requests expire after 10 minutes; one found half-done after a service restart
-    is reported, not re-run.
+    read a secret. Requests the service only finds 10 minutes after they were made are refused;
+    one found half-done after a service restart is reported, not re-run. The service trusts
+    nothing in a request file beyond what it re-validates (a result is named after the file, a
+    malformed file is refused and set aside), checks a `/set` against the bot's own cross-field
+    rules, backs `.env` up and reverts a value the bot will not start on, keeps a daily-loss
+    pause across a phone restart, and refuses `/dryrun on` while live positions are open. The
+    Telegram offset is persisted in the database so the restart a command causes never replays
+    it, and `.env` is rewritten in place so the bot's read-only bind mount on it survives.
 
 ## File tree
 

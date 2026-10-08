@@ -155,9 +155,9 @@ Send `/ops` in the chat: the first line must say `ops service: running`. From th
 | In the chat | What happens on the server |
 |---|---|
 | `/update` (or the Update button) | `bash deploy/update.sh`: fetches the branch the server tracks, builds and tests it in a separate environment (a few minutes), then restarts the bot. Nothing changes if the tests fail. The result, including "already on the latest code", comes back as a message. |
-| `/restart` | `sudo -n systemctl restart meme-agents`. Open positions are kept and resumed. |
-| `/set KEY=VALUE` | `bash deploy/set-env.sh KEY=VALUE`, then a **Restart now** button to apply it. `/set` alone lists every key you can change, its current value and its limits, for example `POSITION_MAX_USD` 1 to 20, `BANKROLL_USD` 1 to 100, `LLM_DAILY_BUDGET_USD` 0 to 50, `CONSENSUS_MIN_MEAN_CONFIDENCE` 0.65 to 1. |
-| `/dryrun on` | Writes `LIVE_DRY_RUN=true` and restarts: live mode keeps running but sends nothing. One way only. Open live positions are then closed in paper, not sold on chain, so `/stop` first if they should be sold. |
+| `/restart` | `sudo -n systemctl restart meme-agents`. Open positions are kept and resumed. A daily-loss pause survives a restart from the phone; `/restart reset` is the one that ends it and starts a new loss window. |
+| `/set KEY=VALUE` | `bash deploy/set-env.sh KEY=VALUE`, then a **Restart now** button (it asks to confirm) to apply it. `/set` alone lists every key you can change, its running value, its limits, and a value already waiting in `.env`; for example `POSITION_MAX_USD` 1 to 20, `BANKROLL_USD` 1 to 100, `LLM_DAILY_BUDGET_USD` 0 to 50, `CONSENSUS_MIN_MEAN_CONFIDENCE` 0.65 to 1. A value the bot's own rules reject (a minimum above its maximum) is refused before anything is written. |
+| `/dryrun on` | Writes `LIVE_DRY_RUN=true` and restarts: live mode keeps running but sends nothing. One way only. It is refused while live positions are open, because after the restart they would be closed in paper with the tokens still in the wallet: `/stop`, wait until `/status` shows no open positions, then `/dryrun on`. `/dryrun on force` switches anyway. |
 | `/ops` | Is the service running, what is queued, the last five results. |
 
 What stays on the server, on purpose: `MODE`, `LIVE_CONFIRM`, `LIVE_MAX_WALLET_SOL`, every key
@@ -165,8 +165,13 @@ and token, the wallet, `TELEGRAM_CHAT_ID`, paths and URLs, and `LIVE_DRY_RUN=fal
 holds the phone can deploy tested code from GitHub, restart, pause and stop, and move the
 operational numbers inside their limits; they cannot turn real sends on, raise the wallet cap
 or read a key. The service checks every request again before acting, runs nothing but the
-three commands above, refuses a request older than 10 minutes, and reports instead of
-re-running anything it finds half-done after its own restart.
+three commands above, and reports instead of re-running anything it finds half-done after its
+own restart. Requests run one at a time, so one sent during an update waits for it; a request
+the service only finds 10 minutes or more after it was made (it was not running) is refused.
+Before a `/set` the service keeps a copy of `.env`; if the bot then refuses to start on the new
+value, the copy is put back and the bot restarted again, so a setting can never lock the phone
+out. Run the installer as the bot's own user: as root it would install the service as root,
+and a `/set` would then leave `.env` unreadable for the bot.
 
 ```bash
 sudo systemctl status meme-agents-ops     # is it running?

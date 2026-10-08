@@ -263,9 +263,15 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   position and $100 bankroll, exits, the gate thresholds no lower than the brief's 0.65,
   pre-filter limits) and a few switches. Never from the phone: `MODE`, `LIVE_CONFIRM`,
   `LIVE_MAX_WALLET_SOL`, any key, token or wallet, `TELEGRAM_CHAT_ID`, paths and URLs;
-  `LIVE_DRY_RUN` only turns on. A request older than 10 minutes is refused, a request the
-  service finds half-done after its own restart is reported rather than run again, and `/ops`
-  shows the queue and the last results.
+  `LIVE_DRY_RUN` only turns on. A `/set` is also checked against the bot's own cross-field
+  rules as `.env` would load afterwards, `.env` is backed up first, and a value the bot will not
+  start on is reverted and the bot restarted again, so the phone cannot lock itself out. A
+  restart from the phone keeps a daily-loss pause (`/restart reset` ends it); `/dryrun on` is
+  refused while live positions are open (`/dryrun on force` overrides). Requests run one at a
+  time and wait behind an update; one the service only finds 10 minutes after it was made is
+  refused; one found half-done after the service's own restart is reported rather than run
+  again; the Telegram offset is persisted so the restart a command causes never replays it;
+  and `/ops` shows the queue and the last results.
 - **Updates.** `deploy/update.sh` fetches the tracked branch (fast-forward only), builds and
   tests it in a separate checkout and virtualenv while the old bot keeps running, then stops
   the service, switches code and dependencies over and restarts. If the restart or the health

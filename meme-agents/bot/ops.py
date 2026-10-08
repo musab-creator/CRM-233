@@ -14,32 +14,57 @@ to the chat. The watcher is the only process that acts, and it only ever runs:
 Never settable from the phone: MODE, LIVE_CONFIRM, LIVE_MAX_WALLET_SOL, any key, token or
 wallet, TELEGRAM_CHAT_ID, paths and URLs. LIVE_DRY_RUN can only be turned on. Enabling real
 sends, raising the wallet cap or touching a secret still needs a shell on the server.
+
+The watcher trusts nothing in a request file beyond what it re-validates: a result is named
+after the request file, never after a field in it; a malformed file is refused and quarantined,
+never allowed to crash the service; a `set` is checked against the bot's own cross-field rules
+(as `.env` would load afterwards), `.env` is backed up first, and a change the bot will not start
+on is reverted so the phone never locks itself out.
 """
 from __future__ import annotations
 
+import dataclasses
+import fcntl
 import itertools
 import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import time
 from pathlib import Path
 
-from .config import DIGEST_MODES, ConfigError, Settings, _coerce
+from .config import (
+    _FALSE,
+    _TRUE,
+    DIGEST_MODES,
+    ConfigError,
+    Settings,
+    _coerce,
+    load_dotenv,
+    load_settings,
+    validate_settings,
+)
 from .util import now_s
 
 log = logging.getLogger("bot.ops")
 
 ACTIONS = ("update", "restart", "set")
-MAX_REQUEST_AGE_S = 600       # a request the watcher finds later than this is refused, not run
+MAX_REQUEST_AGE_S = 600       # a request the watcher first sees later than this is refused, not run
 HEARTBEAT_S = 2.0             # the watcher touches its heartbeat file this often, also mid-command
 HEARTBEAT_STALE_S = 30.0      # ... and counts as down when the file is older than this
 OUTPUT_KEEP = 1500            # characters of command output kept in a result
 HISTORY_KEEP = 200            # lines of data/ops/history.jsonl kept
-TIMEOUT_S = {"update": 1500, "restart": 200, "set": 60}
+# restart: the bot's unit may take 150 s to stop (draining live exits) and 180 s to start
+TIMEOUT_S = {"update": 1500, "restart": 400, "set": 60}
+RESTART_SETTLE_S = 20.0       # after a failed restart, systemd retries a startup error by itself
+ENV_BACKUP_MAX_AGE_S = 3600.0 # a failed restart reverts a .env change made within this long
+KEEP_PAUSE_MAX_AGE_S = 1800.0 # a "keep the loss-cap pause" marker older than this is ignored
 SERVICE = "meme-agents"
+_seq = itertools.count()
+_sleep = time.sleep           # replaced in tests
 
 # What the phone may change: (type, low, high) for numbers, bool, a tuple of choices, or
 # ("true",) for a one-way flag. Bounds keep a bad tap inside the brief's limits: the gate
@@ -75,9 +100,6 @@ SETTABLE: dict[str, object] = {
 }
 
 
-_seq = itertools.count()
-
-
 class OpsError(Exception):
     """A request the phone is not allowed to make; the message is shown in the chat."""
 
@@ -85,6 +107,23 @@ class OpsError(Exception):
 def ops_dir(s: Settings) -> Path:
     """Next to the database: data/ops in production, the test's temporary directory in tests."""
     return s.path(s.DB_PATH).parent / "ops"
+
+
+def env_path(s: Settings) -> Path:
+    return s.path(".env")
+
+
+def _args_of(req) -> dict:
+    args = req.get("args") if isinstance(req, dict) else None
+    return args if isinstance(args, dict) else {}
+
+
+def _num(x) -> float:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
 
 
 def allowed(key: str) -> str:
@@ -101,8 +140,30 @@ def allowed(key: str) -> str:
     return "/".join(spec)
 
 
-def validate_set(key: str, raw: str) -> str:
-    """The normalized value to write for KEY=raw, or OpsError. Mirrors the bot's own parsing."""
+def current_settings(s: Settings) -> Settings:
+    """The settings as .env loads now (a /set may have changed .env since the bot started),
+    or the running ones when .env does not load (a /set is then the way to repair it)."""
+    try:
+        return load_settings(env_path(s))
+    except ConfigError:
+        return s
+
+
+def _check_with(current: Settings, key: str, value: str) -> None:
+    """The bot's own cross-field rules, on the settings as they would be after the change."""
+    try:
+        cand = dataclasses.replace(current)
+        setattr(cand, key, _coerce(value, getattr(current, key), key))
+        validate_settings(cand)
+    except ConfigError as e:
+        raise OpsError(f"{key}={value} refused: {e}") from None
+    except (ValueError, OverflowError):
+        raise OpsError(f"{key}={value} refused: not a value the bot can load") from None
+
+
+def validate_set(key: str, raw: str, current: Settings | None = None) -> str:
+    """The normalized value to write for KEY=raw, or OpsError. Mirrors the bot's own parsing,
+    and with `current` also its cross-field rules (POSITION_MIN_USD <= POSITION_MAX_USD, ...)."""
     key = (key or "").strip().upper()
     raw = (raw or "").strip()
     if key not in SETTABLE:
@@ -112,40 +173,51 @@ def validate_set(key: str, raw: str) -> str:
         raise OpsError(f"{key}: give a value, e.g. /set {key}=...")
     if spec is bool:
         try:
-            return "true" if _coerce(raw, True, key) else "false"
+            value = "true" if _coerce(raw, True, key) else "false"
         except ConfigError as e:
             raise OpsError(str(e)) from None
-    if isinstance(spec, tuple) and spec and isinstance(spec[0], type):
+    elif isinstance(spec, tuple) and spec and isinstance(spec[0], type):
         kind, lo, hi = spec
         try:
-            value = _coerce(raw, kind(0), key)
+            number = _coerce(raw, kind(0), key)
         except (ConfigError, ValueError, OverflowError):
             raise OpsError(f"{key}: use a {'whole ' if kind is int else ''}number between {allowed(key)}") from None
-        if not math.isfinite(value) or not lo <= value <= hi:
+        if not math.isfinite(number) or not lo <= number <= hi:
             raise OpsError(f"{key}: {raw} is outside {allowed(key)}")
-        return str(int(value)) if kind is int else f"{float(value):.10g}"
-    choice = raw.lower()
-    if choice not in spec:
-        if spec == ("true",):
-            raise OpsError(f"{key} can only be turned on from the phone (LIVE_DRY_RUN=false needs nano .env on the server)")
-        raise OpsError(f"{key}: use one of {allowed(key)}")
-    return choice
+        value = str(int(number)) if kind is int else f"{float(number):.10g}"
+    elif spec == ("true",):
+        word = raw.lower()
+        if word in _TRUE:
+            value = "true"
+        elif word in _FALSE:
+            raise OpsError(f"{key} can only be turned on from the phone ({key}=false needs nano .env on the server)")
+        else:
+            raise OpsError(f"{key}: use /dryrun on, or /set {key}=true")
+    else:
+        value = raw.lower()
+        if value not in spec:
+            raise OpsError(f"{key}: use one of {allowed(key)}")
+    if current is not None:
+        _check_with(current, key, value)
+    return value
 
 
-def validate(action: str, args: dict | None) -> dict:
+def validate(action: str, args, current: Settings | None = None) -> dict:
     """Normalized args for an action, or OpsError. Run both where a request is made and where it is executed."""
+    if args is not None and not isinstance(args, dict):
+        raise OpsError("args must be an object")
     args = dict(args or {})
     if action not in ACTIONS:
         raise OpsError(f"unknown action {action!r}")
     if action in ("update", "restart"):
         return {}
     key = str(args.get("key") or "").strip().upper()
-    value = validate_set(key, str(args.get("value") or ""))
+    value = validate_set(key, str(args.get("value") or ""), current)
     return {"key": key, "value": value, "restart": bool(args.get("restart", False))}
 
 
 def describe(req: dict) -> str:
-    action, args = req.get("action"), req.get("args") or {}
+    action, args = req.get("action"), _args_of(req)
     if action == "set":
         if args.get("key") == "LIVE_DRY_RUN":
             return "dry run ON"
@@ -168,14 +240,18 @@ def _read_json(path: Path) -> dict | None:
     return body if isinstance(body, dict) else None
 
 
-def request(s: Settings, action: str, args: dict | None = None, who: str = "telegram") -> dict:
-    """Queue one action for the watcher. Returns the request as written."""
-    args = validate(action, args)
+def request(s: Settings, action: str, args: dict | None = None, who: str = "telegram",
+            keep_pause: bool = False) -> dict:
+    """Queue one action for the watcher. Returns the request as written. `keep_pause` leaves a
+    marker so the restart this causes does not end a daily-loss pause (bot/engine.py)."""
+    args = validate(action, args, current_settings(s))
     d = ops_dir(s)
     d.mkdir(parents=True, exist_ok=True)
     ts = now_s()
     rid = f"{int(ts * 1000):013d}-{next(_seq) % 1000:03d}-{action}"   # file order = request order
     body = {"id": rid, "action": action, "args": args, "ts": ts, "from": who}
+    if keep_pause and (action in ("update", "restart") or args.get("restart")):
+        keep_pause_path(s).write_text(f"{rid}\n", encoding="utf-8")
     _write_json(d / f"{rid}.request", body)
     log.info("ops: queued %s (%s)", describe(body), rid)
     return body
@@ -202,6 +278,15 @@ def results(s: Settings) -> list[tuple[Path, dict]]:
     return out
 
 
+def quarantine(path: Path, why: str) -> None:
+    """Move a file the watcher or the bot cannot handle out of the way, once, with a log line."""
+    try:
+        path.replace(path.with_suffix(path.suffix + ".bad"))
+        log.warning("ops: %s set aside as %s.bad: %s", path.name, path.name, why)
+    except OSError as e:
+        log.warning("ops: could not set %s aside (%s): %s", path.name, e, why)
+
+
 def history(s: Settings, n: int = 5) -> list[dict]:
     path = ops_dir(s) / "history.jsonl"
     try:
@@ -211,9 +296,11 @@ def history(s: Settings, n: int = 5) -> list[dict]:
     out = []
     for line in lines[-n:]:
         try:
-            out.append(json.loads(line))
+            body = json.loads(line)
         except ValueError:
             continue
+        if isinstance(body, dict):
+            out.append(body)
     return out
 
 
@@ -240,44 +327,124 @@ def watcher_alive(s: Settings) -> bool:
     return age is not None and age <= HEARTBEAT_STALE_S
 
 
+def keep_pause_path(s: Settings) -> Path:
+    return ops_dir(s) / "keep-pause"
+
+
+def consume_keep_pause(s: Settings) -> bool:
+    """True once when a phone-initiated restart asked to keep the daily-loss pause (the marker
+    is removed either way; one older than KEEP_PAUSE_MAX_AGE_S no longer counts)."""
+    p = keep_pause_path(s)
+    try:
+        age = time.time() - p.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    return age <= KEEP_PAUSE_MAX_AGE_S
+
+
+# --- .env safety -------------------------------------------------------------------------
+def backup_env(s: Settings) -> Path | None:
+    """A copy of .env (0600) taken before a change, for revert."""
+    src = env_path(s)
+    if not src.exists():
+        return None
+    dst = ops_dir(s) / "env.backup"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    data = src.read_bytes()
+    fd = os.open(str(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    return dst
+
+
+def backup_is_fresh(s: Settings) -> bool:
+    """A backup from the last ENV_BACKUP_MAX_AGE_S that differs from .env: a recent change to undo."""
+    src, cur = ops_dir(s) / "env.backup", env_path(s)
+    try:
+        age = time.time() - src.stat().st_mtime
+        return age <= ENV_BACKUP_MAX_AGE_S and cur.exists() and src.read_bytes() != cur.read_bytes()
+    except OSError:
+        return False
+
+
+def restore_env(s: Settings) -> bool:
+    """Put the backup back, writing into the existing file (its inode carries the bot's
+    read-only bind mount; a rename over it would detach that mount)."""
+    src, dst = ops_dir(s) / "env.backup", env_path(s)
+    try:
+        data = src.read_bytes()
+        fd = os.open(str(dst), os.O_WRONLY)
+    except OSError:
+        return False
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return True
+
+
+def env_loads(s: Settings) -> str | None:
+    """None when .env loads with the bot's own parser and rules, else the error."""
+    try:
+        load_settings(env_path(s))
+    except ConfigError as e:
+        return str(e)
+    return None
+
+
 # --- the executor --------------------------------------------------------------------------
-def steps_for(s: Settings, action: str, args: dict) -> list[tuple[list[str], int]]:
-    """The commands one request runs, in order; a failing step stops the rest."""
-    app = s.path(".")
-    restart = [(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"]),
-               (["systemctl", "is-active", SERVICE], 20)]
-    if action == "update":
-        return [(["bash", str(app / "deploy" / "update.sh")], TIMEOUT_S["update"])]
-    if action == "restart":
-        return restart
-    steps = [(["bash", str(app / "deploy" / "set-env.sh"), f"{args['key']}={args['value']}"], TIMEOUT_S["set"])]
-    return steps + restart if args.get("restart") else steps
-
-
 def run_command(argv: list[str], timeout: float, cwd, tick=None) -> tuple[int, str]:
-    """Run one command without a terminal; `tick()` is called every HEARTBEAT_S while it runs."""
+    """Run one command without a terminal; `tick()` is called every HEARTBEAT_S while it runs.
+    The command gets its own process group so a deadline kills update.sh's pip, pytest and git
+    with it instead of leaving them holding the pipe."""
     env = {**os.environ, "MEME_AGENTS_NONINTERACTIVE": "1", "GIT_TERMINAL_PROMPT": "0"}
     try:
         p = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True)
+                             stderr=subprocess.STDOUT, text=True, start_new_session=True)
     except OSError as e:
         return 127, f"cannot run {argv[0]}: {e}"
-    deadline = time.monotonic() + timeout
+    out = _communicate(p, time.monotonic() + timeout, tick)
+    if out is not None:
+        return p.returncode, out
+    for sig, grace in ((signal.SIGTERM, 30.0), (signal.SIGKILL, 30.0)):
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            pass
+        out = _communicate(p, time.monotonic() + grace, tick)
+        if out is not None:
+            return 124, f"{out}\ntimed out after {timeout:.0f}s"
+    return 124, f"timed out after {timeout:.0f}s and the command did not stop"
+
+
+def _communicate(p, deadline: float, tick) -> str | None:
+    """Output once the command exits, None at the deadline; keeps the heartbeat going meanwhile."""
     while True:
         try:
             out, _ = p.communicate(timeout=HEARTBEAT_S)
-            return p.returncode, out or ""
+            return out or ""
         except subprocess.TimeoutExpired:
             if tick:
                 tick()
             if time.monotonic() > deadline:
-                p.terminate()
-                try:
-                    out, _ = p.communicate(timeout=30)
-                except subprocess.TimeoutExpired:
-                    p.kill()
-                    out, _ = p.communicate()
-                return 124, f"{out or ''}\ntimed out after {timeout:.0f}s"
+                return None
+
+
+def _wait(seconds: float, tick) -> None:
+    """Sleep in heartbeat-sized steps so /ops keeps seeing the watcher."""
+    steps = max(1, math.ceil(seconds / HEARTBEAT_S))
+    for _ in range(steps):
+        _sleep(seconds / steps)
+        if tick:
+            tick()
 
 
 def _git_head(app: Path) -> str | None:
@@ -290,21 +457,28 @@ def _git_head(app: Path) -> str | None:
 
 
 def _finish(s: Settings, req: dict, ok: bool, output: str, started: float, code: int | None = None) -> dict:
-    result = {"id": req.get("id"), "action": req.get("action"), "args": req.get("args") or {}, "ok": ok,
-              "code": code, "output": output[-OUTPUT_KEEP:], "started": started, "finished": now_s()}
+    """Write the result (named after the request file, never after anything inside it), append
+    it to the history and drop the request."""
+    result = {"id": str(req.get("id") or ""), "action": str(req.get("action") or ""), "args": _args_of(req),
+              "ok": ok, "code": code, "output": output[-OUTPUT_KEEP:], "started": started, "finished": now_s()}
     d = ops_dir(s)
     d.mkdir(parents=True, exist_ok=True)
     hist = d / "history.jsonl"
-    with open(hist, "a", encoding="utf-8") as f:
-        f.write(json.dumps(result, sort_keys=True) + "\n")
-    try:                                        # keep the file small; it is only for /ops
-        lines = hist.read_text(encoding="utf-8").splitlines()
+    try:
+        with open(hist, "a", encoding="utf-8") as f:
+            f.write(json.dumps(result, sort_keys=True) + "\n")
+        lines = hist.read_text(encoding="utf-8").splitlines()     # keep the file small; it is only for /ops
         if len(lines) > HISTORY_KEEP:
             hist.write_text("\n".join(lines[-HISTORY_KEEP:]) + "\n", encoding="utf-8")
     except OSError:
-        pass
-    _write_json(d / f"{req.get('id') or int(started * 1000)}.result", result)
+        log.exception("ops: history could not be written")
     path = req.get("_path")
+    name = Path(path).stem if path else f"{int(started * 1000):013d}-000-{result['action'] or 'request'}"
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".") or "request"
+    try:
+        _write_json(d / f"{name}.result", result)
+    except OSError:
+        log.exception("ops: result could not be written")
     if path:
         Path(path).unlink(missing_ok=True)
     log.log(logging.INFO if ok else logging.WARNING, "ops: %s %s (%.0fs)%s", describe(req),
@@ -312,83 +486,203 @@ def _finish(s: Settings, req: dict, ok: bool, output: str, started: float, code:
     return result
 
 
-def execute(s: Settings, req: dict, runner=run_command) -> dict:
+def execute(s: Settings, req: dict, runner=None) -> dict:
     """Run one request after checking it again. Always writes a result, never raises."""
     started = now_s()
+    try:
+        return _execute(s, req, runner or run_command, started)
+    except Exception as e:                      # a malformed file must not take the service down
+        log.exception("ops: request %s is malformed", req.get("id"))
+        try:
+            return _finish(s, req, False, f"refused: malformed request ({type(e).__name__}: {e})", started)
+        except Exception:
+            path = req.get("_path")
+            if path:
+                quarantine(Path(path), f"{type(e).__name__}: {e}")
+            return {"id": str(req.get("id") or ""), "action": str(req.get("action") or ""), "args": {}, "ok": False,
+                    "code": None, "output": f"refused: malformed request ({type(e).__name__})", "started": started,
+                    "finished": now_s()}
+
+
+def _execute(s: Settings, req: dict, runner, started: float) -> dict:
     action = str(req.get("action") or "")
     try:
-        args = validate(action, req.get("args"))
+        args = validate(action, req.get("args"), current_settings(s))
     except OpsError as e:
         return _finish(s, req, False, f"refused: {e}", started)
-    age = started - float(req.get("ts") or 0)
+    claimed = _num(req.get("claimed")) or started
+    age = claimed - _num(req.get("ts"))
     if age > MAX_REQUEST_AGE_S:
-        return _finish(s, req, False, f"refused: request is {age / 60:.0f} min old (the ops service was not running"
-                                      " when it was made); send it again", started)
+        return _finish(s, req, False, f"refused: the request was already {age / 60:.0f} min old when the ops service "
+                                      "first saw it (it was not running); send it again", started)
+    app = s.path(".")
     out: list[str] = []
-    for argv, timeout in steps_for(s, action, args):
-        code, text = runner(argv, timeout, s.path("."), lambda: beat(s))
-        out.append(text.strip())
+
+    def tick() -> None:
+        beat(s)
+
+    def run(argv: list[str], timeout: float) -> int:
+        code, text = runner(argv, timeout, app, tick)
+        if text.strip():
+            out.append(text.strip())
+        return code
+
+    def finish(ok: bool, code: int | None) -> dict:
+        return _finish(s, req, ok, "\n".join(out), started, code)
+
+    if action == "update":
+        code = run(["bash", str(app / "deploy" / "update.sh")], TIMEOUT_S["update"])
+        return finish(code == 0, code)
+    if action == "set":
+        backup_env(s)
+        code = run(["bash", str(app / "deploy" / "set-env.sh"), f"{args['key']}={args['value']}"], TIMEOUT_S["set"])
         if code != 0:
-            return _finish(s, req, False, "\n".join(x for x in out if x), started, code)
-    return _finish(s, req, True, "\n".join(x for x in out if x), started, 0)
+            return finish(False, code)
+        error = env_loads(s)
+        if error:                               # belt and braces: the bot would refuse to start on this file
+            restored = restore_env(s)
+            out.append(f"refused: .env would not load afterwards ({error}); "
+                       + ("the previous .env is restored" if restored else "restore .env by hand"))
+            return finish(False, 1)
+        if not args.get("restart"):
+            return finish(True, 0)
+    ok, code = _restart(s, run, tick, out)
+    return finish(ok, code)
 
 
-def watch_once(s: Settings, runner=run_command) -> list[dict]:
-    """Process everything queued, oldest first. A request interrupted by a watcher restart is
-    reported, not re-run (it would restart or deploy a second time)."""
-    beat(s)
-    done = []
-    for req in pending(s, ".running"):
-        done.append(_finish(s, req, False, "interrupted: the ops service restarted while this ran; "
-                                           "check /status and send it again if needed", now_s()))
-    for req in pending(s):
-        running = Path(req["_path"]).with_suffix(".running")
-        try:
-            Path(req["_path"]).replace(running)          # claim it first
-        except OSError:
-            continue
-        req["_path"] = str(running)
-        done.append(execute(s, req, runner))
-    beat(s)
-    return done
+def _restart(s: Settings, run, tick, out: list[str]) -> tuple[bool, int]:
+    """Restart the bot and make sure it is up. When it is not, and .env was changed within the
+    last hour, put the previous .env back and restart again: a setting the bot refuses must
+    never leave the phone without a bot to talk to."""
+    code = run(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"])
+    if code != 0 and "a password is required" in "\n".join(out):
+        return False, code
+    active = run(["systemctl", "is-active", SERVICE], 20) == 0
+    if not active:
+        _wait(RESTART_SETTLE_S, tick)           # a startup error (exit 3) is retried by systemd itself
+        active = run(["systemctl", "is-active", SERVICE], 20) == 0
+    if active:
+        if code != 0:
+            out.append("the restart command reported an error but the bot is active")
+        return True, 0
+    if backup_is_fresh(s) and restore_env(s):
+        out.append("the bot did not start on the changed .env: the previous .env is restored and the bot "
+                   "restarted again")
+        code2 = run(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"])
+        active = run(["systemctl", "is-active", SERVICE], 20) == 0
+        out.append("the bot is active again on the previous settings" if active
+                   else f"the bot is still not active (exit {code2}); check journalctl -u {SERVICE}")
+        return False, code or 1
+    out.append(f"the bot is not active after the restart; check journalctl -u {SERVICE}")
+    return False, code or 1
 
 
-def watch(s: Settings, runner=run_command, interval: float = HEARTBEAT_S, sleep=time.sleep) -> int:
+# --- the watcher ---------------------------------------------------------------------------
+def try_lock(s: Settings) -> int | None:
+    """One watcher at a time: the service, or a hand-run `python -m bot ops --once`, not both."""
+    d = ops_dir(s)
+    d.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(d / "watcher.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _safe_finish(s: Settings, req: dict, output: str) -> dict:
+    try:
+        return _finish(s, req, False, output, now_s())
+    except Exception as e:
+        quarantine(Path(req["_path"]), f"{type(e).__name__}: {e}")
+        return {"id": str(req.get("id") or ""), "action": str(req.get("action") or ""), "args": {}, "ok": False,
+                "code": None, "output": output, "started": now_s(), "finished": now_s()}
+
+
+def watch_once(s: Settings, runner=None, lock_fd: int | None = None) -> list[dict]:
+    """Process everything queued, oldest first. Every pending request is claimed before any is
+    run, so one waiting behind a long update does not expire. A request interrupted by a watcher
+    restart is reported, not re-run (it would restart or deploy a second time)."""
+    own = lock_fd is None
+    if own:
+        lock_fd = try_lock(s)
+        if lock_fd is None:
+            raise OpsError(f"another ops watcher is running (data/ops/watcher.lock is held, probably by "
+                           f"the {SERVICE}-ops service)")
+    try:
+        beat(s)
+        done = []
+        for req in pending(s, ".running"):
+            done.append(_safe_finish(s, req, "interrupted: the ops service restarted while this ran; "
+                                             "check /status and send it again if needed"))
+        claimed, now = [], now_s()
+        for req in pending(s):
+            running = Path(req["_path"]).with_suffix(".running")
+            try:
+                Path(req["_path"]).replace(running)          # claim it first
+            except OSError:
+                continue
+            req["_path"], req["claimed"] = str(running), now
+            claimed.append(req)
+        for req in claimed:
+            beat(s)
+            done.append(execute(s, req, runner))
+        beat(s)
+        return done
+    finally:
+        if own:
+            os.close(lock_fd)
+
+
+def watch(s: Settings, runner=None, interval: float = HEARTBEAT_S, sleep=time.sleep) -> int:
     """Run until SIGTERM/SIGINT, finishing the current request first. Returns after a deploy
     changed the code so systemd (Restart=always) starts the watcher again on the new version."""
+    lock_fd = try_lock(s)
+    if lock_fd is None:
+        log.error("ops: another watcher holds %s; not starting a second one", ops_dir(s) / "watcher.lock")
+        return 1
     stopping = False
 
     def _stop(signum, frame):
         nonlocal stopping
         stopping = True
 
+    previous: dict = {}
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
-            signal.signal(sig, _stop)
+            previous[sig] = signal.signal(sig, _stop)
         except ValueError:                          # not the main thread (tests)
             pass
-    app = s.path(".")
-    head = _git_head(app)
-    log.info("ops watcher on: queue %s, deploys %s at %s", ops_dir(s), SERVICE, (head or "?")[:12])
-    while not stopping:
-        for result in watch_once(s, runner):
-            if result["action"] == "update" and result["ok"] and _git_head(app) != head:
-                log.info("ops: code updated; exiting so the service starts this watcher on the new version")
-                return 0
-        sleep(interval)
-    log.info("ops watcher stopped")
-    return 0
+    try:
+        app = s.path(".")
+        head = _git_head(app)
+        log.info("ops watcher on: queue %s, deploys %s at %s", ops_dir(s), SERVICE, (head or "?")[:12])
+        while not stopping:
+            for result in watch_once(s, runner, lock_fd):
+                if result["action"] == "update" and result["ok"] and _git_head(app) != head:
+                    log.info("ops: code updated; exiting so the service starts this watcher on the new version")
+                    return 0
+            sleep(interval)
+        log.info("ops watcher stopped")
+        return 0
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        os.close(lock_fd)
 
 
+# --- what the chat shows -------------------------------------------------------------------
 def format_result(res: dict, max_lines: int = 12) -> str:
     """One chat message for a finished request."""
     what = describe(res)
-    secs = float(res.get("finished") or 0) - float(res.get("started") or 0)
+    args = _args_of(res)
+    secs = max(0.0, _num(res.get("finished")) - _num(res.get("started")))
     took = f" ({secs / 60:.0f} min {secs % 60:.0f} s)" if secs >= 60 else f" ({secs:.0f} s)"
     tail = [ln for ln in str(res.get("output") or "").strip().splitlines() if ln.strip()][-max_lines:]
     body = "\n".join(tail)
     if res.get("ok"):
-        if res.get("action") == "set" and (res.get("args") or {}).get("restart"):
+        if res.get("action") == "set" and args.get("restart"):
             head = f"✅ {what}: written to .env and the bot restarted{took}"
         elif res.get("action") == "set":
             head = f"✅ {what}: written to .env{took}. Restart to apply"
@@ -419,9 +713,9 @@ def format_queue(s: Settings) -> str:
     lines = [state]
     queued = pending(s) + pending(s, ".running")
     if queued:
-        lines.append(f"queued: {len(queued)}")
+        lines.append(f"queued: {len(queued)} (one runs at a time; one behind an update waits for it)")
         for req in queued:
-            lines.append(f"  · {describe(req)} ({(now_s() - float(req.get('ts') or 0)) / 60:.0f} min ago)"
+            lines.append(f"  · {describe(req)} ({(now_s() - _num(req.get('ts'))) / 60:.0f} min ago)"
                          + (" running" if str(req.get("_path", "")).endswith(".running") else ""))
     else:
         lines.append("queued: nothing")
@@ -429,17 +723,33 @@ def format_queue(s: Settings) -> str:
     if past:
         lines.append("last results:")
         for res in reversed(past):
-            when = time.strftime("%H:%MZ", time.gmtime(float(res.get("finished") or 0)))
+            when = time.strftime("%H:%MZ", time.gmtime(_num(res.get("finished"))))
             lines.append(f"  {'✅' if res.get('ok') else '❌'} {when} {describe(res)}")
     return "\n".join(lines)
 
 
+def _differs(current, raw: str, key: str) -> bool:
+    try:
+        return _coerce(raw, current, key) != current
+    except (ConfigError, ValueError, OverflowError):
+        return True
+
+
 def settable_text(s: Settings) -> str:
+    """The /set listing: running values, and the value waiting in .env where one differs."""
+    try:
+        in_env = load_dotenv(env_path(s))
+    except ConfigError:
+        in_env = {}
     rows = []
     for key in SETTABLE:
         cur = getattr(s, key, None)
-        cur = str(cur).lower() if isinstance(cur, bool) else cur
-        rows.append(f"{key}={cur}  ({allowed(key)})")
-    return ("/set KEY=VALUE writes the value to .env on the server (restart to apply). Allowed:\n"
+        shown = str(cur).lower() if isinstance(cur, bool) else cur
+        row = f"{key}={shown}  ({allowed(key)})"
+        waiting = (in_env.get(key) or "").strip()
+        if waiting and _differs(cur, waiting, key):
+            row += f"  -> {waiting} in .env, restart to apply"
+        rows.append(row)
+    return ("/set KEY=VALUE writes the value to .env on the server; a restart applies it. Running values:\n"
             + "\n".join(rows)
             + "\n\nNot from the phone: MODE, LIVE_CONFIRM, LIVE_MAX_WALLET_SOL, keys, tokens, the wallet, chat id, URLs.")

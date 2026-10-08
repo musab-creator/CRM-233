@@ -235,8 +235,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s = load_settings(overrides=SIM_OVERRIDES if sim else None)
     except ConfigError as e:
-        print(redact(f"config error: {e}"), file=sys.stderr)
-        return 2
+        if cmd != "ops":
+            print(redact(f"config error: {e}"), file=sys.stderr)
+            return 2
+        # The ops service must stay up on a broken .env: a /set from the phone is how it gets repaired.
+        from .config import Settings
+        print(redact(f"config error: {e}; the ops service runs with default paths so that /set can repair .env"),
+              file=sys.stderr)
+        s = Settings()
     register_secrets(getattr(s, field.name) for field in fields(s) if not field.repr)
     # Only long-running commands write the log file.
     try:

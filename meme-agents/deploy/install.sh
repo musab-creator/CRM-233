@@ -23,6 +23,19 @@ for arg in "$@"; do
   esac
 done
 cd "$APP_DIR"
+# The services run as whoever installs them: never root, and the ops service never a different
+# user than the bot (a /set would then leave .env owned by that user and unreadable for the bot).
+if [ "$(id -u)" = 0 ]; then
+  echo "run deploy/install.sh as the bot's own user (it calls sudo itself), not as root" >&2
+  exit 2
+fi
+if [ "$OPS" = 1 ] && command -v systemctl >/dev/null 2>&1; then
+  svc_user="$(systemctl show -p User --value meme-agents 2>/dev/null || true)"
+  if [ -n "$svc_user" ] && [ "$svc_user" != "$(id -un)" ]; then
+    echo "meme-agents runs as $svc_user; run deploy/install.sh --ops as that user" >&2
+    exit 2
+  fi
+fi
 # update.sh builds an isolated environment first; a direct reinstall must not change a running bot.
 if [ -z "${MEME_AGENTS_VENV_DIR:-}" ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet meme-agents; then
   if [ "$OPS" = 1 ] && [ "$SYSTEMD" = 0 ] && [ "$CRON" = 0 ]; then
@@ -101,8 +114,9 @@ if [ "$OPS" = 1 ]; then
   sudo systemctl enable meme-agents-ops >/dev/null
   sudo systemctl restart meme-agents-ops
   echo "installed $unit (running, enabled at boot): Telegram /update, /restart, /set and /dryrun now reach this server"
-  # `sudo -l <command>` says whether the sudoers line covers it, without running it or prompting.
-  if ! sudo -n -l "$(command -v systemctl)" restart meme-agents >/dev/null 2>&1; then
+  # `sudo -l <command>` says whether the sudoers line covers it, without running it or prompting;
+  # -k ignores the password sudo cached a moment ago, which would otherwise hide a missing line.
+  if ! sudo -k -n -l "$(command -v systemctl)" restart meme-agents >/dev/null 2>&1; then
     echo "note: restarts from the phone need the sudoers line from deploy/VPS.md, 'Control from your phone'"
   else
     echo "sudo allows the service restart without a password: /restart and /update will work from the phone"

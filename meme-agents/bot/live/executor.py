@@ -368,10 +368,11 @@ class LiveExecutor:
             return await self._buy(mint, sol_in, price)
 
     async def _buy(self, mint: str, sol_in: float, price: float) -> Fill:
-        if not self.dry_run:
-            existing = await self.db.kv_get(self._intent_key(mint, "buy"))
-            if existing:
-                return await self._receipt_fill(json.loads(existing))
+        # A real transaction may be in flight from before a restart, dry run or not: read its
+        # receipt (the receipt path only reads the chain) rather than simulate over it.
+        existing = await self.db.kv_get(self._intent_key(mint, "buy"))
+        if existing:
+            return await self._receipt_fill(json.loads(existing))
         if kill_switch_active(self.s):
             raise LiveExecutionError("STOP file present; entry refused")
         jup = self._use_jupiter(mint)
@@ -406,10 +407,9 @@ class LiveExecutor:
             return await self._sell(mint, tokens, price, fraction)
 
     async def _sell(self, mint: str, tokens: float, price: float, fraction: float) -> Fill:
-        if not self.dry_run:
-            existing = await self.db.kv_get(self._intent_key(mint, "sell"))
-            if existing:
-                return await self._receipt_fill(json.loads(existing))
+        existing = await self.db.kv_get(self._intent_key(mint, "sell"))
+        if existing:                                   # see _buy: never simulate over a pending real sell
+            return await self._receipt_fill(json.loads(existing))
         full = fraction >= 0.999
         jup = self._use_jupiter(mint)
         if self.dry_run:

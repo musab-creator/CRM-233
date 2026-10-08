@@ -19,6 +19,7 @@ from .agents.tools import ToolContext, build_specs, build_veto_specs
 from .agents.triage import run_triage, triage_first_call_usd, triage_skips, verify_triage
 from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
+from .ops import consume_keep_pause
 from .config import Settings, validate_settings
 from .consensus import apply_vetoes, gate
 from .db import Database
@@ -774,6 +775,10 @@ class Engine:
         finally:
             self.stop.set()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if clean_stop and consume_keep_pause(self.s):
+                # a restart queued from Telegram while the daily-loss pause is on: the pause survives it
+                log.warning("restart from Telegram keeps the daily-loss pause and its loss window")
+                clean_stop = False
             await self.shutdown(clean_stop=clean_stop)
 
     async def shutdown(self, *, clean_stop: bool = True) -> None:

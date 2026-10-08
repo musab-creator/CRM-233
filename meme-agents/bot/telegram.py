@@ -49,9 +49,10 @@ class Telegram:
     def _url(self, method: str) -> str:
         return f"https://api.telegram.org/bot{self.token}/{method}"
 
-    async def send(self, text: str, reply_markup: dict | None = None) -> None:
+    async def send(self, text: str, reply_markup: dict | None = None) -> bool:
+        """True when Telegram accepted the message (False when disabled, refused or unreachable)."""
         if not self.enabled:
-            return
+            return False
         body: dict = {"chat_id": self.chat_id, "text": text[:MAX_MESSAGE], "disable_web_page_preview": True}
         if reply_markup:
             body["reply_markup"] = reply_markup
@@ -59,13 +60,18 @@ class Telegram:
             r = await self.c.post(self._url("sendMessage"), json=body, timeout=10)
             if r.status_code != 200:
                 log.warning("telegram send failed: HTTP %s", r.status_code)
+                return False
         except httpx.HTTPError as e:
             log.warning("telegram send failed: %s", type(e).__name__)
+            return False
+        return True
 
-    async def send_long(self, text: str) -> None:
-        """A text longer than one message, in order."""
+    async def send_long(self, text: str) -> bool:
+        """A text longer than one message, in order. True when every part was accepted."""
+        ok = True
         for part in split_message(text):
-            await self.send(part)
+            ok = await self.send(part) and ok
+        return ok
 
     async def get_updates(self, offset: int | None, timeout_s: int = 25) -> list[dict]:
         """Long-poll incoming messages. Raises TelegramConflict on HTTP 409, httpx.HTTPError

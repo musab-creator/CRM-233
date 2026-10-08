@@ -26,9 +26,11 @@ from .digest import fmt_hold, hour_start, hourly_digest, usd
 from .ops import (
     SERVICE,
     OpsError,
+    current_settings,
     describe,
     format_queue,
     format_result,
+    quarantine,
     request,
     results,
     settable_text,
@@ -64,10 +66,12 @@ COMMANDS: list[tuple[str, str]] = [
 PAUSE_REASON = "paused from Telegram (/resume to continue)"
 STALE_COMMAND_S = 120   # commands sent while the bot was down are not answered on restart
 RESULTS_POLL_S = 2.0    # how often finished server actions are looked for
+RESULT_GIVE_UP_S = 600  # a result Telegram keeps refusing is set aside after this long
+LOSS_CAP_PREFIX = "daily loss cap hit:"
 # panel buttons that ask before acting: what -> the callback data of its "Yes" button
 CONFIRM = {"stop": "stop", "update": "update", "restart": "restart", "dryrun": "dryrun on"}
 SHOWN_SETTINGS = (
-    "MODE", "LLM_MODEL", "LLM_DAILY_BUDGET_USD", "LLM_BUDGET_PACING", "LLM_CONCURRENCY", "X_MONTHLY_BUDGET_USD",
+    "MODE", "LIVE_DRY_RUN", "LLM_MODEL", "LLM_DAILY_BUDGET_USD", "LLM_BUDGET_PACING", "LLM_CONCURRENCY", "X_MONTHLY_BUDGET_USD",
     "BANKROLL_USD", "MAX_OPEN_POSITIONS", "POSITION_MIN_USD", "POSITION_MAX_USD", "DAILY_LOSS_CAP_PCT",
     "TRAILING_STOP_PCT", "TIME_STOP_HOURS", "PF_MIN_AGE_MIN", "PF_MAX_AGE_MIN", "PF_MIN_UNIQUE_BUYERS",
     "PF_MIN_NET_INFLOW_SOL", "PF_MAX_TOP10_PCT", "PF_MIN_LIQUIDITY_USD", "CONSENSUS_MIN_MEAN_CONFIDENCE", "GATE_NEUTRAL_VOTES",
@@ -141,7 +145,8 @@ class TelegramCommands:
             return ("".join(lines).rstrip() or "no log file"), None
         if name == "settings":
             vals = [f"{k}={getattr(self.s, k)}" for k in SHOWN_SETTINGS if hasattr(self.s, k)]
-            return "current settings (change them in .env on the server, then restart):\n" + "\n".join(vals), None
+            return ("current settings (running values; /set changes the operational ones, keys and the live-mode "
+                    "locks change in .env on the server):\n" + "\n".join(vals)), None
         if name == "pause":
             if self.engine is None:
                 return "pause needs the running bot", None
@@ -177,11 +182,18 @@ class TelegramCommands:
             return (f"kill switch ON ({path}): no new entries, every position is being closed. "
                     "/resume turns it off"), None
         if name in ("update", "restart"):
-            return self._queue(name, {}, {
+            note = {
                 "update": "the server fetches the branch it tracks, builds and tests it in a separate "
                           "environment (a few minutes), then restarts the bot. The result arrives here",
                 "restart": "the service restarts; open positions are kept and resumed. The result arrives here",
-            }[name])
+            }[name]
+            reset = arg.lower() == "reset"
+            paused = self._loss_cap_paused()
+            if paused and reset:
+                note += ". This ends the daily-loss pause and restarts the loss window"
+            elif paused:
+                note += ". The daily-loss pause is kept across this restart (/restart reset would end it)"
+            return self._queue(name, {}, note, keep_pause=paused and not reset)
         if name == "set":
             if not arg:
                 return settable_text(self.s), None
@@ -189,34 +201,46 @@ class TelegramCommands:
             if not sep:
                 return "use /set KEY=VALUE; /set alone lists the keys and their limits", None
             try:
-                value = validate_set(key, value)
+                value = validate_set(key, value, current_settings(self.s))
             except OpsError as e:
                 return str(e), None
             return self._queue("set", {"key": key.strip().upper(), "value": value},
                                "written to .env on the server; a Restart button follows when it is done")
         if name == "dryrun":
-            if arg.lower() != "on":
+            words = arg.lower().split()
+            if not words or words[0] != "on":
                 return ("/dryrun on is the only direction from the phone: the bot keeps running in live mode "
                         "but stops sending real transactions. Turning real sends back on needs LIVE_DRY_RUN=false "
                         "in .env on the server and a restart"), None
+            if not self.s.is_live:
+                return "MODE=paper: nothing is ever sent. /dryrun applies to live mode only", None
             if self.s.LIVE_DRY_RUN:
-                return ("dry run is already on (LIVE_DRY_RUN=true): nothing is sent. "
-                        "Open positions are closed in paper only; /stop first if you want them sold"), None
-            return self._queue("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True},
-                               "LIVE_DRY_RUN=true is written and the bot restarts without real sends. Open live "
-                               "positions are then no longer sold on chain: /stop before this if they should be")
+                return "dry run is already on (LIVE_DRY_RUN=true): live mode, nothing is sent", None
+            held = self.engine.positions.active("real") if self.engine is not None else []
+            if held and words[1:] != ["force"]:
+                return (f"not queued: {len(held)} open live position(s). After the restart they would be closed "
+                        "in paper and the tokens stay in the wallet. Send /stop, wait until /status shows no open "
+                        "positions (the sells confirm on chain), then /dryrun on. /dryrun on force switches anyway"), None
+            paused = self._loss_cap_paused()
+            note = ("LIVE_DRY_RUN=true is written and the bot restarts without real sends"
+                    + (f"; {len(held)} open position(s) will be closed in paper, tokens stay in the wallet" if held else "")
+                    + (". The daily-loss pause is kept" if paused else ""))
+            return self._queue("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True}, note, keep_pause=paused)
         if name == "ops":
             return format_queue(self.s), None
         return f"unknown command /{name}. /help lists them", None
 
-    def _queue(self, action: str, args: dict, note: str) -> tuple[str, dict | None]:
+    def _loss_cap_paused(self) -> bool:
+        return self.engine is not None and str(self.engine.risk.paused_reason or "").startswith(LOSS_CAP_PREFIX)
+
+    def _queue(self, action: str, args: dict, note: str, keep_pause: bool = False) -> tuple[str, dict | None]:
         """Hand an action to the ops service, or explain why it cannot be."""
         if not watcher_alive(self.s):
             return (f"not queued: the ops service is not running on the server, so nothing can act on this. "
                     f"Once, on the server: bash deploy/install.sh --ops (deploy/VPS.md, 'Control from your phone'); "
                     f"if it was installed: sudo systemctl restart {SERVICE}-ops"), None
         try:
-            req = request(self.s, action, args)
+            req = request(self.s, action, args, keep_pause=keep_pause)
         except OpsError as e:
             return str(e), None
         except OSError as e:
@@ -225,22 +249,29 @@ class TelegramCommands:
         return f"queued: {describe(req)}. {note}", None
 
     async def deliver_results(self) -> int:
-        """Send every finished server action to the chat, then drop its result file."""
+        """Send every finished server action to the chat, then drop its result file. A result
+        Telegram refuses stays for the next round; one that cannot be read, or keeps failing, is
+        set aside so it never blocks the ones behind it."""
         sent = 0
         for path, res in results(self.s):
-            text = redact(format_result(res))
-            markup = None
-            if res.get("ok") and res.get("action") == "set" and not (res.get("args") or {}).get("restart"):
-                markup = keyboard([[("Restart now", "restart")]])
-            if markup:
-                await self.tg.send(text, reply_markup=markup)
-            else:
-                await self.tg.send_long(text)
             try:
-                path.unlink()
-            except OSError:
-                pass
-            sent += 1
+                text = redact(format_result(res))
+                markup = None
+                args = res.get("args") if isinstance(res.get("args"), dict) else {}
+                if res.get("ok") and res.get("action") == "set" and not args.get("restart"):
+                    markup = keyboard([[("Restart now", "confirm:restart")]])
+                ok = await (self.tg.send(text, reply_markup=markup) if markup else self.tg.send_long(text))
+            except Exception as e:                # a result file the bot cannot make sense of
+                quarantine(path, f"unreadable result: {type(e).__name__}: {e}")
+                continue
+            if ok:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                sent += 1
+            elif now_s() - float(res.get("finished") or 0) > RESULT_GIVE_UP_S:
+                quarantine(path, "Telegram kept refusing it")
         return sent
 
     async def _trades(self, n: int) -> str:
@@ -298,11 +329,27 @@ class TelegramCommands:
             log.exception("telegram /%s failed", cmd[0])
             return f"/{cmd[0]} failed; the log has the traceback", None
 
+    async def _load_offset(self) -> None:
+        """Start after the last update this bot has seen, even across a restart: Telegram only
+        confirms an update on the next getUpdates, which a /restart it caused can pre-empt."""
+        try:
+            raw = await self.db.kv_get("telegram_offset")
+            self.offset = int(raw) if raw else self.offset
+        except Exception:
+            log.exception("telegram offset could not be read")
+
+    async def _save_offset(self) -> None:
+        try:
+            await self.db.kv_set("telegram_offset", str(self.offset))
+        except Exception:
+            log.exception("telegram offset could not be saved")
+
     async def poll_once(self) -> int:
         """One getUpdates round: answer every command, advance the offset. Returns replies sent."""
         sent = 0
         for u in await self.tg.get_updates(self.offset):
             self.offset = max(self.offset or 0, int(u.get("update_id", 0)) + 1)
+            await self._save_offset()             # before acting: an update that restarts the bot must not replay
             reply = await self.handle_update(u)
             if reply:
                 text, markup = reply
@@ -314,6 +361,7 @@ class TelegramCommands:
         return sent
 
     async def run(self, stop) -> None:
+        await self._load_offset()
         await self.tg.set_commands(COMMANDS)
         log.info("telegram commands on for chat %s (/help lists them)", self.s.TELEGRAM_CHAT_ID)
         results_task = asyncio.create_task(self._results_loop(stop), name="telegram-results")
