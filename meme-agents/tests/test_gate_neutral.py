@@ -155,6 +155,19 @@ def test_neutral_buy_is_exempt_from_the_grounding_share_but_not_from_looking():
     confident = apply_grounding_guard(Vote("scout", "BUY", 0.8, [], ungrounded), ctx, tools, 1, 0.5,
                                       neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
     assert confident.vote == "PASS" and "grounding 0.00 < 0.5" in confident.guard
+    # a slightly-more-than-neutral BUY on ungrounded evidence (DESK95: "one link-only post") keeps its vote
+    # and loses the unverified extra confidence; at the claim threshold it is guarded in full
+    mild = apply_grounding_guard(Vote("scout", "BUY", 0.62, ["1 post, link-only"], ungrounded), ctx, tools, 1, 0.5,
+                                 neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert mild.vote == "BUY" and mild.confidence == 0.6 and mild.guard.startswith("BUY 0.62 held to the neutral 0.6")
+    claim = apply_grounding_guard(Vote("scout", "BUY", 0.7, ["1 post, link-only"], ungrounded), ctx, tools, 1, 0.5,
+                                  neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert claim.vote == "PASS" and claim.guard == "BUY evidence grounding 0.00 < 0.5"
+    # evidence grounded in a tool result keeps the 0.62 as it is
+    tools.add("x_search: 1 result; author followers 2345")
+    kept = apply_grounding_guard(Vote("scout", "BUY", 0.62, ["one real author"], ["author followers 2345"]), ctx,
+                                 tools, 1, 0.5, neutral_max_conf=NEUTRAL_MAX_CONFIDENCE)
+    assert kept.vote == "BUY" and kept.confidence == 0.62 and kept.guard is None
     # strict mode (no neutral band) guards the 0.6 vote too
     strict = apply_grounding_guard(Vote("scout", "BUY", 0.6, [], ungrounded), ctx, tools, 1, 0.5)
     assert strict.vote == "PASS" and strict.raw_vote == "BUY"

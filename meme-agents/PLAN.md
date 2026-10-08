@@ -189,6 +189,10 @@ Added after the build, when research showed a change in PumpPortal's data API:
     "x_search results 0" has no number the corpus can match. A neutral BUY (confidence at or
     below 0.6 from Scout or Hunter in this mode) is therefore exempt from the grounding share;
     it still needs at least one successful tool call, and the Analyst's BUY is guarded as before.
+    A Scout or Hunter BUY between 0.6 and 0.7 on evidence the matcher cannot credit (DESK95, 8 Oct:
+    Scout at 0.62 on "one link-only post", counts of 0 and 1 that the matcher ignores) is held to
+    the neutral 0.6 instead of flipped to PASS: the unverified part is the extra confidence, not
+    the look. From 0.7 up a BUY claims attention or a catalyst and is guarded in full.
 29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
     force their single tool with `tool_choice`, and a committee agent is forced to call
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before

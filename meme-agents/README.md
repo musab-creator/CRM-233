@@ -159,7 +159,9 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    floor then means Analyst's on-chain evidence has to carry the decision (0.6 + 0.6 + 0.75 is
    the lowest unanimous BUY that passes), and the veto stage still runs. A neutral BUY is exempt
    from the evidence-grounding share of the guard, because its evidence is the absence of
-   findings; it still needs a successful tool call.
+   findings; it still needs a successful tool call. A Scout or Hunter BUY between 0.6 and 0.7 on
+   evidence the guard cannot credit is held to the neutral 0.6 rather than flipped to PASS; from
+   0.7 up it is guarded in full.
 
    **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
    so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a

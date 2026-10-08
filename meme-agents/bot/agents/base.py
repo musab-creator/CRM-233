@@ -133,6 +133,7 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
 
 NEUTRAL_MAX_CONFIDENCE = 0.6          # a BUY at or below this, from a neutral-mode Scout or Hunter, ...
 NEUTRAL_AGENTS = ("scout", "hunter")  # ... claims nothing positive: "I looked and found nothing against it"
+NEUTRAL_CLAIM_CONFIDENCE = 0.7        # from here up a neutral-mode BUY claims attention or a catalyst: grounded or PASS
 
 
 def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls_ok: int,
@@ -147,20 +148,33 @@ def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls
     agent did look, but its evidence is the absence of findings ("x_search results 0"), which the
     grounding share cannot credit: on the first live evening every such vote was flipped to PASS at
     grounding 0.17-0.30 while the Analyst voted BUY at 0.76-0.82. The guard exists to stop
-    fabricated positive claims; a neutral vote makes none."""
+    fabricated positive claims; a neutral vote makes none.
+
+    Between the neutral vote and NEUTRAL_CLAIM_CONFIDENCE a neutral-mode BUY (Scout at 0.62: "one
+    link-only post, not bot-like") claims a little more than nothing, on counts of 0 or 1 that the
+    matcher ignores on purpose. Flipping it to PASS turned a mildly positive look into a veto
+    (DESK95, 8 Oct); the unverified part is the extra confidence, so that is what goes: the vote
+    becomes the neutral BUY. From NEUTRAL_CLAIM_CONFIDENCE up it claims attention or a catalyst and
+    is guarded in full."""
     vote.raw_vote = vote.vote
     vote.tool_calls_ok = tool_calls_ok
     grounded = [e for e in vote.evidence if context.grounded(e) or tools.grounded(e)]
     vote.grounding = round(len(grounded) / len(vote.evidence), 3) if vote.evidence else 0.0
     if vote.vote == "BUY":
+        why = None
         if tool_calls_ok < 1:
             vote.vote, vote.guard = "PASS", "BUY without any successful tool call"
         elif neutral_max_conf is not None and vote.confidence <= neutral_max_conf:
             pass  # neutral BUY: looked, found nothing against it; the Analyst must carry the gate
         elif vote.grounding < min_ratio:
-            vote.vote, vote.guard = "PASS", f"BUY evidence grounding {vote.grounding:.2f} < {min_ratio}"
+            why = f"evidence grounding {vote.grounding:.2f} < {min_ratio}"
         elif not any(tools.grounded(e) for e in vote.evidence):
-            vote.vote, vote.guard = "PASS", "BUY evidence cites nothing from tool results"
+            why = "evidence cites nothing from tool results"
+        if why and neutral_max_conf is not None and vote.confidence < NEUTRAL_CLAIM_CONFIDENCE:
+            vote.guard = f"BUY {vote.confidence:.2f} held to the neutral {neutral_max_conf:g}: {why}"
+            vote.confidence = neutral_max_conf
+        elif why:
+            vote.vote, vote.guard = "PASS", "BUY " + why
     return vote
 
 
