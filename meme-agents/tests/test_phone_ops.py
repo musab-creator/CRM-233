@@ -27,6 +27,7 @@ def test_settable_allowlist_and_bounds():
     assert ops.validate_set("TRIAGE_ENABLED", "Yes") == "true"
     assert ops.validate_set("TELEGRAM_DIGEST", "Wins") == "wins"
     assert ops.validate_set("LIVE_DRY_RUN", "true") == "true"
+    assert ops.validate_set("X_MONTHLY_BUDGET_USD", "150") == "150"      # the server's current value must fit
     for key, raw in [("POSITION_MAX_USD", "50"), ("BANKROLL_USD", "0"), ("BANKROLL_USD", "nan"), ("BANKROLL_USD", "inf"),
                      ("MAX_OPEN_POSITIONS", "2.5"), ("MAX_OPEN_POSITIONS", "9"), ("CONSENSUS_MIN_MEAN_CONFIDENCE", "0.6"),
                      ("GATE_NEUTRAL_VOTES", "maybe"), ("TELEGRAM_DIGEST", "loud"), ("LIVE_DRY_RUN", "false"),

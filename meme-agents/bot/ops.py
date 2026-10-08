@@ -46,7 +46,7 @@ SERVICE = "meme-agents"
 # never drops below the brief's 0.65, a position never exceeds $20, the bankroll $100.
 SETTABLE: dict[str, object] = {
     "LLM_DAILY_BUDGET_USD": (float, 0, 50),
-    "X_MONTHLY_BUDGET_USD": (float, 0, 100),
+    "X_MONTHLY_BUDGET_USD": (float, 0, 200),
     "LLM_BUDGET_PACING": bool,
     "BANKROLL_USD": (float, 1, 100),
     "MAX_OPEN_POSITIONS": (int, 1, 5),
