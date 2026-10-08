@@ -129,6 +129,9 @@ class Settings:
     ENTRY_SLIPPAGE_PCT: float = 3.0
     EXIT_SLIPPAGE_PCT: float = 5.0
     ENTRY_FILL_TIMEOUT_S: float = 300.0
+    # A live buy the pre-broadcast checks refuse (a moved price, an RPC slip) is retried on later
+    # ticks, with a fresh transaction each time, this many times in all before the entry is dropped.
+    LIVE_ENTRY_ATTEMPTS: int = 3
     EXIT_FILL_TIMEOUT_S: float = 120.0
     EXIT_RETRY_BASE_S: float = 5.0
     EXIT_RETRY_MAX_S: float = 300.0
@@ -313,7 +316,7 @@ def validate_settings(s: Settings) -> None:
         "LLM_MAX_TURNS", "LLM_MAX_TOKENS", "LLM_MAX_INPUT_BYTES", "LLM_TIMEOUT_S", "LLM_CONCURRENCY",
         "LLM_PRICE_IN_PER_MTOK", "LLM_PRICE_OUT_PER_MTOK", "TRIAGE_PRICE_IN_PER_MTOK",
         "TRIAGE_PRICE_OUT_PER_MTOK", "TRIAGE_MAX_TOKENS", "TIME_STOP_HOURS",
-        "ENTRY_FILL_TIMEOUT_S", "EXIT_FILL_TIMEOUT_S", "EXIT_RETRY_BASE_S", "EXIT_RETRY_MAX_S",
+        "ENTRY_FILL_TIMEOUT_S", "LIVE_ENTRY_ATTEMPTS", "EXIT_FILL_TIMEOUT_S", "EXIT_RETRY_BASE_S", "EXIT_RETRY_MAX_S",
         "LIVE_CONFIRM_TIMEOUT_S", "CURVE_POLL_CALLS_PER_MIN", "CURVE_HOT_POLL_S", "CURVE_POLL_SCALE",
         "DEX_TOKENS_RPS", "DEX_BOOSTS_RPS", "RUGCHECK_RPS", "HELIUS_RPC_RPS",
         "HELIUS_ENHANCED_RPS", "JUPITER_RPS", "REGIME_REFRESH_MIN",

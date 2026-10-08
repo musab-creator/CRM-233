@@ -120,6 +120,7 @@ class PositionManager:
         self._entry_uncertain: set[int] = set()
         self._entry_told: dict[int, str] = {}      # the last ENTRY FAILED text sent per position: once, not every tick
         self._suspect: dict[int, tuple[float, float]] = {}   # position id -> (held mark, its ts)
+        self._entry_attempts: dict[int, int] = {}            # live buys refused before broadcast, per position
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._kill_handled = False
@@ -299,10 +300,17 @@ class PositionManager:
                         p.last_price = price
                         await self._save(p)
                         self.risk.paused_reason = "unresolved live transaction; entries paused until restart after reconciliation"
+                        text = f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}"
                     else:
                         self._entry_uncertain.discard(p.id)
-                        await self._cancel_entry(p, f"entry_error: {e}", now_s())
-                text = f"ENTRY FAILED #{p.id} {p.mint}: {str(e)[:200]}"
+                        n = self._entry_attempts[p.id] = self._entry_attempts.get(p.id, 0) + 1
+                        if n >= self.s.LIVE_ENTRY_ATTEMPTS or "STOP file" in str(e):
+                            # the cancel reports itself, once
+                            await self._cancel_entry(p, f"entry_error after {n} attempts: {e}", now_s())
+                            return
+                        # nothing was broadcast: stay pending and build a fresh transaction on the next tick
+                        text = (f"ENTRY RETRY #{p.id} {p.mint}: attempt {n} of {self.s.LIVE_ENTRY_ATTEMPTS} refused, "
+                                f"{str(e)[:200]}")
                 if self.notify and self._entry_told.get(p.id) != text:
                     # an uncertain entry is retried every tick; the same failure is reported once
                     self._entry_told[p.id] = text
@@ -456,6 +464,7 @@ class PositionManager:
             await self.watch_account(p.creator, False)
         self.positions.pop(p.id, None)
         self._suspect.pop(p.id, None)
+        self._entry_attempts.pop(p.id, None)
 
     def _state(self, p: Position) -> ExitState:
         return ExitState(p.entry_price, p.peak_price or p.entry_price, bool(p.tp_done), p.opened_at,

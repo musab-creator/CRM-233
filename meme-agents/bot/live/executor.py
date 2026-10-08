@@ -361,8 +361,12 @@ class LiveExecutor:
                     "encoding": "base64", "sigVerify": True, "commitment": "confirmed",
                     "accounts": {"encoding": "base64", "addresses": [self.pubkey]}}])
             value = (simulation or {}).get("value")
-            if not isinstance(value, dict) or value.get("err") is not None:
-                raise ValueError("simulation failed or returned no result")
+            if not isinstance(value, dict):
+                raise ValueError("simulation returned no result")
+            if value.get("err") is not None:
+                # the program's own words: a slippage or balance failure reads differently from an RPC slip
+                said = [ln for ln in (value.get("logs") or []) if "error" in ln.lower() or "failed" in ln.lower()][-2:]
+                raise ValueError(f"simulation failed: {value['err']}" + (f" ({'; '.join(said)})" if said else ""))
             accounts = value.get("accounts") or []
             if len(accounts) != 1 or not isinstance(accounts[0], dict):
                 raise ValueError("simulation returned no payer account")
