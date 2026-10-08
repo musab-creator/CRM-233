@@ -133,7 +133,8 @@ def test_command_loop_sets_menu_and_stops(tmp_path):
     asyncio.run(go())
     assert http.posts[0][0] == "setMyCommands"
     assert [c["command"] for c in http.posts[0][1]["commands"]] == [
-        "panel", "status", "digest", "report", "trades", "log", "settings", "pause", "resume", "stop", "help"]
+        "panel", "status", "digest", "report", "trades", "log", "settings", "pause", "resume", "stop",
+        "update", "restart", "set", "dryrun", "ops", "help"]
 
 
 def test_preflight_hint_explains_409_from_the_running_bot():

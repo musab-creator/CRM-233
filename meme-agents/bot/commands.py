@@ -4,9 +4,13 @@ Read: /status, /digest, /report, /trades, /log, /settings. Act: /pause and /resu
 only), /stop (the STOP kill switch: no entries, close every position). /panel shows the same
 as buttons; the destructive ones ask for a confirmation tap. Only messages from
 TELEGRAM_CHAT_ID are answered; anything else is logged and ignored. The loop long-polls
-`getUpdates`, so it needs no open port. Nothing here can change a setting, unlock live mode
-or send a transaction: settings change in `.env` on the server, and the bot runs with its
-code and `.env` read-only.
+`getUpdates`, so it needs no open port.
+
+Server actions (/update, /restart, /set, /dryrun) are not run here: the bot runs with its code
+and `.env` read-only and no privileges, so they are queued as files for the ops companion
+service (bot/ops.py, deploy/meme-agents-ops.service), which re-checks each one against the same
+allowlist and reports back into the chat. Nothing in this chat can unlock live mode, raise the
+wallet cap, turn dry run off or touch a key: those stay in `.env` on the server.
 """
 from __future__ import annotations
 
@@ -19,11 +23,23 @@ import httpx
 from .config import Settings
 from .db import Database
 from .digest import fmt_hold, hour_start, hourly_digest, usd
+from .ops import (
+    SERVICE,
+    OpsError,
+    describe,
+    format_queue,
+    format_result,
+    request,
+    results,
+    settable_text,
+    validate_set,
+    watcher_alive,
+)
 from .report import build_report, render_text
 from .risk import kill_switch_active
 from .status import build_status, health
 from .telegram import Telegram, TelegramConflict
-from .util import backoff_delay, now_s
+from .util import backoff_delay, now_s, redact
 
 log = logging.getLogger("bot.commands")
 
@@ -38,11 +54,18 @@ COMMANDS: list[tuple[str, str]] = [
     ("pause", "no new entries; open positions keep running"),
     ("resume", "allow entries again (clears pause and the kill switch)"),
     ("stop", "kill switch: no new entries, close every position"),
+    ("update", "deploy the latest tested code from GitHub and restart"),
+    ("restart", "restart the bot service"),
+    ("set", "/set KEY=VALUE changes a bounded setting; /set alone lists them"),
+    ("dryrun", "/dryrun on: live mode stops sending real transactions (one way)"),
+    ("ops", "queued and finished server actions"),
     ("help", "this list"),
 ]
 PAUSE_REASON = "paused from Telegram (/resume to continue)"
 STALE_COMMAND_S = 120   # commands sent while the bot was down are not answered on restart
-CONFIRM = ("stop",)     # panel buttons that ask before acting
+RESULTS_POLL_S = 2.0    # how often finished server actions are looked for
+# panel buttons that ask before acting: what -> the callback data of its "Yes" button
+CONFIRM = {"stop": "stop", "update": "update", "restart": "restart", "dryrun": "dryrun on"}
 SHOWN_SETTINGS = (
     "MODE", "LLM_MODEL", "LLM_DAILY_BUDGET_USD", "LLM_BUDGET_PACING", "LLM_CONCURRENCY", "X_MONTHLY_BUDGET_USD",
     "BANKROLL_USD", "MAX_OPEN_POSITIONS", "POSITION_MIN_USD", "POSITION_MAX_USD", "DAILY_LOSS_CAP_PCT",
@@ -53,7 +76,9 @@ SHOWN_SETTINGS = (
 )
 PANEL = [[("Status", "status"), ("Digest", "digest"), ("Report", "report")],
          [("Trades", "trades"), ("Log", "log"), ("Settings", "settings")],
-         [("Pause", "pause"), ("Resume", "resume"), ("Stop", "confirm:stop")]]
+         [("Pause", "pause"), ("Resume", "resume"), ("Stop", "confirm:stop")],
+         [("Update", "confirm:update"), ("Restart", "confirm:restart"), ("Dry run ON", "confirm:dryrun")],
+         [("Ops", "ops")]]
 
 
 def parse_command(text: str | None) -> tuple[str, str] | None:
@@ -96,7 +121,7 @@ class TelegramCommands:
             if what not in CONFIRM:
                 return f"nothing to confirm for {what}", None
             return (f"/{what}: {dict(COMMANDS).get(what, what)}. Sure?",
-                    keyboard([[("Yes, " + what, what), ("Cancel", "cancel")]]))
+                    keyboard([[("Yes, " + what, CONFIRM[what]), ("Cancel", "cancel")]]))
         if name == "cancel":
             return "cancelled", None
         if name == "status":
@@ -151,7 +176,72 @@ class TelegramCommands:
             log.warning("kill switch set from Telegram: %s", path)
             return (f"kill switch ON ({path}): no new entries, every position is being closed. "
                     "/resume turns it off"), None
+        if name in ("update", "restart"):
+            return self._queue(name, {}, {
+                "update": "the server fetches the branch it tracks, builds and tests it in a separate "
+                          "environment (a few minutes), then restarts the bot. The result arrives here",
+                "restart": "the service restarts; open positions are kept and resumed. The result arrives here",
+            }[name])
+        if name == "set":
+            if not arg:
+                return settable_text(self.s), None
+            key, sep, value = arg.partition("=")
+            if not sep:
+                return "use /set KEY=VALUE; /set alone lists the keys and their limits", None
+            try:
+                value = validate_set(key, value)
+            except OpsError as e:
+                return str(e), None
+            return self._queue("set", {"key": key.strip().upper(), "value": value},
+                               "written to .env on the server; a Restart button follows when it is done")
+        if name == "dryrun":
+            if arg.lower() != "on":
+                return ("/dryrun on is the only direction from the phone: the bot keeps running in live mode "
+                        "but stops sending real transactions. Turning real sends back on needs LIVE_DRY_RUN=false "
+                        "in .env on the server and a restart"), None
+            if self.s.LIVE_DRY_RUN:
+                return ("dry run is already on (LIVE_DRY_RUN=true): nothing is sent. "
+                        "Open positions are closed in paper only; /stop first if you want them sold"), None
+            return self._queue("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True},
+                               "LIVE_DRY_RUN=true is written and the bot restarts without real sends. Open live "
+                               "positions are then no longer sold on chain: /stop before this if they should be")
+        if name == "ops":
+            return format_queue(self.s), None
         return f"unknown command /{name}. /help lists them", None
+
+    def _queue(self, action: str, args: dict, note: str) -> tuple[str, dict | None]:
+        """Hand an action to the ops service, or explain why it cannot be."""
+        if not watcher_alive(self.s):
+            return (f"not queued: the ops service is not running on the server, so nothing can act on this. "
+                    f"Once, on the server: bash deploy/install.sh --ops (deploy/VPS.md, 'Control from your phone'); "
+                    f"if it was installed: sudo systemctl restart {SERVICE}-ops"), None
+        try:
+            req = request(self.s, action, args)
+        except OpsError as e:
+            return str(e), None
+        except OSError as e:
+            log.warning("ops request failed: %s", e)
+            return "not queued: the request file could not be written; the log has the error", None
+        return f"queued: {describe(req)}. {note}", None
+
+    async def deliver_results(self) -> int:
+        """Send every finished server action to the chat, then drop its result file."""
+        sent = 0
+        for path, res in results(self.s):
+            text = redact(format_result(res))
+            markup = None
+            if res.get("ok") and res.get("action") == "set" and not (res.get("args") or {}).get("restart"):
+                markup = keyboard([[("Restart now", "restart")]])
+            if markup:
+                await self.tg.send(text, reply_markup=markup)
+            else:
+                await self.tg.send_long(text)
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            sent += 1
+        return sent
 
     async def _trades(self, n: int) -> str:
         rows = await self.db.fetchall(
@@ -188,7 +278,8 @@ class TelegramCommands:
             await self.tg.answer_callback(cb.get("id"))
             if not data or not self._authorized(chat, data, (cb.get("from") or {}).get("username") or "?"):
                 return None
-            cmd = (data, "")
+            head, _, rest = data.partition(" ")
+            cmd = (head, rest.strip())
         else:
             msg = u.get("message") or {}
             chat = str((msg.get("chat") or {}).get("id", ""))
@@ -225,24 +316,38 @@ class TelegramCommands:
     async def run(self, stop) -> None:
         await self.tg.set_commands(COMMANDS)
         log.info("telegram commands on for chat %s (/help lists them)", self.s.TELEGRAM_CHAT_ID)
+        results_task = asyncio.create_task(self._results_loop(stop), name="telegram-results")
         attempt = 0
+        try:
+            while not stop.is_set():
+                try:
+                    t0 = now_s()
+                    await self.poll_once()
+                    attempt = 0
+                    if now_s() - t0 < 1.0:            # Telegram answered at once: do not hammer it
+                        await _sleep(stop, 1.0)
+                except TelegramConflict:
+                    if attempt == 0:
+                        log.warning("telegram: another process is reading this bot's messages (HTTP 409); "
+                                    "commands pause until it stops (a second bot, or preflight listing chat ids)")
+                    await _sleep(stop, 5 + backoff_delay(attempt, 5.0, 60.0))
+                    attempt += 1
+                except (httpx.HTTPError, ValueError) as e:
+                    log.warning("telegram getUpdates failed: %s", type(e).__name__)
+                    await _sleep(stop, 1 + backoff_delay(attempt, 2.0, 60.0))
+                    attempt += 1
+        finally:
+            results_task.cancel()
+            await asyncio.gather(results_task, return_exceptions=True)
+
+    async def _results_loop(self, stop) -> None:
+        """Finished server actions arrive as files (the update that restarted the bot included)."""
         while not stop.is_set():
             try:
-                t0 = now_s()
-                await self.poll_once()
-                attempt = 0
-                if now_s() - t0 < 1.0:            # Telegram answered at once: do not hammer it
-                    await _sleep(stop, 1.0)
-            except TelegramConflict:
-                if attempt == 0:
-                    log.warning("telegram: another process is reading this bot's messages (HTTP 409); "
-                                "commands pause until it stops (a second bot, or preflight listing chat ids)")
-                await _sleep(stop, 5 + backoff_delay(attempt, 5.0, 60.0))
-                attempt += 1
-            except (httpx.HTTPError, ValueError) as e:
-                log.warning("telegram getUpdates failed: %s", type(e).__name__)
-                await _sleep(stop, 1 + backoff_delay(attempt, 2.0, 60.0))
-                attempt += 1
+                await self.deliver_results()
+            except Exception:                     # a bad result file must not stop the loop
+                log.exception("delivering ops results failed")
+            await _sleep(stop, RESULTS_POLL_S)
 
 
 async def _sleep(stop, s: float) -> None:

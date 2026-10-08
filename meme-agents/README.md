@@ -57,7 +57,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
-| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume and stop (stop asks to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/help`. Only `TELEGRAM_CHAT_ID` is answered. Settings and keys change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
+| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
 
 ## How a token moves through the pipeline
 
@@ -251,8 +251,21 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   positions keep their exits), `/resume` (clears a Telegram pause and the STOP file, never the
   bot's own loss-cap pause), `/stop` (writes the STOP file) and `/help`, only from
   `TELEGRAM_CHAT_ID`. Commands from any other chat are logged and ignored; commands sent while
-  the bot was down are not answered on restart. The chat can never change a setting or a key:
-  the service runs with its code and `.env` read-only.
+  the bot was down are not answered on restart. The bot process itself can never change a
+  setting or a key: the service runs with its code and `.env` read-only.
+- **Server actions from the phone.** `/update`, `/restart`, `/set KEY=VALUE` and `/dryrun on`
+  are not run by the bot. They are written as request files under `data/ops/` and picked up by
+  the ops service (`python -m bot ops --watch`, installed with `deploy/install.sh --ops`), which
+  re-validates each request against the allowlist in `bot/ops.py` and runs only
+  `deploy/update.sh` (fast-forward of the tracked branch after its tests pass),
+  `deploy/set-env.sh KEY=VALUE` or `sudo -n systemctl restart meme-agents`; the result comes back
+  into the chat. The allowlist holds bounded operational numbers (budgets, sizing within $20 a
+  position and $100 bankroll, exits, the gate thresholds no lower than the brief's 0.65,
+  pre-filter limits) and a few switches. Never from the phone: `MODE`, `LIVE_CONFIRM`,
+  `LIVE_MAX_WALLET_SOL`, any key, token or wallet, `TELEGRAM_CHAT_ID`, paths and URLs;
+  `LIVE_DRY_RUN` only turns on. A request older than 10 minutes is refused, a request the
+  service finds half-done after its own restart is reported rather than run again, and `/ops`
+  shows the queue and the last results.
 - **Updates.** `deploy/update.sh` fetches the tracked branch (fast-forward only), builds and
   tests it in a separate checkout and virtualenv while the old bot keeps running, then stops
   the service, switches code and dependencies over and restarts. If the restart or the health

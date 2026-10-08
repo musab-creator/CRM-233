@@ -122,7 +122,60 @@ The bot now:
   trades and open positions, and the daily summary at midnight UTC.
 - gives you a control panel in the Telegram chat: `/panel` shows buttons for status, digest,
   report, trades, log, settings, pause, resume and stop, so you can run it from your phone
-  without PowerShell. Changing a setting or a key still happens here, in `.env`.
+  without PowerShell. With the ops service from the next section, the panel also updates,
+  restarts and changes bounded settings. Keys and the live-mode locks still change here, in `.env`.
+
+## Control from your phone
+
+The bot runs with its code and `.env` read-only and no privileges, so by itself it can only
+read, pause and stop. A small companion service, running as the same user outside that
+sandbox, carries out the rest. Install it once (this works while the bot is running):
+
+```bash
+bash deploy/install.sh --ops
+```
+
+Then let it restart the bot without a password. Run `sudo visudo -f /etc/sudoers.d/meme-agents-deploy`
+and make sure this line is there (it is the same line the automatic GitHub deploy uses; replace
+`bot` if your user is called something else, and confirm the path with `command -v systemctl`):
+
+```sudoers
+bot ALL=(root) NOPASSWD: /usr/bin/systemctl stop meme-agents, /usr/bin/systemctl restart meme-agents, /usr/bin/systemctl start meme-agents
+```
+
+If the repository is private and `git fetch` asks for a password, store the token once so
+`/update` can fetch on its own:
+
+```bash
+git config credential.helper store && git fetch     # paste the token when asked; it is saved in ~/.git-credentials
+```
+
+Send `/ops` in the chat: the first line must say `ops service: running`. From then on:
+
+| In the chat | What happens on the server |
+|---|---|
+| `/update` (or the Update button) | `bash deploy/update.sh`: fetches the branch the server tracks, builds and tests it in a separate environment (a few minutes), then restarts the bot. Nothing changes if the tests fail. The result, including "already on the latest code", comes back as a message. |
+| `/restart` | `sudo -n systemctl restart meme-agents`. Open positions are kept and resumed. |
+| `/set KEY=VALUE` | `bash deploy/set-env.sh KEY=VALUE`, then a **Restart now** button to apply it. `/set` alone lists every key you can change, its current value and its limits, for example `POSITION_MAX_USD` 1 to 20, `BANKROLL_USD` 1 to 100, `LLM_DAILY_BUDGET_USD` 0 to 50, `CONSENSUS_MIN_MEAN_CONFIDENCE` 0.65 to 1. |
+| `/dryrun on` | Writes `LIVE_DRY_RUN=true` and restarts: live mode keeps running but sends nothing. One way only. Open live positions are then closed in paper, not sold on chain, so `/stop` first if they should be sold. |
+| `/ops` | Is the service running, what is queued, the last five results. |
+
+What stays on the server, on purpose: `MODE`, `LIVE_CONFIRM`, `LIVE_MAX_WALLET_SOL`, every key
+and token, the wallet, `TELEGRAM_CHAT_ID`, paths and URLs, and `LIVE_DRY_RUN=false`. Whoever
+holds the phone can deploy tested code from GitHub, restart, pause and stop, and move the
+operational numbers inside their limits; they cannot turn real sends on, raise the wallet cap
+or read a key. The service checks every request again before acting, runs nothing but the
+three commands above, refuses a request older than 10 minutes, and reports instead of
+re-running anything it finds half-done after its own restart.
+
+```bash
+sudo systemctl status meme-agents-ops     # is it running?
+journalctl -u meme-agents-ops -f          # what it ran and what each run printed
+.venv/bin/python -m bot ops               # the same as /ops, from the shell
+```
+
+After an `/update` that changed the code, the service exits and systemd starts it again on
+the new version; `/ops` shows it running within a few seconds.
 
 ## 9. Watch it
 
@@ -187,6 +240,7 @@ Run these from `~/CRM-233/meme-agents`.
 | Kill switch: no new entries, close all positions | `touch STOP`. Remove it (`rm STOP`) to resume entries. |
 | Update to the latest code | `bash deploy/update.sh` (validate, promote, restart if running) |
 | Change a setting without nano | `bash deploy/set-env.sh KEY=VALUE` for non-secret settings, then restart; use `nano .env` for keys |
+| The same from your phone | `/update`, `/restart`, `/set KEY=VALUE`, `/dryrun on`, `/ops` in the Telegram chat, once `bash deploy/install.sh --ops` has run (section above) |
 | Health in one line | `.venv/bin/python -m bot status --check` |
 
 Don't also run `python -m bot` by hand while the service runs: the bot refuses to start a

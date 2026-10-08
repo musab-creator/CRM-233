@@ -224,6 +224,20 @@ Added after the build, when research showed a change in PumpPortal's data API:
     evidence. The two judgment flags (copycat name, "far below the scan" by eye) cannot skip
     alone any more; Scout checks copies in the committee.
 
+34. **Server actions from the phone go through a second process, never the bot.** The bot's
+    unit keeps its code and `.env` read-only with no privileges, so Telegram `/update`,
+    `/restart`, `/set` and `/dryrun on` only write request files under `data/ops/`. The ops
+    service (`python -m bot ops --watch`, `deploy/meme-agents-ops.service`, same user, no
+    sandbox) re-validates each one against the allowlist in `bot/ops.py` and runs nothing but
+    `deploy/update.sh`, `deploy/set-env.sh KEY=VALUE` and `sudo -n systemctl restart
+    meme-agents`. The allowlist is bounded operational numbers and switches; `MODE`,
+    `LIVE_CONFIRM`, `LIVE_MAX_WALLET_SOL`, keys, the wallet, the chat id, paths and URLs are not
+    in it, `LIVE_DRY_RUN` only turns on, and the gate threshold cannot go below the brief's
+    0.65. So a phone in the wrong hands can deploy tested code from the tracked branch, restart,
+    and move numbers inside their limits, but cannot enable real sends, raise the wallet cap or
+    read a secret. Requests expire after 10 minutes; one found half-done after a service restart
+    is reported, not re-run.
+
 ## File tree
 
 ```
@@ -268,12 +282,13 @@ meme-agents/
     acceptance.py    the brief's "Done when" test, automated
     telegram.py      optional alerts and the getUpdates poller
     digest.py        the hourly Telegram digest
-    commands.py      Telegram commands (/status /digest /report /stop /resume) from the configured chat
+    commands.py      Telegram commands (/status /digest /report /stop /resume /update /restart /set) from the configured chat
+    ops.py           the ops service: runs update/restart/set requests queued from Telegram (allowlist, bounds)
     engine.py        wires everything together
     sim.py           offline synthetic feed for smoke runs (no network, no keys)
   tests/  test_prefilter.py test_consensus.py test_paper.py test_exits.py
           test_live_guard.py test_ingest.py test_budget.py test_agents.py
-  deploy/ install.sh  update.sh  set-env.sh  meme-agents.service  healthcheck.sh  VPS.md
+  deploy/ install.sh  update.sh  set-env.sh  meme-agents.service  meme-agents-ops.service  healthcheck.sh  VPS.md
   KEYS.md            where to get each API key, where to store it
 .github/workflows/meme-agents-live.yml   paper run on a GitHub runner (probe / 60-min acceptance)
 ```

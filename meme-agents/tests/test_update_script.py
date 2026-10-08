@@ -127,3 +127,13 @@ def test_local_changes_are_never_overwritten(server):
     r = run(srv, stubs, ssh_cmd=f"deploy work {new_sha}")
     assert r.returncode != 0 and not (srv / "log").exists()
     assert (srv / "v").read_text() == "local edit\n"
+
+
+def test_the_ops_service_never_waits_for_a_sudo_password(server):
+    srv, _dev, stubs, new_sha = server
+    r = run(srv, stubs, extra_env={"MEME_AGENTS_NONINTERACTIVE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert git(srv, "rev-parse", "HEAD") == new_sha
+    log = (srv / "log").read_text()
+    assert "sudo -n systemctl stop meme-agents" in log and "sudo -n systemctl restart meme-agents" in log
+    assert "sudo systemctl" not in log

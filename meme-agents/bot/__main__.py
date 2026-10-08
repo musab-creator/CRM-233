@@ -8,6 +8,7 @@
     python -m bot preflight [--probe] [--seconds N] [--no-llm]   are the APIs and keys working?
     python -m bot acceptance [--minutes 60] [--sim] [--no-llm]   the brief's "Done when" test
     python -m bot live-check      run the live-mode startup checks and exit
+    python -m bot ops [--watch | --once]   run server actions queued from Telegram (the ops service)
 """
 from __future__ import annotations
 
@@ -162,6 +163,20 @@ async def _live_check() -> int:
     return 0
 
 
+def _ops(s, watch: bool, once: bool) -> int:
+    """The companion service behind Telegram /update, /restart, /set and /dryrun (bot/ops.py)."""
+    from .ops import format_queue, watch_once
+    from .ops import watch as watch_queue
+    if watch:
+        return watch_queue(s)
+    if once:
+        done = watch_once(s)
+        print(f"{len(done)} request(s) processed" if done else "nothing queued")
+        return 0 if all(r["ok"] for r in done) else 1
+    print(format_queue(s))
+    return 0
+
+
 def _positive_duration(value: str) -> float:
     try:
         duration = float(value)
@@ -193,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--minutes", type=_positive_duration, default=10)
     sm.add_argument("--seed", type=int, default=7)
     sub.add_parser("live-check", help="run live-mode startup checks")
+    op = sub.add_parser("ops", help="server actions queued from Telegram: list them, or run them")
+    op.add_argument("--watch", action="store_true", help="run queued actions as they arrive (the ops service)")
+    op.add_argument("--once", action="store_true", help="run what is queued now, then exit")
     st = sub.add_parser("status", help="what the bot is doing right now (safe while it runs)")
     st.add_argument("--sim", action="store_true", help="status of the simulation database")
     st.add_argument("--check", action="store_true", help="one line for monitoring; exit 1 if down or blind")
@@ -224,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE)
                       if s.LOG_FILE and cmd in ("run", "simulate", "acceptance") else None)
+        if cmd == "ops":
+            return _ops(s, a.watch, a.once)
         if cmd == "run":
             coro = _run(getattr(a, "minutes", None))
         elif cmd == "report":

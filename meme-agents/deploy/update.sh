@@ -3,6 +3,7 @@
 #   bash deploy/update.sh          update the checked-out branch
 #   bash deploy/update.sh --force  rebuild even when the branch is already current
 # A forced SSH deploy key accepts only: deploy <branch> <sha>.
+# MEME_AGENTS_NONINTERACTIVE=1 (the ops service behind Telegram /update) never waits for a password.
 # .env, STOP, data, logs and reports stay in place. Failed activation restores code/deps.
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +12,7 @@ FORCE=0
 want_branch=""
 want_sha=""
 SUDO=(sudo)
+[ "${MEME_AGENTS_NONINTERACTIVE:-0}" != 1 ] || SUDO=(sudo -n)
 if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
   SUDO=(sudo -n)
   if [[ "$SSH_ORIGINAL_COMMAND" =~ ^deploy[[:space:]]+([A-Za-z0-9._/-]+)[[:space:]]+([0-9a-f]{7,40})$ ]]; then

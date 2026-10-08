@@ -3,21 +3,37 @@
 #   deploy/install.sh              virtualenv, dependencies, .env from the template, tests
 #   deploy/install.sh --systemd    also install and enable the systemd service (uses sudo)
 #   deploy/install.sh --cron       also add the 5-minute health check to your crontab
+#   deploy/install.sh --ops        also install the ops service behind Telegram /update /restart /set
+#                                  (works while the bot runs: then only that service is installed)
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${PYTHON:-}"
 VENV_DIR="${MEME_AGENTS_VENV_DIR:-$APP_DIR/.venv}"
 SYSTEMD=0
 CRON=0
+OPS=0
+UNITS_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --systemd) SYSTEMD=1 ;;
     --cron) CRON=1 ;;
-    -h|--help) sed -n '2,5p' "$0"; exit 0 ;;
+    --ops) OPS=1 ;;
+    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
 cd "$APP_DIR"
+# update.sh builds an isolated environment first; a direct reinstall must not change a running bot.
+if [ -z "${MEME_AGENTS_VENV_DIR:-}" ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet meme-agents; then
+  if [ "$OPS" = 1 ] && [ "$SYSTEMD" = 0 ] && [ "$CRON" = 0 ]; then
+    UNITS_ONLY=1
+    echo "meme-agents is running: installing only the ops service (the bot and its environment are left alone)"
+  else
+    echo "meme-agents is running: use bash deploy/update.sh, or stop the service before reinstalling." >&2
+    exit 1
+  fi
+fi
+if [ "$UNITS_ONLY" = 0 ]; then
 
 if [ -z "$PY" ]; then  # the first Python that is 3.12 or newer
   for c in python3.12 python3.13 python3.14 python3; do
@@ -48,11 +64,6 @@ if ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
   echo "PYTHON must point to Python 3.12 or newer." >&2
   exit 1
 fi
-# update.sh builds an isolated environment first; a direct reinstall must not change a running bot.
-if [ -z "${MEME_AGENTS_VENV_DIR:-}" ] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet meme-agents; then
-  echo "meme-agents is running: use bash deploy/update.sh, or stop the service before reinstalling." >&2
-  exit 1
-fi
 if [ ! -x "$VENV_DIR/bin/python" ] && ! "$PY" -m venv "$VENV_DIR"; then
   echo "could not create the virtualenv. On Ubuntu/Debian: sudo apt install $(basename "$PY")-venv" >&2
   rm -rf "$VENV_DIR"
@@ -71,6 +82,7 @@ if [ ! -f .env ]; then
 fi
 chmod 600 .env
 "$VENV_DIR/bin/python" -m pytest -q
+fi
 
 if [ "$SYSTEMD" = 1 ]; then
   unit=/etc/systemd/system/meme-agents.service
@@ -78,6 +90,20 @@ if [ "$SYSTEMD" = 1 ]; then
   sudo systemctl daemon-reload
   sudo systemctl enable meme-agents >/dev/null
   echo "installed $unit (enabled at boot). Start it with: sudo systemctl start meme-agents"
+fi
+
+if [ "$OPS" = 1 ]; then
+  # The companion behind Telegram /update, /restart, /set and /dryrun (bot/ops.py). It restarts
+  # the bot with `sudo -n systemctl restart meme-agents`: the sudoers line in deploy/VPS.md.
+  unit=/etc/systemd/system/meme-agents-ops.service
+  sed -e "s|@APP_DIR@|$APP_DIR|g" -e "s|@USER@|$(id -un)|g" deploy/meme-agents-ops.service | sudo tee "$unit" >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable meme-agents-ops >/dev/null
+  sudo systemctl restart meme-agents-ops
+  echo "installed $unit (running, enabled at boot): Telegram /update, /restart, /set and /dryrun now reach this server"
+  if ! sudo -n systemctl --version >/dev/null 2>&1; then
+    echo "note: restarts from the phone need the sudoers line from deploy/VPS.md, 'Control from your phone'"
+  fi
 fi
 
 if [ "$CRON" = 1 ]; then
@@ -88,5 +114,7 @@ if [ "$CRON" = 1 ]; then
   echo "health check added to crontab (every 5 minutes, results in logs/health.log)"
 fi
 
-echo
-echo "next: put your keys in .env, then run: .venv/bin/python -m bot preflight"
+if [ "$UNITS_ONLY" = 0 ]; then
+  echo
+  echo "next: put your keys in .env, then run: .venv/bin/python -m bot preflight"
+fi
