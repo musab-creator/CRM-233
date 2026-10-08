@@ -155,6 +155,9 @@ def test_verify_triage_downgrades_an_unbacked_pass_and_keeps_a_backed_one(tmp_pa
                            _ctx(flow={"same_slot_as_launch_buyers": 6}))
     assert backed.vote == "PASS" and backed.guard is None and triage_skips(backed, s)
     assert any(e.startswith("computed: bundling") for e in backed.evidence)
+    full = verify_triage(Vote("triage", "PASS", 0.8, ["x"], [f"item {i}" for i in range(15)]),
+                         _ctx(flow={"same_slot_as_launch_buyers": 6}))
+    assert len(full.evidence) == 15 and full.evidence[-1].startswith("computed: bundling")   # cap keeps the flag
     # BUY votes and errors pass through untouched
     buy = verify_triage(Vote("triage", "BUY", 0.65), _ctx())
     assert buy.vote == "BUY" and buy.guard is None

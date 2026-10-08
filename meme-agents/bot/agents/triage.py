@@ -102,7 +102,8 @@ def verify_triage(vote: Vote, ctx: dict) -> Vote:
     flags = hard_red_flags(ctx)
     vote.raw_vote = "PASS"
     if flags:
-        vote.evidence = (list(vote.evidence) + [f"computed: {f}" for f in flags])[:15]
+        computed = [f"computed: {f}" for f in flags][:5]
+        vote.evidence = list(vote.evidence)[:15 - len(computed)] + computed  # the computed flags always survive the cap
         return vote
     vote.vote, vote.guard = "BUY", "PASS without a computed hard red flag: the committee decides"
     return vote

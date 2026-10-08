@@ -146,8 +146,10 @@ async def _scored_candidates(db: Database) -> list[dict]:
             metrics = {}
         if not isinstance(metrics, dict):
             metrics = {}
+        analyst = next(v for v in vs if v["agent"] == "analyst")
         out.append({"buys": sum(v["vote"] == "BUY" for v in vs),
                     "mean_conf": sum(v["confidence"] for v in vs) / 3,
+                    "analyst_buy": analyst["vote"] == "BUY", "analyst_conf": analyst["confidence"],
                     "ret": c["pnl_sol"] / c["cost_sol"], "pnl_usd": c["pnl_usd"] or 0.0,
                     "win": c["pnl_sol"] > 0,
                     "flow": metrics["flow"] if isinstance(metrics.get("flow"), dict) else {}})
@@ -168,6 +170,12 @@ def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 
         for t in thresholds:
             sel = [r for r in scored if r["buys"] >= need and r["mean_conf"] >= t]
             rows.append({"rule": label, "threshold": t, **_bucket(sel)})
+    # Under GATE_NEUTRAL_VOTES the gate reduces to "Analyst BUY at 0.75+, nothing found against the
+    # token by Scout or Hunter", so the Analyst's own BUYs by confidence are the lower bound of what
+    # the live gate would select; a Scout or Hunter PASS can only remove candidates from this set.
+    for t in (0.65, 0.7, 0.75, 0.8, 0.85, 0.9):
+        sel = [r for r in scored if r.get("analyst_buy") and (r.get("analyst_conf") or 0) >= t]
+        rows.append({"rule": "analyst BUY alone", "threshold": t, **_bucket(sel)})
     return rows
 
 
@@ -340,6 +348,7 @@ def render_text(r: dict) -> str:
                      "Brier 0.25 = coin flip, lower is better)")
     small = "  (small sample: n < 30, treat as noise)" if r["scored_candidates"] < 30 else ""
     lines += ["", "== Gate what-if on recorded votes (shadow outcomes, $5 each) ==" + small,
+              "(analyst BUY alone = what the neutral gate selects before Scout or Hunter remove anything)",
               f"{'rule':28s} {'thresh':>6s} {'n':>4s} {'win':>6s} {'avg ret':>8s} {'PnL $':>8s}"]
     for g in r["gate_sweep"]:
         if g["rule"] != "pre-filter only (no agents)" and g["n"] == 0:

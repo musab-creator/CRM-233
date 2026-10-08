@@ -220,9 +220,12 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
   the pre-filter alone. The Brier score checks whether the agent's confidence is honest:
   0.25 is a coin flip and lower is better.
 - **Gate what-if.** The recorded votes are replayed through the gate at mean-confidence
-  thresholds from 0.50 to 0.90, both unanimous and 2-of-3. A *pre-filter only* baseline row
-  sits on top. If no gate row beats the baseline over a few hundred candidates, the agents
-  are not earning their cost. That is the time to change prompts or thresholds.
+  thresholds from 0.50 to 0.90, both unanimous and 2-of-3, plus *analyst BUY alone* by the
+  Analyst's own confidence: under `GATE_NEUTRAL_VOTES` the gate reduces to an Analyst BUY at
+  0.75 or more with nothing found against the token, so that row is the lower bound of what
+  the live gate selects. A *pre-filter only* baseline row sits on top. If no gate row beats
+  the baseline over a few hundred candidates, the agents are not earning their cost. That is
+  the time to change prompts or thresholds.
 - **Signal check.** For each flow feature, it compares the outcomes of candidates above and
   below the median, which shows which signals actually separate winners from losers in your
   data.

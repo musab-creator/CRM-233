@@ -6,8 +6,11 @@ from bot.db import Database
 from bot.report import agent_accuracy, build_report, gate_sweep, render_text, signal_check
 
 
-def row(buys, conf, ret, flow=None):
-    return {"buys": buys, "mean_conf": conf, "ret": ret, "pnl_usd": ret * 5, "win": ret > 0, "flow": flow or {}}
+def row(buys, conf, ret, flow=None, analyst=None):
+    r = {"buys": buys, "mean_conf": conf, "ret": ret, "pnl_usd": ret * 5, "win": ret > 0, "flow": flow or {}}
+    if analyst is not None:
+        r["analyst_buy"], r["analyst_conf"] = analyst
+    return r
 
 
 def test_gate_sweep_counts_and_baseline():
@@ -19,6 +22,17 @@ def test_gate_sweep_counts_and_baseline():
     assert g[("unanimous BUY", 0.6)]["n"] == 2
     assert g[("2 of 3 BUY", 0.65)]["n"] == 2 and g[("2 of 3 BUY", 0.65)]["pnl_usd"] == pytest.approx(0.5)
     assert g[("unanimous BUY", 0.9)]["n"] == 0
+    assert g[("analyst BUY alone", 0.75)]["n"] == 0        # rows without analyst fields never select
+
+
+def test_gate_sweep_analyst_alone_is_the_neutral_gate_lower_bound():
+    scored = [row(1, 0.5, 0.8, analyst=(True, 0.82)), row(2, 0.6, -0.3, analyst=(True, 0.76)),
+              row(1, 0.5, -0.5, analyst=(True, 0.70)), row(0, 0.4, 0.9, analyst=(False, 0.8))]
+    g = {(r["rule"], r["threshold"]): r for r in gate_sweep(scored)}
+    assert g[("analyst BUY alone", 0.75)]["n"] == 2 and g[("analyst BUY alone", 0.75)]["win_rate"] == 0.5
+    assert g[("analyst BUY alone", 0.75)]["pnl_usd"] == pytest.approx(2.5)
+    assert g[("analyst BUY alone", 0.65)]["n"] == 3 and g[("analyst BUY alone", 0.85)]["n"] == 0
+    assert g[("unanimous BUY", 0.5)]["n"] == 0            # the old rule still reads the vote count
 
 
 def test_signal_check_splits_at_median():
