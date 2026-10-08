@@ -47,7 +47,7 @@ def _csv(v: str) -> list[str]:
     return [x.strip() for x in v.split(",") if x.strip()]
 
 
-LIVE_WALLET_CEILING_SOL = 1.0   # the most LIVE_MAX_WALLET_SOL may be set to (operator's call, 8 Oct: 0.5 -> 1)
+LIVE_WALLET_CEILING_SOL = 3.0   # the most LIVE_MAX_WALLET_SOL may be set to (operator's call, 8 Oct: 0.5 -> 1 -> 3)
 
 
 @dataclass

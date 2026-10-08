@@ -103,7 +103,7 @@ def test_retention_keeps_active_work_but_expires_completed_candidates(s):
 @pytest.mark.parametrize("setting", [
     "MODE=typo", "LLM_DAILY_BUDGET_USD=nan", "BANKROLL_USD=inf", "NETWORK_FEE_SOL=-1",
     "MAX_OPEN_POSITIONS=3.5", "HELIUS_RPC_RPS=0", "LLM_MAX_INPUT_BYTES=0",
-    "LIVE_MAX_WALLET_SOL=1.1", "CONSENSUS_MIN_MEAN_CONFIDENCE=1.1",
+    "LIVE_MAX_WALLET_SOL=3.1", "CONSENSUS_MIN_MEAN_CONFIDENCE=1.1",
     "POSITION_MIN_USD=11\nPOSITION_MAX_USD=10", "PF_MIN_AGE_MIN=100\nPF_MAX_AGE_MIN=90",
 ])
 def test_unsafe_settings_refuse_before_startup(tmp_path, setting):

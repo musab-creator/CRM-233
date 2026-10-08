@@ -454,12 +454,12 @@ def test_live_cash_uses_actual_wallet_after_fees_and_reserves_pending_entries(s)
 
 
 def test_direct_live_guard_cannot_raise_the_wallet_ceiling(s):
-    with pytest.raises(LiveRefused, match="no more than 1"):
-        asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=2.0), bal(1.5)))
-    # the operator's 1 SOL cap (8 Oct) is accepted and enforced
-    asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=1.0), bal(0.9)))
+    with pytest.raises(LiveRefused, match="no more than 3"):
+        asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=4.0), bal(1.5)))
+    # the operator's 3 SOL cap (8 Oct) is accepted and enforced
+    asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=3.0), bal(2.9)))
     with pytest.raises(LiveRefused):
-        asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=1.0), bal(1.1)))
+        asyncio.run(check_live_startup(live(s, LIVE_MAX_WALLET_SOL=3.0), bal(3.1)))
 
 
 def test_landed_buy_journal_reconciles_before_restart_stop_can_cancel(s, tmp_path):
