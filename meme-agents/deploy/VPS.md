@@ -150,7 +150,11 @@ If the repository is private and `git fetch` asks for a password, store the toke
 git config credential.helper store && git fetch     # paste the token when asked; it is saved in ~/.git-credentials
 ```
 
-Send `/ops` in the chat: the first line must say `ops service: running`. From then on:
+Send `/ops` in the chat: the first line must say `ops service: running`, and no warning may
+follow it. (systemd sets the kernel's no-new-privileges flag on a non-root service that asks for
+seccomp hardening such as `ProtectKernelTunables=`, and sudo refuses to run under it; the unit
+file leaves those out, the installer checks the running service, and `/ops` warns if the flag is
+set. The fix is always the same: `bash deploy/update.sh && bash deploy/install.sh --ops`.) From then on:
 
 | In the chat | What happens on the server |
 |---|---|

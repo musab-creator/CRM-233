@@ -115,6 +115,17 @@ if [ "$OPS" = 1 ]; then
   sudo systemctl enable meme-agents-ops >/dev/null
   sudo systemctl restart meme-agents-ops
   echo "installed $unit (running, enabled at boot): Telegram /update, /restart, /set and /dryrun now reach this server"
+  # systemd sets the kernel's no-new-privileges flag on a non-root service that asks for seccomp
+  # hardening, and sudo refuses to run under it; the flag is only visible on the running process.
+  pid=0
+  for _ in 1 2 3 4 5; do
+    pid="$(systemctl show -p MainPID --value meme-agents-ops 2>/dev/null || echo 0)"
+    [ "${pid:-0}" != 0 ] && break
+    sleep 1
+  done
+  if [ "${pid:-0}" != 0 ] && grep -qs '^NoNewPrivs:[[:space:]]*1' "/proc/$pid/status"; then
+    echo "warning: the ops service runs with the no-new-privileges flag, so sudo cannot restart or update the bot from the phone; its unit file still carries an option that implies it (see deploy/meme-agents-ops.service)" >&2
+  fi
   # `sudo -l <command>` says whether the sudoers line covers it, without running it or prompting;
   # -k ignores the password sudo cached a moment ago, which would otherwise hide a missing line.
   if ! sudo -k -n -l "$(command -v systemctl)" restart meme-agents >/dev/null 2>&1; then

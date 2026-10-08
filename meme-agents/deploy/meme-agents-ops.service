@@ -30,11 +30,14 @@ TimeoutStopSec=1500
 Environment=PYTHONUNBUFFERED=1
 Environment=GIT_TERMINAL_PROMPT=0
 PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
 ProtectControlGroups=true
-LockPersonality=true
 UMask=0077
+# No NoNewPrivileges=, and none of the options that imply it for a service with a User=
+# (ProtectKernelTunables, ProtectKernelModules, ProtectKernelLogs, ProtectClock, ProtectHostname,
+# LockPersonality, RestrictRealtime, RestrictSUIDSGID, RestrictNamespaces, RestrictAddressFamilies,
+# PrivateDevices, MemoryDenyWriteExecute, SystemCallFilter, SystemCallArchitectures, DynamicUser):
+# with that flag set, sudo refuses to run and nothing can restart or update the bot from the phone.
+# The watcher reports the flag in /ops; tests/test_phone_ops.py keeps this list out of the file.
 
 [Install]
 WantedBy=multi-user.target

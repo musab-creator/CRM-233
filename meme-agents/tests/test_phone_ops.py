@@ -39,8 +39,9 @@ class FakeRunner:
     keep-pause marker was there when the restart ran, and what update.sh "printed"."""
 
     def __init__(self, env, states=("active",), sudo_password=False, restart_code=0, update_out="deployed abc123",
-                 marker=None):
+                 marker=None, sudo_nnp=False):
         self.env, self.calls, self.sudo_password, self.restart_code = env, [], sudo_password, restart_code
+        self.sudo_nnp = sudo_nnp
         self.states, self.update_out, self.marker, self.marker_seen = list(states), update_out, marker, []
 
     def __call__(self, argv, timeout, cwd, tick=None):
@@ -56,6 +57,10 @@ class FakeRunner:
             if self.marker is not None:
                 self.marker_seen.append(self.marker.exists())
             if argv[0] == "sudo":
+                if self.sudo_nnp:
+                    return 1, ('sudo: The "no new privileges" flag is set, which prevents sudo from running as root.\n'
+                               "sudo: If sudo is running in a container, you may need to adjust the container "
+                               "configuration to disable the flag.")
                 return (1, "sudo: a password is required") if self.sudo_password else (self.restart_code, "")
             return 0, self.update_out
         if argv[:3] == ["systemctl", "show", "-p"]:
@@ -732,3 +737,49 @@ def test_dry_run_executor_reads_the_receipt_of_a_pending_real_transaction(tmp_pa
     fill, http, rpc = asyncio.run(go2())
     assert fill.tx_sig == "sig-real" and fill.tokens == 1000.0 and abs(fill.sol - 0.050005) < 1e-9
     assert http.posts == [] and rpc.simulated == []                 # no new transaction built or simulated
+
+
+# systemd sets the kernel's no-new-privileges flag on a service with a User= as soon as the unit asks for
+# any seccomp-based hardening, whatever NoNewPrivileges= says; sudo then refuses to run at all
+# ("sudo: The "no new privileges" flag is set, which prevents sudo from running as root"), which is how
+# the first /update from the phone failed on the server.
+NNP_IMPLYING = ("NoNewPrivileges", "ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs", "ProtectClock",
+                "ProtectHostname", "LockPersonality", "RestrictRealtime", "RestrictSUIDSGID", "RestrictNamespaces",
+                "RestrictAddressFamilies", "PrivateDevices", "MemoryDenyWriteExecute", "SystemCallFilter",
+                "SystemCallArchitectures", "DynamicUser", "RestrictFileSystems", "SystemCallLog")
+
+
+def test_the_ops_unit_never_implies_the_no_new_privileges_flag():
+    unit = (ROOT / "deploy" / "meme-agents-ops.service").read_text()
+    directives = {ln.split("=", 1)[0].strip() for ln in unit.splitlines() if "=" in ln and not ln.lstrip().startswith("#")}
+    assert "User" in directives and "ExecStart" in directives
+    assert not directives & set(NNP_IMPLYING), directives & set(NNP_IMPLYING)
+    # the bot's own unit keeps the flag: it never needs sudo
+    assert "NoNewPrivileges=true" in (ROOT / "deploy" / "meme-agents.service").read_text()
+
+
+def test_no_new_privs_is_read_reported_and_fails_a_restart_at_once(tmp_path, _isolated):
+    status = tmp_path / "status"
+    status.write_text("Name:\tpython\nNoNewPrivs:\t1\nSeccomp:\t2\n")
+    assert ops.no_new_privs(status) is True
+    status.write_text("Name:\tpython\nNoNewPrivs:\t0\n")
+    assert ops.no_new_privs(status) is False
+    assert ops.no_new_privs(tmp_path / "missing") is None
+    s = _settings(tmp_path)
+    # sudo refusing under the flag: no settle loop, no undo, the hint names the reinstall
+    ops.request(s, "restart")
+    runner = FakeRunner(_isolated, sudo_nnp=True)
+    [res] = ops.watch_once(s, runner)
+    assert not res["ok"] and [a[0] for a, _ in runner.calls] == ["sudo"]
+    text = ops.format_result(res)
+    assert "no-new-privileges flag" in text and "bash deploy/update.sh && bash deploy/install.sh --ops" in text
+    assert "sudoers line" not in text
+    # /ops shows the flag while the watcher is up, and nothing once a reinstalled watcher reports it clear
+    ops.beat(s)
+    ops._write_json(ops.info_path(s), {"pid": 1, "no_new_privs": True, "started": now_s()})
+    assert "⚠️ the ops service runs with the no-new-privileges flag" in ops.format_queue(s)
+    ops._write_json(ops.info_path(s), {"pid": 2, "no_new_privs": False, "started": now_s()})
+    assert "no-new-privileges" not in ops.format_queue(s)
+    # the watcher writes that file itself at start (this process has no such flag)
+    info = ops.write_info(s)
+    assert info["pid"] == os.getpid() and ops.watcher_info(s)["no_new_privs"] in (False, None)

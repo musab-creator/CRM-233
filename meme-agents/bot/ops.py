@@ -332,6 +332,45 @@ def watcher_alive(s: Settings) -> bool:
     return age is not None and age <= HEARTBEAT_STALE_S
 
 
+def no_new_privs(status: Path = Path("/proc/self/status")) -> bool | None:
+    """Whether this process carries the kernel's no-new-privileges flag, under which sudo refuses
+    to run. systemd sets it on a service with a User= when the unit asks for any seccomp-based
+    hardening (ProtectKernelTunables, LockPersonality, ...), not only with NoNewPrivileges=.
+    None when the answer is not available (not Linux)."""
+    try:
+        for line in status.read_text().splitlines():
+            if line.startswith("NoNewPrivs:"):
+                return line.split(":", 1)[1].strip() == "1"
+    except OSError:
+        pass
+    return None
+
+
+def info_path(s: Settings) -> Path:
+    return ops_dir(s) / "watcher.info"
+
+
+def write_info(s: Settings) -> dict:
+    """What the watcher found out about itself at start, for /ops to show."""
+    info = {"pid": os.getpid(), "no_new_privs": no_new_privs(), "started": now_s()}
+    _write_json(info_path(s), info)
+    return info
+
+
+def watcher_info(s: Settings) -> dict:
+    return _read_json(info_path(s)) or {}
+
+
+NNP_HINT = ("the ops service runs with the no-new-privileges flag, so sudo refuses to run: nothing can restart "
+            "or update the bot from the phone until the service is reinstalled. On the server, once: "
+            "bash deploy/update.sh && bash deploy/install.sh --ops")
+
+
+def sudo_refused(out: list[str]) -> bool:
+    """sudo itself failed (password, policy, the no-new-privileges flag): the command never ran."""
+    return any(ln.startswith("sudo:") for ln in "\n".join(out).splitlines())
+
+
 def service_up_since(s: Settings) -> float:
     """When the ops service came up, as far as the queue is concerned. A watcher that starts
     while the heartbeat is still fresh (the restart after a deploy) continues the previous
@@ -643,7 +682,7 @@ def _restart(s: Settings, run, run_raw, tick, out: list[str]) -> tuple[bool, int
     never leave the phone without a bot to talk to. A /set the bot has already started on is
     retired and never undone by a later restart."""
     code = run(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"])
-    if code != 0 and "a password is required" in "\n".join(out):
+    if code != 0 and sudo_refused(out):          # the bot is still up only because nothing touched it
         return False, code
     state = _settle(run_raw, tick)
     if state == "active":
@@ -758,6 +797,8 @@ def watch(s: Settings, runner=None, interval: float = HEARTBEAT_S, sleep=time.sl
         app = s.path(".")
         head = _git_head(app)
         since = service_up_since(s)
+        if write_info(s).get("no_new_privs"):
+            log.warning("ops: %s", NNP_HINT)
         log.info("ops watcher on: queue %s, deploys %s at %s", ops_dir(s), SERVICE, (head or "?")[:12])
         while not stopping:
             for result in watch_once(s, runner, lock_fd, since):
@@ -797,6 +838,8 @@ def format_result(res: dict, max_lines: int = 12) -> str:
         if "could not read Username" in body or "Authentication failed" in body or "terminal prompts disabled" in body:
             body += ("\n\ngit cannot fetch without a password. On the server, once: "
                      "git config credential.helper store && git fetch   (type the token when asked)")
+        elif "no new privileges" in body:
+            body += "\n\n" + NNP_HINT
         elif "a password is required" in body or "sudo:" in body:
             body += "\n\nsudo asked for a password: add the sudoers line from deploy/VPS.md, 'Control from your phone'"
     return head + ("\n" + body if body else "")
@@ -812,6 +855,8 @@ def format_queue(s: Settings) -> str:
     else:
         state = f"ops service: running (seen {age:.0f} s ago)"
     lines = [state]
+    if age is not None and age <= HEARTBEAT_STALE_S and watcher_info(s).get("no_new_privs"):
+        lines.append("⚠️ " + NNP_HINT)
     queued = pending(s) + pending(s, ".running")
     if queued:
         lines.append(f"queued: {len(queued)} (one runs at a time; one behind an update waits for it)")
