@@ -21,7 +21,7 @@ from .budget import Budget, utc_day, utc_month
 from .commands import TelegramCommands
 from .ops import consume_keep_pause
 from .config import Settings, validate_settings
-from .consensus import apply_vetoes, gate
+from .consensus import VETO_AGENTS, apply_vetoes, gate
 from .db import Database
 from .digest import hour_start, hourly_digest
 from .feeds.dexscreener import DexScreener, summarize_pair
@@ -54,6 +54,13 @@ EXTERNAL_ERRORS = (HttpError, RpcError, httpx.HTTPError, asyncio.TimeoutError)
 
 class StartupError(Exception):
     pass
+
+
+def _vote_label(v) -> str:
+    """How a vote reads in the chat: the committee's BUY/PASS, a veto agent's veto / no veto."""
+    if v.agent in VETO_AGENTS:
+        return "VETO" if v.vote == "PASS" else "no veto"
+    return v.vote
 
 
 def credit_pace(total: int, monthly: int, ts: float) -> tuple[bool, bool]:
@@ -575,7 +582,7 @@ class Engine:
                     await self.tg.send(
                         f"GATE BUY {ctx_data.get('symbol')} {mint}\nmean conf {result.mean_confidence:.2f}, "
                         f"size ${size:.2f}{scaled}\n" + "\n".join(
-                            f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
+                            f"{v.agent}: {_vote_label(v)} {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
                             for v in [*votes, *vetoes]))
         await self._finish_mint(mint, "evaluated")
         return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in [*votes, *vetoes]]}
