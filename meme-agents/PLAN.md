@@ -138,7 +138,12 @@ Added after the build, when research showed a change in PumpPortal's data API:
 23. **The LLM budget is paced** (`LLM_BUDGET_PACING`, default on): the daily budget is released
     evenly over the UTC day with `LLM_BUDGET_BURST_HOURS` (2) hours' worth up front, so the bot
     evaluates throughout the day instead of spending it all in the first two hours. The brief's
-    cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`.
+    cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`. A candidate starts only when
+    the released budget covers a whole evaluation (1.5 x the mean cost of the last 20 committees,
+    not just each agent's first call), and when it covers fewer than two, committees run one at a
+    time: on the first live day at $25, the trickle funded first calls while Scout and Analyst
+    starved on later turns, and a starved agent is an automatic PASS, so the money bought
+    decisions that could never be BUY. `/status` counts agent errors by cause.
 24. **Telegram commands come only from `TELEGRAM_CHAT_ID`.** The bot long-polls `getUpdates`
     (no inbound port, so the firewall stays closed) and answers `/panel`, `/status`, `/digest`,
     `/report`, `/trades`, `/log`, `/settings`, `/pause`, `/resume` and `/stop` from that chat

@@ -302,6 +302,9 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   released evenly over the UTC day, with `LLM_BUDGET_BURST_HOURS` (2) hours' worth available up
   front, so the bot evaluates around the clock. The first live hour cost $2.26 for 17
   candidates; unpaced, a $5 day would be spent by 02:30 UTC. The cap itself is never exceeded.
+  A candidate is evaluated only when the released budget covers a whole committee (1.5 x the
+  mean cost of recent ones), and one at a time while it covers fewer than two, so an agent is
+  never cut off mid-evaluation by the trickle; `/status` shows `(err:budget)` when one was.
 - **X.** The bot tracks spend per UTC month. Before each call it reserves the worst case
   (`max_results × $0.005`, or `$0.01` for a user lookup) and refuses the call if that doesn't
   fit in `X_MONTHLY_BUDGET_USD`. It stores every post id in `x_posts` and uses `since_id`, so

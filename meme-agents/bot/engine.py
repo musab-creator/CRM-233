@@ -118,6 +118,7 @@ class Engine:
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
         self.cycles = 0
         self.triage_skips = 0                   # candidates the triage screen kept from the agents
+        self._eval_gate = asyncio.Lock()        # one committee at a time while the paced budget is tight
         self.crashes: dict[str, int] = {}       # background loops that raised (each is restarted)
         self.stream_mode = s.PUMPPORTAL_TRADE_STREAM
         self._stream_blocked_day: str | None = None
@@ -496,6 +497,7 @@ class Engine:
                             "bonding_curve_key": ctx_data.get("bonding_curve_key"),
                             "since_ts": launched - 3600}, flow=self.compute_flow)
         specs = build_specs(tctx)
+        held = False
         if self.llm is not None:
             # Running agents that cannot afford even their first call would only record three
             # budget errors as a decision: stop evaluating instead (as the brief asks).
@@ -510,10 +512,41 @@ class Engine:
                     "status": "failed", "gate_reason": "agent request exceeds configured input bound"})
                 await self._finish_mint(mint, "failed")
                 return None
+            need = max(first_calls, await self._typical_evaluation_usd())
             left = await self.llm_budget.remaining()
-            if left < first_calls:
+            if left < need:
                 return await self._skip_for_budget(
-                    cid, mint, f"LLM daily budget: ${left:.4f} left < ${first_calls:.4f} for one evaluation")
+                    cid, mint, f"LLM daily budget: ${left:.4f} left < ${need:.4f} for one full evaluation")
+            if left < 2 * need:
+                # Two committees sharing what only covers one would both starve halfway, and a
+                # starved agent is an automatic PASS: wait for the other, then check again.
+                await self._eval_gate.acquire()
+                held = True
+                left = await self.llm_budget.remaining()
+                if left < need:
+                    self._eval_gate.release()
+                    return await self._skip_for_budget(
+                        cid, mint, f"LLM daily budget: ${left:.4f} left < ${need:.4f} for one full evaluation")
+        try:
+            return await self._evaluate_with_llm(cid, mint, ctx_data, context, tctx, specs)
+        finally:
+            if held:
+                self._eval_gate.release()
+
+    async def _typical_evaluation_usd(self) -> float:
+        """What a whole evaluation has cost lately (triage, the three agents and the vetoes when
+        they ran), with headroom. The pre-check must cover all of it, not only the first calls:
+        a paced budget funds committees whose later turns fail on the budget, and an errored
+        agent is a PASS, so the money buys no decision. Below five samples: no estimate."""
+        rows = await self.db.fetchall(
+            "SELECT llm_cost_usd FROM candidates WHERE status='evaluated' AND llm_cost_usd > 0 "
+            "AND (gate_reason IS NULL OR gate_reason NOT LIKE 'triage:%') ORDER BY id DESC LIMIT 20")
+        costs = [float(r["llm_cost_usd"]) for r in rows]
+        if len(costs) < 5:
+            return 0.0
+        return 1.5 * sum(costs) / len(costs)
+
+    async def _evaluate_with_llm(self, cid: int, mint: str, ctx_data: dict, context: str, tctx, specs) -> dict | None:
         triage = None
         if self.llm is not None and self.s.TRIAGE_ENABLED:
             # the cheap screen: a confident PASS here spends nothing on the three agents

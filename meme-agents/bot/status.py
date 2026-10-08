@@ -41,6 +41,22 @@ def _read_heartbeat(raw: str | None) -> tuple[dict, str | None]:
         return {}, "heartbeat is malformed or has an invalid timestamp"
 
 
+ERROR_TAGS = (("llm budget", "budget"), ("rate limited", "rate"), ("timed out", "timeout"), ("timeout", "timeout"),
+              ("connection", "net"), ("api ", "api"), ("refusal", "refusal"), ("no vote after", "noanswer"),
+              ("invalid vote", "invalid"))
+
+
+def _err_tag(error) -> str:
+    """Why an agent failed, in a word: a budget starve and an API outage need different fixes."""
+    if not error:
+        return ""
+    e = str(error).lower()
+    for needle, tag in ERROR_TAGS:
+        if needle in e:
+            return f"(err:{tag})"
+    return "(err)"
+
+
 def _positive(value) -> float | None:
     try:
         number = float(value)
@@ -151,6 +167,15 @@ async def build_status(db: Database, s: Settings) -> str:
     pnl = (await db.fetchone("SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND status='closed'"
                              " AND closed_at>=?", [start]))["s"]
     lines.append("today (UTC): " + ", ".join(f"{k} {v}" for k, v in f.items()) + f", realized PnL ${pnl:+.2f}")
+    errs = await db.fetchall("SELECT v.error FROM votes v JOIN candidates c ON c.id=v.candidate_id "
+                             "WHERE c.ts>=? AND v.error IS NOT NULL AND v.error != ''", [start])
+    if errs:
+        by: dict[str, int] = {}
+        for e in errs:
+            tag = _err_tag(e["error"]).strip("()").removeprefix("err:").removeprefix("err") or "other"
+            by[tag] = by.get(tag, 0) + 1
+        lines.append("agent errors today: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1]))
+                     + " (an errored agent is a PASS; budget = the paced LLM budget ran out mid-evaluation)")
 
     pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') "
                            "AND (mode=? OR mode IS NULL) ORDER BY id", [running_mode])
@@ -183,7 +208,7 @@ async def build_status(db: Database, s: Settings) -> str:
         vs = await db.fetchall("SELECT agent, vote, confidence, guard, error FROM votes WHERE candidate_id=? "
                                "ORDER BY agent", [d["id"]])
         vtxt = "  ".join(f"{v['agent']}={v['vote']}/{v['confidence'] or 0:.2f}"
-                         f"{'(guard)' if v['guard'] else ''}{'(err)' if v['error'] else ''}" for v in vs)
+                         f"{'(guard)' if v['guard'] else ''}{_err_tag(v['error'])}" for v in vs)
         when = datetime.fromtimestamp(d["ts"], timezone.utc).strftime("%H:%M")
         lines.append(f"  {when} #{d['id']} {(d['symbol'] or '?')[:10]:10s} {d['decision']:4s} "
                      f"conf {d['mean_confidence'] or 0:.2f}  {vtxt}  | {d['gate_reason']}")
