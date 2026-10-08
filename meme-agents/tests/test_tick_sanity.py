@@ -247,3 +247,37 @@ def test_log_filters_by_word(tmp_path):
     assert sent[1] == sent[0]
     assert sent[2] == "line 95\nline 96\nline 97\nline 98\nline 99"
     assert sent[3] == "nothing matches nope"
+
+
+def test_a_real_entry_that_never_fills_is_reported_and_shown_in_why(tmp_path):
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _msg, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+    s.ENTRY_FILL_TIMEOUT_S = 10
+    sent: list[str] = []
+
+    async def notify(text):
+        sent.append(text)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.kv_set("bankroll_sol", "0.5")
+            await db.insert("mints", {"mint": "M" * 32, "symbol": "BBC", "created_at": now_s() - 900})
+            cid = await db.insert("candidates", {"mint": "M" * 32, "ts": now_s() - 600, "metrics": "{}",
+                                                 "status": "evaluated", "decision": "BUY", "mean_confidence": 0.66,
+                                                 "gate_reason": "unanimous BUY"})
+            pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), notifier=notify)
+            p = await pm.create("M" * 32, cid, "real", "C", 10.0, 10_000)
+            p.decided_at -= 60                       # the decision is a minute old and no tick ever came
+            await pm.periodic()
+            assert p.status == "cancelled" and p.id not in pm.positions
+            http = FakeHttp([[_msg(1, f"/why {cid}")]])
+            await TelegramCommands(Telegram(http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s).poll_once()
+            return [j["text"] for m, j in http.posts if m == "sendMessage"][0]
+        finally:
+            await db.close()
+    why = asyncio.run(go())
+    assert len(sent) == 1 and sent[0].startswith("⚪ NO ENTRY BBC [paper] $10.00: no trade within 10 s of the decision")
+    assert "real $10.00 [paper]: cancelled · no trade within 10 s of the decision" in why

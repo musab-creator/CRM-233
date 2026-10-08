@@ -255,6 +255,12 @@ class PositionManager:
         p.status, p.exit_reason, p.closed_at = "cancelled", reason[:200], ts
         await self._save(p)
         await self._release(p)
+        if p.kind == "real":
+            # a gate BUY that never became a trade is news: say so once, like an entry would
+            msg = f"⚪ NO ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f}: {p.exit_reason}\n{p.mint}"
+            log.warning(msg.replace("\n", " | "))
+            if self.notify:
+                await self.notify(msg)
 
     async def _fill_entry(self, p: Position, price: float, ts: float) -> None:
         """Caller holds the lock."""
@@ -548,9 +554,7 @@ class PositionManager:
                     continue
                 if (p.status == "pending" and p.id not in self._inflight
                         and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S):
-                    p.status, p.exit_reason, p.closed_at = "cancelled", "no trade after decision", now
-                    await self._save(p)
-                    await self._release(p)
+                    await self._cancel_entry(p, f"no trade within {self.s.ENTRY_FILL_TIMEOUT_S:.0f} s of the decision", now)
                     continue
                 if p.status != "open":
                     continue

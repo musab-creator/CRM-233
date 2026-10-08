@@ -339,6 +339,19 @@ class TelegramCommands:
                 head += f" (error: {str(v['error'])[:100]})"
             lines.append(head)
             lines += [f"  - {str(r)[:220]}" for r in (reasons or [])[:2]]
+        for real in await self.db.fetchall("SELECT mode, status, size_usd, cost_sol, proceeds_sol, pnl_usd, exit_reason, "
+                                           "opened_at, closed_at FROM positions WHERE candidate_id=? AND kind='real' "
+                                           "ORDER BY id", [cid]):
+            head = f"real ${float(real['size_usd'] or 0):.2f} [{real['mode']}]: {real['status']}"
+            if real["status"] == "closed":
+                ret = (f" ({(float(real['proceeds_sol'] or 0) / real['cost_sol'] - 1) * 100:+.0f}%)"
+                       if real["cost_sol"] else "")
+                held = fmt_hold((real["closed_at"] or 0) - (real["opened_at"] or real["closed_at"] or 0))
+                head += (f" {usd(float(real['pnl_usd'] or 0))}{ret} · "
+                         f"{(real['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
+            elif real["exit_reason"]:
+                head += f" · {real['exit_reason']}"
+            lines.append(head)
         shadow = await self.db.fetchone("SELECT id, mint, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
                                         "exit_reason, entry_price, opened_at, closed_at FROM positions "
                                         "WHERE candidate_id=? AND kind='shadow' ORDER BY id DESC LIMIT 1", [cid])
