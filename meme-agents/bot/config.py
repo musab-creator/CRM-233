@@ -187,6 +187,12 @@ class Settings:
     HELIUS_MONTHLY_CREDITS: int = 1_000_000
     CURVE_POLL_CALLS_PER_MIN: float = 8.0     # getMultipleAccounts calls (100 curves, 1 credit each)
     CURVE_HOT_POLL_S: float = 15.0            # candidates, open positions and shadows
+    # Real positions only, on their own loop: every held curve in one call (1 credit) this often, so
+    # a stop or take-profit acts within seconds and a decided buy fills on the next read instead of
+    # waiting for the launch poller (9 Oct: GIGACHAD's stop filled at -44% between 15 s reads).
+    # After graduation DexScreener's pool price every POSITION_DEX_POLL_S. 0 turns either off.
+    POSITION_POLL_S: float = 2.0
+    POSITION_DEX_POLL_S: float = 10.0
     CURVE_FIRST_POLL_S: float = 60.0          # first read of a launch (most are dead within a minute)
     CURVE_POLL_SCALE: float = 1.0             # multiplies the 20/45/120/240 s read cadence of launches
     CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
@@ -353,6 +359,10 @@ def validate_settings(s: Settings) -> None:
             raise ConfigError(f"{name} must be greater than zero")
     if s.POSITION_MIN_USD > s.POSITION_MAX_USD:
         raise ConfigError("POSITION_MIN_USD must not exceed POSITION_MAX_USD")
+    if s.POSITION_POLL_S and not 1 <= s.POSITION_POLL_S <= 60:
+        raise ConfigError("POSITION_POLL_S must be 0 (off) or between 1 and 60 seconds")
+    if s.POSITION_DEX_POLL_S and not 5 <= s.POSITION_DEX_POLL_S <= 300:
+        raise ConfigError("POSITION_DEX_POLL_S must be 0 (off) or between 5 and 300 seconds")
     if s.MOONSHOT_TRACK_DAYS > 60:
         raise ConfigError("MOONSHOT_TRACK_DAYS must be 60 or less (0 turns the tracker off)")
     if s.MOONSHOT_TRACK_DAYS > 0 and s.MOONSHOT_POLL_MIN < 1:

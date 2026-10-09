@@ -341,6 +341,40 @@ class Engine:
             st.next_poll_at = now + self._poll_interval(st)
         return len(batch)
 
+    async def poll_position_curves_once(self) -> int:
+        """The curves of the real positions (pending ones too, so a decided buy fills on the next
+        read) in one getMultipleAccounts call; a moved curve becomes a tick for the exit rules."""
+        held = self.positions.active("real") if self.positions else []
+        waiting = {p.mint for p in held if p.status == "pending"}
+        batch = [st for m in sorted({p.mint for p in held}) if (st := self.ingest.mints.get(m)) is not None
+                 and st.bonding_curve_key and not st.graduated and not st.streamed][:100]
+        if not batch:
+            return 0
+        curves = await self.chain.curves([st.bonding_curve_key for st in batch])
+        now = now_s()
+        for st in batch:
+            c = curves.get(st.bonding_curve_key)
+            if c is None:
+                continue
+            moved = await self.ingest.apply_curve(st.mint, c, now)
+            if not moved and st.mint in waiting and st.curve_at == now and c.price_sol:
+                # a decided buy fills at this accepted read even if no trade moved the curve since
+                await self.positions.on_tick(st.mint, c.price_sol, now, {"txType": "curve", "pool": "pump"})
+        return len(batch)
+
+    async def position_price_poller(self) -> None:
+        """Real positions' curves every POSITION_POLL_S, apart from the launch poller's queue."""
+        if not self.chain.enabled or self.s.POSITION_POLL_S <= 0:
+            await self.stop.wait()
+            return
+        while not self.stop.is_set():
+            if not self._credits_exhausted:
+                try:
+                    await self.poll_position_curves_once()
+                except EXTERNAL_ERRORS as e:
+                    log.warning("position curve read failed: %s", e)
+            await self._sleep(self.s.POSITION_POLL_S * (2.0 if self._credits_over_pace else 1.0))
+
     def _curve_tick_s(self) -> float:
         base = 60.0 / max(0.1, self.s.CURVE_POLL_CALLS_PER_MIN)
         return base * (2.0 if self._credits_over_pace else 1.0)
@@ -832,6 +866,7 @@ class Engine:
             "solprice": lambda: self.sol_price.run(self.stop),
             "positions": lambda: self.positions.run(self.stop),
             "curves": self.curve_poller,
+            "position_prices": self.position_price_poller,
             "stream_guard": self.stream_guard,
             "scanner": self.scanner,
             "heartbeat": self.heartbeat,

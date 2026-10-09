@@ -154,6 +154,8 @@ class PositionManager:
         self._entry_attempts: dict[int, int] = {}            # live buys refused before broadcast, per position
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
+        self._last_real_mark = 0.0
+        self._persisted: dict[int, tuple] = {}             # position id -> the marks last written
         self._kill_handled = False
 
     # --- queries ---------------------------------------------------------------
@@ -747,14 +749,52 @@ class PositionManager:
             if self.notify:
                 await self.notify(text)
         await self._poll_liquidity(now)
+        await self._mark_graduated(now)
         await self._poll_rugcheck(now)
-        # persist marks and the liquidity reference: a crash or /update must not forget either
+        # persist marks and the liquidity reference: a crash or /update must not forget either. Only
+        # what changed, in one transaction: every open shadow was rewritten every 2 s before.
+        rows = []
         for p in list(self.positions.values()):
             if p.status == "open" and p.id:
-                await self.db.update("positions", "id", p.id,
-                                     {"last_price": p.last_price, "peak_price": p.peak_price,
-                                      "last_tick_at": p.last_tick_at, "last_liq_usd": p.last_liq_usd,
-                                      "entry_liq_usd": p.entry_liq_usd, "liq_source": p.liq_source})
+                marks = (p.last_price, p.peak_price, p.last_tick_at, p.last_liq_usd, p.entry_liq_usd, p.liq_source)
+                if self._persisted.get(p.id) != marks:
+                    self._persisted[p.id] = marks
+                    rows.append((*marks, p.id))
+        await self.db.executemany("UPDATE positions SET last_price=?, peak_price=?, last_tick_at=?, last_liq_usd=?, "
+                                  "entry_liq_usd=?, liq_source=? WHERE id=?", rows)
+        for pid in [k for k in self._persisted if (q := self.positions.get(k)) is None or q.status != "open"]:
+            del self._persisted[pid]
+
+    async def _mark_graduated(self, now: float) -> None:
+        """A real position whose coin left its curve has no curve to read and no trade stream: its
+        price came only from the liquidity poll, once a minute. DexScreener's price of its own pool
+        (else its deepest wrapped-SOL pair) is applied every POSITION_DEX_POLL_S when no fresher mark
+        arrived, so its take-profit, trailing stop and runner target act within seconds."""
+        every = self.s.POSITION_DEX_POLL_S
+        if not self.dex or every <= 0 or now - self._last_real_mark < every:
+            return
+        self._last_real_mark = now
+        held = [p for p in self.positions.values() if p.kind == "real" and p.status == "open"
+                and self._curve_depth(p.mint) is None and now - (p.last_tick_at or 0) >= every]
+        if not held:
+            return
+        mints = sorted({p.mint for p in held})
+        try:
+            if hasattr(self.dex, "token_pair_lists"):
+                lists = await self.dex.token_pair_lists(mints) or {}
+            else:                                   # simulator and test doubles: one pair per mint
+                lists = {m: [q] for m, q in (await self.dex.tokens(mints) or {}).items() if q}
+        except Exception as e:
+            log.warning("graduated position marks: DexScreener failed (%s)", e)
+            return
+        async with self.lock:
+            for p in held:
+                pairs = lists.get(p.mint) or []
+                mark = _own_pool(pairs, p.liq_source) or max(
+                    pairs, key=lambda q: _num((q.get("liquidity") or {}).get("usd")) or 0, default=None)
+                native = sol_price_native(mark)
+                if p.status == "open" and native and now - (p.last_tick_at or 0) >= every:
+                    await self._on_price(p, native, now, "dexscreener", (mark or {}).get("pairAddress"))
 
     async def _poll_liquidity(self, now: float) -> None:
         """The emergency liquidity rule, measured on one source per phase: the bonding curve's own
