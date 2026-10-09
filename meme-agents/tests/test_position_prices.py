@@ -169,3 +169,74 @@ def test_the_poll_settings_and_their_phone_bounds(s):
                      ("CURVE_HOT_POLL_S", "2")):
         with pytest.raises(OpsError):
             validate_set(key, raw, s)
+
+
+def test_a_slow_rugcheck_pass_no_longer_holds_up_the_position_loop(s):
+    """Rugcheck reads every open position, shadows included, two requests each at 2 a second: with a
+    hundred open shadows a pass took minutes, inside the 2 s position loop. It runs beside it now."""
+    class SlowRug:
+        def __init__(self):
+            self.calls, self.gate = [], asyncio.Event()
+
+        async def check(self, mint, max_age_s=0):
+            self.calls.append(mint)
+            await self.gate.wait()
+            return {"danger": [], "risks": []}
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.kv_set("bankroll_sol", "5")
+            rug = SlowRug()
+            pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), rugcheck=rug)
+            shadow = await pm.create("SHADOW", 1, "shadow", "C1", 10.0, None)
+            real = await pm.create("REAL", 2, "real", "C2", 10.0, None)
+            await pm.on_tick("SHADOW", 1e-7, shadow.decided_at + 1, {})
+            await pm.on_tick("REAL", 1e-7, real.decided_at + 1, {})
+            await asyncio.wait_for(pm.periodic(), 1)            # returns although Rugcheck hangs
+            await asyncio.sleep(0)
+            assert rug.calls == ["REAL"]                        # real positions are checked first
+            real.opened_at -= s.TIME_STOP_HOURS * 3600 + 1
+            await asyncio.wait_for(pm.periodic(), 1)            # the time stop is not held up ...
+            assert real.pending_exit == "time_stop"
+            await pm.on_tick("REAL", 1e-7, time.time() + 1, {})  # ... and fills on the next read
+            assert real.status == "closed" and real.exit_reason == "time_stop"
+            rug.gate.set()
+            await pm.settle()
+            assert rug.calls == ["REAL", "SHADOW"]
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_a_slow_telegram_no_longer_holds_up_the_next_stop(s):
+    """Each entry and exit notice waited up to 10 s for Telegram inside the position lock, so in a
+    fast dump the second position's stop waited behind the first one's message."""
+    sent, gate = [], asyncio.Event()
+
+    async def slow_telegram(text):
+        await gate.wait()
+        sent.append(text)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.kv_set("bankroll_sol", "5")
+            pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), notifier=slow_telegram)
+            a = await pm.create("A", 1, "real", "C1", 10.0, None)
+            b = await pm.create("B", 2, "real", "C2", 10.0, None)
+            t0 = time.time()
+            await pm.on_tick("A", 1e-7, t0 + 1, {})
+            await pm.on_tick("B", 1e-7, t0 + 1, {})
+            await asyncio.wait_for(pm.on_tick("A", 0.5e-7, t0 + 2, {}), 1)    # A's stop: its notice waits
+            await asyncio.wait_for(pm.on_tick("B", 0.5e-7, t0 + 3, {}), 1)    # B's stop is not held behind it
+            assert a.exit_reason == b.exit_reason == "stop_loss"
+            assert sent == []
+            gate.set()
+            await pm.settle()
+        finally:
+            await db.close()
+    asyncio.run(go())
+    assert [x.split(" ")[0] for x in sent] == ["🟢", "🟢", "❌", "❌"]                 # in order, none lost
+    assert "LOSS A" in sent[2] and "LOSS B" in sent[3]
+    assert "· filled 1s after the decision" in sent[0]                                # the buy's latency is shown

@@ -130,6 +130,7 @@ class Engine:
         self.queue: asyncio.Queue[int] = asyncio.Queue()
         self._stage2_at: dict[str, float] = {}
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
+        self._found_at: dict[int, float] = {}   # candidate id -> when the scan found it
         self.cycles = 0
         self.triage_skips = 0                   # candidates the triage screen kept from the agents
         self._eval_gate = asyncio.Lock()        # one committee at a time while the paced budget is tight
@@ -538,6 +539,9 @@ class Engine:
             return None
         mint = cand["mint"]
         ctx_data = json.loads(cand["metrics"])
+        if len(self._found_at) > 1000:            # candidates that ended before a decision (stale, budget)
+            self._found_at.clear()
+        self._found_at[cid] = cand["ts"]          # for the decision log: how long scan -> decision took
         if now_s() - cand["ts"] > CANDIDATE_MAX_WAIT_S:
             await self.db.update("candidates", "id", cid, {"status": "stale", "gate_reason": "waited too long"})
             await self._finish_mint(mint, "stale")
@@ -631,8 +635,10 @@ class Engine:
                     "status": "evaluated", "decision": "PASS", "mean_confidence": 0.0,
                     "gate_reason": reason, "llm_cost_usd": triage.cost_usd})
                 self.triage_skips += 1
-                log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f", cid, ctx_data.get("symbol"), mint,
-                         reason, triage.confidence, triage.cost_usd)
+                found = self._found_at.pop(cid, None)
+                log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f%s", cid, ctx_data.get("symbol"), mint,
+                         reason, triage.confidence, triage.cost_usd,
+                         f" | {now_s() - found:.0f}s after the scan found it" if found else "")
                 # the scan's curve depth: the buy refuses a curve that fell far below it (positions._depth_slip)
                 liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")
                 await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "",
@@ -663,10 +669,12 @@ class Engine:
             "status": "evaluated", "decision": result.decision, "mean_confidence": result.mean_confidence,
             "gate_reason": result.reason, "llm_cost_usd": spent})
         self.cycles += 1
-        log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f", cid,
+        found = self._found_at.pop(cid, None)
+        log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f%s", cid,
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
                  ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}"
-                           for v in [*votes, *vetoes]), spent)
+                           for v in [*votes, *vetoes]), spent,
+                 f" | {now_s() - found:.0f}s after the scan found it" if found else "")
         liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")       # the scan's curve depth
         await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "", self.s.POSITION_MIN_USD, liq)
         if result.decision == "BUY":

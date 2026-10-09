@@ -50,6 +50,7 @@ async def _manager(s, dex=None, depth=None, ex=None, rug=None, sent=None):
 async def _poll(pm):
     pm._last_liq_poll = 0
     await pm.periodic()
+    await pm.settle()
 
 
 def test_the_liquidity_reference_is_taken_at_the_buy_not_the_scan(s):
@@ -167,6 +168,7 @@ def test_the_rugcheck_danger_names_are_kept_shown_and_announced(s):
         p = await pm.create("M", 7, "real", "C", 10.0, None)
         await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
         await pm.periodic()
+        await pm.settle()                           # Rugcheck runs beside the position loop
         assert p.pending_exit == "emergency_rugcheck_danger"
         tc = TelegramCommands(Telegram(FakeHttp([]), "1:a", "42"), db, s)
         lines = await tc._emergency_lines(7)

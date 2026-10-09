@@ -155,6 +155,9 @@ class PositionManager:
         self._last_liq_poll = 0.0
         self._last_rug_poll = 0.0
         self._last_real_mark = 0.0
+        self._rug_task: asyncio.Task | None = None
+        self._outbox: list[str] = []                       # Telegram notices, sent in order after the trade
+        self._sender: asyncio.Task | None = None
         self._persisted: dict[int, tuple] = {}             # position id -> the marks last written
         self._kill_handled = False
 
@@ -308,7 +311,7 @@ class PositionManager:
             msg = f"⚪ NO ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f}: {p.exit_reason}\n{p.mint}"
             log.warning(msg.replace("\n", " | "))
             if self.notify:
-                await self.notify(msg)
+                self._say(msg)
 
     async def _fill_entry(self, p: Position, price: float, ts: float) -> None:
         """Caller holds the lock."""
@@ -384,7 +387,7 @@ class PositionManager:
                 if self.notify and self._entry_told.get(p.id) != text:
                     # an uncertain entry is retried every tick; the same failure is reported once
                     self._entry_told[p.id] = text
-                    await self.notify(text)
+                    self._say(text)
                 return
             async with self.lock:
                 try:
@@ -426,10 +429,11 @@ class PositionManager:
         await self._persist_fill(p, f, "entry", ts, before)
         if p.kind == "real":
             msg = (f"🟢 ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f} = {p.sol_in:.4f} SOL "
-                   f"@ {price:.3e} SOL\ntokens {f.tokens:,.0f}\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
+                   f"@ {price:.3e} SOL\ntokens {f.tokens:,.0f} · filled {max(0.0, ts - p.decided_at):.0f}s after the "
+                   f"decision\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(msg.replace("\n", " | "))
             if self.notify:
-                await self.notify(msg)
+                self._say(msg)
 
     # --- exits ---------------------------------------------------------------------
     def _exit_allowed(self, p: Position, ts: float) -> bool:
@@ -492,8 +496,8 @@ class PositionManager:
         log.error("exit failed #%s %s (%s), attempt %d: %s; retrying in %.0fs",
                   p.id, p.mint, reason, p.exit_attempts, err, delay)
         if p.kind == "real" and p.exit_attempts == 3 and self.notify:
-            await self.notify(f"EXIT FAILING #{p.id} {p.mint} ({reason}): {str(err)[:200]}\n"
-                              f"still retrying every <= {self.s.EXIT_RETRY_MAX_S:.0f}s; check the wallet")
+            self._say(f"EXIT FAILING #{p.id} {p.mint} ({reason}): {str(err)[:200]}\n"
+                      f"still retrying every <= {self.s.EXIT_RETRY_MAX_S:.0f}s; check the wallet")
 
     async def _apply_exit(self, p: Position, f: Fill, fraction: float, price: float, ts: float,
                           reason: str) -> None:
@@ -560,7 +564,7 @@ class PositionManager:
                    + f"\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(txt.replace("\n", " | "))
             if self.notify:
-                await self.notify(txt)
+                self._say(txt)
         if closed:
             await self._release(p)
             if p.kind == "real":
@@ -568,9 +572,13 @@ class PositionManager:
                 await self.risk.persist()
 
     async def drain(self, timeout: float = 90.0) -> None:
-        """Let in-flight live trades finish (on shutdown)."""
+        """Let in-flight live trades finish (on shutdown); a Rugcheck pass is not waited for."""
+        if self._rug_task and not self._rug_task.done():
+            self._rug_task.cancel()
         if self._tasks:
             await asyncio.wait(set(self._tasks), timeout=timeout)
+        if self._sender and not self._sender.done():
+            await asyncio.wait({self._sender}, timeout=15)        # the last trades' notices still go out
 
     async def _release(self, p: Position) -> None:
         still = [q for q in self.positions.values() if q.active and q.id != p.id]
@@ -747,10 +755,10 @@ class PositionManager:
                     await self._sell_urgent_now(p, now)  # one queued while another sale was in flight
         for text in notices:
             if self.notify:
-                await self.notify(text)
+                self._say(text)
         await self._poll_liquidity(now)
         await self._mark_graduated(now)
-        await self._poll_rugcheck(now)
+        self._start_rugcheck(now)
         # persist marks and the liquidity reference: a crash or /update must not forget either. Only
         # what changed, in one transaction: every open shadow was rewritten every 2 s before.
         rows = []
@@ -871,11 +879,52 @@ class PositionManager:
         except Exception:
             log.exception("could not record the %s event for #%s", kind, p.id)
 
-    async def _poll_rugcheck(self, now: float) -> None:
+    def _start_rugcheck(self, now: float) -> None:
+        """Rugcheck is read for every open position, shadows included, two requests each at
+        RUGCHECK_RPS: with a hundred open shadows a pass took minutes, and it ran inside this loop,
+        so time stops, sale retries, the kill switch and the liquidity rule waited for it. It runs
+        beside the loop now, one pass at a time, real positions first."""
         if not self.rugcheck or now - self._last_rug_poll < self.s.RUGCHECK_POLL_S:
             return
+        if self._rug_task and not self._rug_task.done():
+            return
         self._last_rug_poll = now
-        for p in [p for p in self.positions.values() if p.status == "open"]:
+        self._rug_task = asyncio.create_task(self._poll_rugcheck(now))
+
+        def finished(done: asyncio.Task) -> None:
+            if not done.cancelled() and done.exception():
+                log.error("rugcheck pass failed", exc_info=(type(done.exception()), done.exception(),
+                                                            done.exception().__traceback__))
+        self._rug_task.add_done_callback(finished)
+
+    def _say(self, text: str) -> None:
+        """Queue a Telegram notice. One background task sends them in order, never while the position
+        lock is held: each send waits up to 10 s for Telegram, and it ran inside the lock, so a slow
+        Telegram held every other position's stop and take-profit behind the message."""
+        if not self.notify:
+            return
+        self._outbox.append(text)
+        if self._sender is None or self._sender.done():
+            self._sender = asyncio.create_task(self._send_outbox())
+
+    async def _send_outbox(self) -> None:
+        while self._outbox:
+            text = self._outbox.pop(0)
+            try:
+                await self.notify(text)
+            except Exception:
+                log.exception("telegram notice failed")
+
+    async def settle(self) -> None:
+        """Wait for the Rugcheck pass and the Telegram notices in flight (tests, and shutdown)."""
+        while pending := {t for t in (self._rug_task, self._sender) if t and not t.done()}:
+            await asyncio.wait(pending)
+
+    async def _poll_rugcheck(self, now: float) -> None:
+        held = sorted((p for p in self.positions.values() if p.status == "open"), key=lambda p: p.kind != "real")
+        for p in held:
+            if p.status != "open":
+                continue
             try:
                 rep = await self.rugcheck.check(p.mint, max_age_s=self.s.RUGCHECK_POLL_S / 2)
             except Exception as e:
@@ -902,7 +951,7 @@ class PositionManager:
                                      f"sale queued ({p.pending_exit})" if p.pending_exit else "sold")
                             notice = (f"⚠️ RUGCHECK DANGER {await self._symbol(p.mint)}: {names}\n{state}\n{p.mint}")
                 if notice and self.notify:
-                    await self.notify(notice)
+                    self._say(notice)
 
     async def run(self, stop: asyncio.Event, interval: float = 2.0) -> None:
         while not stop.is_set():
