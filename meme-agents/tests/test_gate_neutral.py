@@ -180,3 +180,23 @@ def test_two_neutral_votes_and_an_analyst_at_075_reach_the_gate_floor():
     assert round((0.6 + 0.6 + 0.75) / 3, 4) >= 0.65          # the lowest passing combination
     assert round((0.6 + 0.6 + 0.74) / 3, 4) < 0.65
     assert round((0.55 + 0.53 + 0.82) / 3, 4) < 0.65         # FORM8 at 21:46Z would still have failed the mean
+
+
+def test_the_analyst_proposes_sizes_inside_the_configured_range(s):
+    """9 Oct: positions were set to $10-$20 but the Analyst was told $5-$10, so every buy was clamped
+    to $10. Its prompt and its vote tool now state POSITION_MIN_USD..POSITION_MAX_USD."""
+    from bot.agents.base import vote_tool
+    from bot.agents.tools import ToolContext, analyst_spec, forensics_spec, scout_spec
+    s.POSITION_MIN_USD, s.POSITION_MAX_USD = 10.0, 20.0
+    ctx = ToolContext(s, None, None, None, None, None, None, {"mint": "m"})
+    spec = analyst_spec(ctx)
+    assert spec.size == (10.0, 20.0) and spec.with_size
+    assert "`size_usd` between 10 and 20: 10 by default, 20 only" in spec.system
+    assert "($10-$20 positions" in spec.system and "$5-$10" not in spec.system
+    assert "($10-$20 positions" in scout_spec(ctx).system
+    assert "($10-$20 positions" in forensics_spec(ctx).system
+    tool = vote_tool(True, spec.size)
+    assert tool["input_schema"]["properties"]["size_usd"]["description"].endswith("10 to 20")
+    # the defaults keep the text as it was (and the cached prefix with it)
+    assert role_prompt("analyst", True) == NEUTRAL_PROMPTS["analyst"]
+    assert role_prompt("analyst", False, (5.0, 10.0)) == ROLE_PROMPTS["analyst"]

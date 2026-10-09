@@ -89,7 +89,7 @@ class Vote:
         return d
 
 
-def vote_tool(with_size: bool) -> dict:
+def vote_tool(with_size: bool, size: tuple[float, float] = (5.0, 10.0)) -> dict:
     props: dict[str, Any] = {
         "vote": {"type": "string", "enum": ["BUY", "PASS"]},
         "confidence": {"type": "number", "description": "0.0 to 1.0"},
@@ -98,7 +98,8 @@ def vote_tool(with_size: bool) -> dict:
     }
     req = ["vote", "confidence", "reasons", "evidence"]
     if with_size:
-        props["size_usd"] = {"type": "number", "description": "Proposed position size in USD, 5 to 10"}
+        props["size_usd"] = {"type": "number",
+                             "description": f"Proposed position size in USD, {size[0]:g} to {size[1]:g}"}
         req.append("size_usd")
     return {
         "name": "submit_vote",
@@ -185,6 +186,7 @@ class AgentSpec:
     tools: list[dict]           # Anthropic tool definitions (without submit_vote)
     impl: dict[str, ToolFn]     # tool name -> async implementation
     with_size: bool = False
+    size: tuple[float, float] = (5.0, 10.0)   # the Analyst's size range: POSITION_MIN_USD..POSITION_MAX_USD
 
 
 def _append_user_text(messages: list[dict], text: str) -> None:
@@ -219,7 +221,7 @@ async def _run_tool(fn: ToolFn | None, name: str, args: dict) -> tuple[str, bool
 
 async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSpec, context: str,
                     budget: Budget, subject_ids: set[str] | None = None) -> Vote:
-    vt = vote_tool(spec.with_size)
+    vt = vote_tool(spec.with_size, spec.size)
     ctx_corpus, tool_corpus = Corpus(subject_ids), Corpus(subject_ids)
     ctx_corpus.add(context)
     tool_calls_ok = 0

@@ -86,8 +86,8 @@ if there are many wallets.
 - `mayhem_mode` true means the creator opted into pump.fun's Mayhem Mode: pump.fun's own AI \
 agent holds extra minted supply and trades the token for its first 24 hours, so early volume, \
 inflow and holder counts are partly that agent, not organic demand.
-Also propose `size_usd` between 5 and 10: 5 by default, more only for unusually clean \
-structure and deep liquidity.
+Also propose `size_usd` between 5 and 10: 5 by default, 10 only for unusually clean structure and \
+deep liquidity, in between when the structure is clean but the liquidity thinner.
 """
 
 
@@ -262,8 +262,12 @@ NEUTRAL_PROMPTS = {"scout": COMMON_NEUTRAL + SCOUT_BODY + SCOUT_NEUTRAL,
                    "analyst": COMMON_NEUTRAL + ANALYST_BODY + ANALYST_NEUTRAL}
 
 
-def role_prompt(name: str, neutral: bool = False) -> str:
-    """The system prompt for an agent under the current gate mode (GATE_NEUTRAL_VOTES)."""
-    if neutral and name in NEUTRAL_PROMPTS:
-        return NEUTRAL_PROMPTS[name]
-    return ROLE_PROMPTS[name]
+def role_prompt(name: str, neutral: bool = False, size: tuple[float, float] = (5.0, 10.0)) -> str:
+    """The system prompt for an agent under the current gate mode (GATE_NEUTRAL_VOTES), with the
+    position sizes the bot is set to (POSITION_MIN_USD, POSITION_MAX_USD): the Analyst proposes a
+    size inside them. The text stays the same for the same settings, so the prefix stays cacheable."""
+    text = NEUTRAL_PROMPTS[name] if neutral and name in NEUTRAL_PROMPTS else ROLE_PROMPTS[name]
+    lo, hi = (f"{float(v):g}" for v in size)
+    return (text.replace("($5-$10 positions", f"(${lo}-${hi} positions")
+                .replace("`size_usd` between 5 and 10: 5 by default, 10 only",
+                         f"`size_usd` between {lo} and {hi}: {lo} by default, {hi} only"))
