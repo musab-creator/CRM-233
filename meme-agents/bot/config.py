@@ -166,6 +166,13 @@ class Settings:
     # confirms it; 0 disables. One bad tick must not fill a take-profit or a stop.
     TICK_SANITY_FACTOR: float = 20.0
 
+    # --- moonshot tracker (measures only, never trades) --------------------------
+    # Every evaluated coin is watched on DexScreener for this many days from the price its shadow
+    # opened at, so the report can show which ones went 10x/100x/500x and what the bot did. 0 = off.
+    MOONSHOT_TRACK_DAYS: float = 14.0
+    MOONSHOT_POLL_MIN: float = 15.0        # coins older than a day are read every 4th pass
+    MOONSHOT_ALERT_MULTIPLE: float = 100.0 # Telegram note once a coin's confirmed peak reaches this; 0 = off
+
     # --- data sources -----------------------------------------------------------
     # PumpPortal streams per-token trades only to funded API keys since May 2026, at 0.01 SOL
     # per 10,000 trades. off: read the chain through Helius instead (free plan, default).
@@ -342,6 +349,12 @@ def validate_settings(s: Settings) -> None:
             raise ConfigError(f"{name} must be greater than zero")
     if s.POSITION_MIN_USD > s.POSITION_MAX_USD:
         raise ConfigError("POSITION_MIN_USD must not exceed POSITION_MAX_USD")
+    if s.MOONSHOT_TRACK_DAYS > 60:
+        raise ConfigError("MOONSHOT_TRACK_DAYS must be 60 or less (0 turns the tracker off)")
+    if s.MOONSHOT_TRACK_DAYS > 0 and s.MOONSHOT_POLL_MIN < 1:
+        raise ConfigError("MOONSHOT_POLL_MIN must be at least 1")
+    if 0 < s.MOONSHOT_ALERT_MULTIPLE < 2:
+        raise ConfigError("MOONSHOT_ALERT_MULTIPLE must be 0 (off) or at least 2")
     if not 0.01 <= s.RUNNER_FRACTION <= 0.25:
         raise ConfigError("RUNNER_FRACTION must be between 0.01 and 0.25")
     if s.RUNNER_TARGET_MULTIPLE <= 1:

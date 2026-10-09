@@ -449,7 +449,8 @@ def test_phone_commands_queue_for_the_ops_service(tmp_path, _isolated):
     assert sent[0]["text"].startswith("not queued: the ops service is not running") and "--ops" in sent[0]["text"]
     rows = sent[1]["reply_markup"]["inline_keyboard"]
     assert [b["callback_data"] for b in rows[3]] == ["confirm:update", "confirm:restart", "confirm:dryrun"]
-    assert rows[4] == [{"text": "Ops", "callback_data": "ops"}] and PANEL[2][2][1] == "confirm:stop"
+    assert rows[4] == [{"text": "Moonshots", "callback_data": "moonshots"}, {"text": "Ops", "callback_data": "ops"}]
+    assert PANEL[2][2][1] == "confirm:stop"
     assert sent[2]["text"].startswith("/update:") and sent[2]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "update"
     assert sent[3]["text"].startswith("queued: update.") and "pause" not in sent[3]["text"]
     assert sent[4]["text"].startswith("/set KEY=VALUE") and "POSITION_MAX_USD=10.0  (1 to 20)" in sent[4]["text"]

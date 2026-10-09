@@ -11,6 +11,8 @@ from pathlib import Path
 from .budget import utc_day
 from .config import Settings
 from .db import SPIKE_FACTOR, SPIKED_SHADOWS_SQL, Database
+from .moonshots import render_lines as moonshot_lines
+from .moonshots import summary as moonshot_summary
 from .paper import mark_to_market
 from .util import now_s
 
@@ -373,6 +375,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "shadow_exit_reasons": dict(sorted(shadow_exits.items(), key=lambda kv: -kv[1])),
         "open_positions": open_rows,
         "open_banked": _open_banked(open_rows),
+        "moonshots": await moonshot_summary(db, s),
         "trades": [{"id": p["id"], "mint": p["mint"], "opened": _iso(p["opened_at"]), "closed": _iso(p["closed_at"]),
                     "size_usd": p["size_usd"], "exit": p["exit_reason"], "pnl_sol": p["pnl_sol"],
                     "pnl_usd": p["pnl_usd"]} for p in closed],
@@ -541,6 +544,7 @@ def render_text(r: dict) -> str:
         lines.append("shadow exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["shadow_exit_reasons"].items()))
     if r["exit_reasons"]:
         lines.append("real trades' exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
+    lines += moonshot_lines(r.get("moonshots"))
     if r["open_positions"]:
         lines += ["", "== Open =="]
         for p in r["open_positions"]:

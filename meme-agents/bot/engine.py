@@ -36,6 +36,7 @@ from .feeds.xapi import XClient
 from .features import chain_features, flow_features
 from .ingest import Ingestor, MintState
 from .live.guard import LiveRefused, check_live_startup, static_checks
+from .moonshots import MoonshotTracker
 from .paper import PaperExecutor
 from .positions import PositionManager
 from .prefilter import curve_liquidity_usd, full_check, stage1
@@ -108,6 +109,9 @@ class Engine:
         self.llm = llm if llm is not None else (
             anthropic.AsyncAnthropic(api_key=s.ANTHROPIC_API_KEY, max_retries=2) if s.ANTHROPIC_API_KEY else None)
         self.tg = Telegram(self.http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID)
+        # watches every evaluated coin for MOONSHOT_TRACK_DAYS; measures only, never trades
+        self.moonshots = (MoonshotTracker(s, self.db, self.dex, self.tg.send if self.tg.enabled else None)
+                          if s.MOONSHOT_TRACK_DAYS > 0 else None)
         sources = [self.dex.sol_usd]
         if s.SOL_USD_FALLBACK_URL:
             sources.append(lambda: coingecko_sol_usd(self.http, s.SOL_USD_FALLBACK_URL))
@@ -825,6 +829,8 @@ class Engine:
             "heartbeat": self.heartbeat,
             **{f"evaluator{i}": self.evaluator for i in range(self.s.LLM_CONCURRENCY)},
         }
+        if self.moonshots:
+            loops["moonshots"] = lambda: self.moonshots.run(self.stop)
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]

@@ -26,6 +26,8 @@ import httpx
 from .config import _FALSE, Settings
 from .db import Database
 from .digest import fmt_hold, hour_start, hourly_digest, usd
+from .moonshots import render_lines as moonshot_lines
+from .moonshots import summary as moonshot_summary
 from .ops import (
     SERVICE,
     OpsError,
@@ -54,6 +56,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("status", "what the bot is doing right now"),
     ("digest", "this hour so far: trades, open positions, spend"),
     ("report", "the full report, all time and today"),
+    ("moonshots", "every evaluated coin's peak over 14 days: which went 10x/100x/500x and what the bot did"),
     ("trades", "the last closed trades"),
     ("why", "/why [id]: every vote on the latest decision (or candidate #id) with its reasons"),
     ("log", "/log [n] [word]: the last n lines of the bot's log, or the last n that contain word"),
@@ -83,13 +86,13 @@ SHOWN_SETTINGS = (
     "EMERGENCY_LIQ_DROP_PCT", "ENTRY_MAX_LIQ_SLIP_PCT", "PRIORITY_FEE_SOL", "URGENT_PRIORITY_FEE_SOL", "TICK_SANITY_FACTOR", "PF_MIN_AGE_MIN", "PF_MAX_AGE_MIN", "PF_MIN_UNIQUE_BUYERS",
     "PF_MIN_NET_INFLOW_SOL", "PF_MAX_TOP10_PCT", "PF_MIN_LIQUIDITY_USD", "CONSENSUS_MIN_MEAN_CONFIDENCE", "GATE_NEUTRAL_VOTES",
     "TRIAGE_ENABLED", "TRIAGE_MIN_CONFIDENCE", "VETO_ENABLED", "VETO_MIN_CONFIDENCE", "REGIME_ENABLED",
-    "REGIME_REFRESH_MIN", "TELEGRAM_DIGEST", "HELIUS_MONTHLY_CREDITS",
+    "REGIME_REFRESH_MIN", "TELEGRAM_DIGEST", "HELIUS_MONTHLY_CREDITS", "MOONSHOT_TRACK_DAYS", "MOONSHOT_ALERT_MULTIPLE",
 )
 PANEL = [[("Status", "status"), ("Digest", "digest"), ("Report", "report")],
          [("Trades", "trades"), ("Why", "why"), ("Log", "log"), ("Settings", "settings")],
          [("Pause", "pause"), ("Resume", "resume"), ("Stop", "confirm:stop")],
          [("Update", "confirm:update"), ("Restart", "confirm:restart"), ("Dry run ON", "confirm:dryrun")],
-         [("Ops", "ops")]]
+         [("Moonshots", "moonshots"), ("Ops", "ops")]]
 
 
 def parse_command(text: str | None) -> tuple[str, str] | None:
@@ -145,6 +148,11 @@ class TelegramCommands:
             return text, None
         if name == "report":
             return render_text(await build_report(self.db, self.s)), None
+        if name == "moonshots":
+            if self.s.MOONSHOT_TRACK_DAYS <= 0:
+                return "the moonshot tracker is off (MOONSHOT_TRACK_DAYS=0 in .env)", None
+            text = "\n".join(moonshot_lines(await moonshot_summary(self.db, self.s, top=15))).strip()
+            return text or "no coin tracked yet: the tracker starts with the next coin the bot evaluates", None
         if name == "trades":
             return await self._trades(10), None
         if name == "why":

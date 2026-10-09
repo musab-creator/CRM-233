@@ -124,6 +124,16 @@ CREATE TABLE IF NOT EXISTS live_tx (
     signature TEXT, sent INTEGER, ok INTEGER, detail TEXT
 );
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, detail TEXT);
+
+-- every evaluated coin, watched for MOONSHOT_TRACK_DAYS from the price its shadow opened at (moonshots.py)
+CREATE TABLE IF NOT EXISTS moonshots (
+    mint TEXT PRIMARY KEY, candidate_id INTEGER, ref_price REAL, ref_at REAL, ref_sol_usd REAL,
+    peak_price REAL, peak_at REAL, peak_mcap_usd REAL, prev_price REAL,
+    last_price REAL, last_mcap_usd REAL, last_at REAL, first_at REAL, supply REAL,
+    polls INTEGER DEFAULT 0, readings INTEGER DEFAULT 0, misses INTEGER DEFAULT 0,
+    alerted_at REAL, done INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_moonshots_done ON moonshots(done, ref_at);
 """
 
 # Columns added after the first release: (table, column, type). Applied with ALTER TABLE when

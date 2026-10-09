@@ -93,6 +93,7 @@ SETTABLE: dict[str, object] = {
     "RUNNER_MAX_HOLD_HOURS": (float, 1, 336),
     "EMERGENCY_LIQ_DROP_PCT": (float, 20, 90),
     "ENTRY_MAX_LIQ_SLIP_PCT": (float, 0, 90),
+    "MOONSHOT_ALERT_MULTIPLE": (float, 0, 10000),
     "PRIORITY_FEE_SOL": (float, 0.0001, 0.004),
     "URGENT_PRIORITY_FEE_SOL": (float, 0.0005, 0.004),
     "CONSENSUS_MIN_MEAN_CONFIDENCE": (float, 0.65, 1.0),
