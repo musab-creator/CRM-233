@@ -53,6 +53,9 @@ and cap your confidence at 0.7: a catalyst could have been posted where you cann
 news feed still counts as a source.
 """
 
+# The outcome figures in the glossary are the 9 Oct /report signal check (closed shadows of every
+# evaluated candidate): early_buyer_retention n 152 above its median / 185 at or below,
+# net_flow_sol_5m 109 / 111, drawdown_from_peak_pct 188 / 190. Refresh them from /report as they drift.
 ANALYST_BODY = """
 Your role: Analyst (البروفيسور), on-chain and market structure.
 Check:
@@ -73,16 +76,23 @@ It is worse if `snipers_still_holding` shows they are still in, because they can
 - Bundling: `same_slot_as_launch_buyers` of 3 or more, `bundle_like_buy_share` or \
 `bundle_like_share_of_launch_minute` above 0.2, or `max_same_size_cluster_wallets` of 5 or \
 more suggests one actor split buys across wallets.
-- An `early_buyer_retention` below 0.4 means most early buyers already exited. On pump.fun the \
-launch-minute buyers flip within minutes as a matter of routine, so read it together with the flow \
-fields, never alone.
+- `early_buyer_retention` is the share of the first 20 buyers (creator excluded) still holding at \
+least a tenth of what they bought. Launch-minute buyers flip within minutes as a matter of routine, so \
+most values are low (0.1 is the median over the tokens this bot evaluated), yet in the recorded outcomes \
+it separated winners from losers better than any other flow field: above 0.1, 26% of the tokens were \
+winners with an average return of -26%; at 0.1 or below, 16% with -38%. Retention above 0.1 is positive \
+evidence a confident BUY can rest on; at 0.1 or below a confident BUY needs clearly strong evidence \
+elsewhere. Low retention alone is not a red flag.
 - `dev_sold_pct_of_bought` above 50 means the creator has cashed out of the launch buy. That too is \
 routine on pump.fun and in the recorded outcomes such tokens did not do worse than the rest, so it adds \
 nothing to a sniper, bundling or holder-base concern: judge those on their own numbers.
 - `effective_buyers` or `effective_holders` below 10 means ownership is concentrated, even \
 if there are many wallets.
-- Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum. A large \
-`drawdown_from_peak_pct` means the move may be over.
+- Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum, but a large inflow is not \
+positive evidence by itself: in the recorded outcomes, tokens above the median 5-minute net inflow (16 \
+SOL) were winners 16% of the time, against 20% below it. Tokens already more than 8.5% under their peak \
+(`drawdown_from_peak_pct`) were winners 18% of the time, against 24% nearer their high, and a large \
+drawdown means the move may be over.
 - `mayhem_mode` true means the creator opted into pump.fun's Mayhem Mode: pump.fun's own AI \
 agent holds extra minted supply and trades the token for its first 24 hours, so early volume, \
 inflow and holder counts are partly that agent, not organic demand.
@@ -252,8 +262,8 @@ post ids, headlines or counts you saw in `evidence` (for example "news_feed item
 
 ANALYST_NEUTRAL = """\
 Your vote carries the decision in this mode: the other two agents are neutral unless they find a \
-problem, so vote BUY only with positive on-chain evidence (healthy distribution, creator still in, \
-organic flow, momentum intact), at 0.75 or more when several facts agree. PASS on any of the red \
+problem, so vote BUY only with positive on-chain evidence (healthy distribution, launch buyers \
+still holding, organic flow, momentum intact), at 0.75 or more when several facts agree. PASS on any of the red \
 flags above.
 """
 

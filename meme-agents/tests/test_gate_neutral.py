@@ -134,6 +134,19 @@ def test_triage_no_longer_skips_on_the_creator_selling_alone():
     assert "cashing out" not in SCOUT and "cashing out" not in HUNTER and "cashing out" not in ANALYST
 
 
+def test_the_analyst_weighs_the_flow_fields_by_the_recorded_outcomes():
+    """9 Oct signal check: launch buyers still holding (retention above the 0.1 median) won 26% against
+    16%; a bigger 5-minute inflow did not help (16% against 20%)."""
+    for prompt in (ROLE_PROMPTS["analyst"], NEUTRAL_PROMPTS["analyst"]):
+        assert "above 0.1, 26% of the tokens were winners with an average return of -26%" in prompt
+        assert "Low retention alone is not a red flag." in prompt
+        assert "a large inflow is not positive evidence by itself" in prompt
+        assert "below 0.4 means most early buyers already exited" not in prompt
+    neutral = NEUTRAL_PROMPTS["analyst"].split("Your vote carries the decision", 1)[1]
+    assert "launch buyers still holding" in neutral and "creator still in" not in neutral
+    assert "0.75 or more" in neutral                                                  # the gate is unchanged
+
+
 def _corpora():
     ctx, tools = Corpus(), Corpus()
     ctx.add("candidate XP age 15.4m buyers 157 inflow 809.7 SOL")
