@@ -87,7 +87,9 @@ def test_settable_allowlist_and_bounds(tmp_path):
         ops.validate_set("LIVE_DRY_RUN", "off")
     with pytest.raises(ops.OpsError, match="use /dryrun on"):
         ops.validate_set("LIVE_DRY_RUN", "maybe")
-    for key, raw in [("POSITION_MAX_USD", "50"), ("BANKROLL_USD", "0"), ("BANKROLL_USD", "nan"), ("BANKROLL_USD", "inf"),
+    assert ops.validate_set("BANKROLL_USD", "200") == "200"          # 9 Oct: a $200 day at $20 a position
+    for key, raw in [("POSITION_MAX_USD", "50"), ("POSITION_MAX_USD", "20.5"), ("BANKROLL_USD", "0"),
+                     ("BANKROLL_USD", "501"), ("BANKROLL_USD", "nan"), ("BANKROLL_USD", "inf"),
                      ("MAX_OPEN_POSITIONS", "2.5"), ("MAX_OPEN_POSITIONS", "21"),
                      ("PRIORITY_FEE_SOL", "0"), ("PRIORITY_FEE_SOL", "0.01"), ("URGENT_PRIORITY_FEE_SOL", "0.005"), ("CONSENSUS_MIN_MEAN_CONFIDENCE", "0.6"),
                      ("GATE_NEUTRAL_VOTES", "maybe"), ("TELEGRAM_DIGEST", "loud"), ("LIVE_DRY_RUN", "false"),

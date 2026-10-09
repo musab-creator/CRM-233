@@ -78,7 +78,7 @@ SETTABLE: dict[str, object] = {
     "LLM_DAILY_BUDGET_USD": (float, 0, 50),
     "X_MONTHLY_BUDGET_USD": (float, 0, 200),
     "LLM_BUDGET_PACING": bool,
-    "BANKROLL_USD": (float, 1, 100),
+    "BANKROLL_USD": (float, 1, 500),
     "MAX_OPEN_POSITIONS": (int, 1, 20),
     "POSITION_MIN_USD": (float, 1, 20),
     "POSITION_MAX_USD": (float, 1, 20),

@@ -266,7 +266,7 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   `deploy/update.sh` (fast-forward of the tracked branch after its tests pass),
   `deploy/set-env.sh KEY=VALUE` or `sudo -n systemctl restart meme-agents`; the result comes back
   into the chat. The allowlist holds bounded operational numbers (budgets, sizing within $20 a
-  position and $100 bankroll, exits, the gate thresholds no lower than the brief's 0.65,
+  position and $500 bankroll, exits, the gate thresholds no lower than the brief's 0.65,
   pre-filter limits) and a few switches. Never from the phone: `MODE`, `LIVE_CONFIRM`,
   `LIVE_MAX_WALLET_SOL`, any key, token or wallet, `TELEGRAM_CHAT_ID`, paths and URLs;
   `LIVE_DRY_RUN` only turns on. A `/set` is also checked against the bot's own cross-field
