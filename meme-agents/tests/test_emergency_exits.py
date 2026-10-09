@@ -454,3 +454,43 @@ def test_a_curve_that_reads_implausibly_twice_is_dropped_unless_held(s, caplog):
     assert len(warnings) == 3 and all(m.startswith("H" * 44) for m in warnings)    # only the held coin warns
     first = [m for lvl, m in records if lvl == "INFO" and m.startswith("A" * 44)]
     assert "account 166 bytes, bytes 81+: " + "00" * 85 in first[0] and "no longer tracked" in first[1]
+
+
+def test_a_mayhem_mode_curve_is_dropped_at_its_first_read_without_a_log_line(s, caplog):
+    """9 Oct 18:26: the logged bytes (byte 81 = 01, SOL quote) are Mayhem Mode curves holding 0.2-12
+    virtual SOL, two log lines each, two reads each. Not traded: dropped at the first read, quietly,
+    and counted in the heartbeat. A held or candidate coin still warns and is never dropped."""
+    from bot.engine import _skipped_curves
+    extra = bytes.fromhex("01" + "00" * 82 + "ac23fc06")[:85]               # 5QjpDC...pump's bytes 81+
+    raw = encode_curve(Curve(1.074e9, 5.519, 7.9e8, 0.01085, 2e9, False, CREATOR)).ljust(81, b"\0") + extra
+    mayhem = decode_curve(raw.ljust(166, b"\0"))
+    assert mayhem.mayhem and mayhem.quote_mint is None and mayhem.v_sol == pytest.approx(5.519)
+    assert not decode_curve(encode_curve(Curve(1.0e9, 32.0, 7e8, 2.0, 1e9, False, CREATOR)).ljust(166, b"\0")).mayhem
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            ing = Ingestor(s, db)
+            for m, key in (("A" * 44, "K" * 44), ("H" * 44, "L" * 44)):
+                await ing.handle({"txType": "create", "mint": m, "traderPublicKey": "D" * 44, "bondingCurveKey": key,
+                                  "solAmount": 0.0, "initialBuy": 0, "vSolInBondingCurve": 30.0,
+                                  "vTokensInBondingCurve": 1.073e9}, ts=1000)
+            ing.pinned.add("H" * 44)
+            caplog.clear()
+            with caplog.at_level("INFO", logger="bot.ingest"):
+                assert await ing.apply_curve("A" * 44, mayhem, 1060) is False
+                assert "A" * 44 not in ing.mints                              # one read is enough
+                await ing.apply_curve("H" * 44, mayhem, 1060)
+                await ing.apply_curve("H" * 44, mayhem, 1300)
+                assert "H" * 44 in ing.mints                                  # held: kept, and it warns
+            row = await db.fetchone("SELECT status, status_reason FROM mints WHERE mint=?", ["A" * 44])
+            return row, dict(ing.stats), [(r.levelname, r.getMessage()) for r in caplog.records]
+        finally:
+            await db.close()
+    row, stats, records = asyncio.run(go())
+    assert row["status"] == "dropped" and row["status_reason"] == "Mayhem Mode curve"
+    assert stats["mayhem_dropped"] == 1 and "curve_unreadable" not in stats
+    assert [lvl for lvl, m in records if m.startswith("A" * 44)] == []       # no line for the skipped coin
+    assert [lvl for lvl, m in records if m.startswith("H" * 44)] == ["WARNING", "WARNING"]
+    assert _skipped_curves(stats | {"non_sol_quote": 2}) == " | curves skipped: Mayhem 1, non-SOL quote 2"
+    assert _skipped_curves({"creates": 5}) == ""

@@ -57,6 +57,14 @@ class StartupError(Exception):
     pass
 
 
+def _skipped_curves(stats: dict) -> str:
+    """Coins dropped on their curve reads since the start, one figure each instead of a log line per coin."""
+    parts = [f"{label} {stats.get(key, 0)}" for key, label in
+             (("mayhem_dropped", "Mayhem"), ("non_sol_quote", "non-SOL quote"), ("curve_unreadable", "unreadable"))
+             if stats.get(key)]
+    return f" | curves skipped: {', '.join(parts)}" if parts else ""
+
+
 def _vote_label(v) -> str:
     """How a vote reads in the chat: the committee's BUY/PASS, a veto agent's veto / no veto."""
     if v.agent in VETO_AGENTS:
@@ -713,7 +721,7 @@ class Engine:
                  len(self.positions.active("real")), await self.llm_budget.remaining(),
                  await self.x_budget.remaining(), credits,
                  f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
-                 f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else "")
+                 _skipped_curves(st) + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
         await self.db.kv_set("heartbeat", json.dumps({
             "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
             "tracked": len(self.ingest.mints),

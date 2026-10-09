@@ -288,7 +288,7 @@ class Ingestor:
             # "implausible" reads). Not a candidate; a held coin keeps its last SOL figures.
             self.stats["non_sol_quote"] = self.stats.get("non_sol_quote", 0) + 1
             if mint not in self.pinned:
-                log.info("%s: priced in %s, not SOL: no longer tracked", mint, c.quote_mint)
+                log.debug("%s: priced in %s, not SOL: no longer tracked", mint, c.quote_mint)   # counted in the heartbeat
                 await self._drop([mint], f"non-SOL quote {c.quote_mint}")
             else:
                 # held or being decided: its curve figures cannot be used, and positions sells it
@@ -311,6 +311,14 @@ class Ingestor:
             self.stats["curve_rejected"] += 1
             st.bad_curve_reads += 1
             read = f"v_sol={c.v_sol:.4g} v_tokens={c.v_tokens:.4g} real_sol={c.real_sol:.4g}"
+            if (c.mayhem or st.mayhem) and mint not in self.pinned:
+                # 9 Oct: the logged bytes showed these to be Mayhem Mode curves (byte 81 set, SOL quote)
+                # holding 0.2-12 virtual SOL, not corrupt reads. The filters, agents and exits assume a
+                # 30-SOL curve, so they are not traded: dropped at the first read, counted in the heartbeat.
+                self.stats["mayhem_dropped"] = self.stats.get("mayhem_dropped", 0) + 1
+                log.debug("%s: Mayhem Mode curve %s: not traded, no longer tracked", mint, read)
+                await self._drop([mint], "Mayhem Mode curve")
+                return False
             if mint in self.pinned:
                 log.warning("%s: rejecting implausible curve read %s (last price %s)", mint, read,
                             f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")

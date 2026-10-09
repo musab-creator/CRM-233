@@ -59,6 +59,8 @@ class Curve:
     # the account as read, for the log when a read makes no sense as a SOL curve
     size: int = field(default=0, compare=False)
     extra: str = field(default="", compare=False, repr=False)   # hex of bytes 81..166
+    # byte 81 of the 166-byte layout: pump.fun Mayhem Mode, whose curves hold far less virtual SOL
+    mayhem: bool = field(default=False, compare=False)
 
     @property
     def price_sol(self) -> float | None:
@@ -92,7 +94,7 @@ def decode_curve(data: bytes | None) -> Curve | None:
             quote = None
     scale = 10 ** TOKEN_DECIMALS
     return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator, quote,
-                 len(data), data[81:166].hex())
+                 len(data), data[81:166].hex(), len(data) > 81 and data[81] == 1)
 
 
 def encode_curve(c: Curve) -> bytes:
