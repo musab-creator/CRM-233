@@ -43,7 +43,7 @@ from .ops import (
     validate_set,
     watcher_alive,
 )
-from .report import build_report, render_text
+from .report import _open_row, build_report, render_text
 from .risk import kill_switch_active
 from .status import build_status, health
 from .telegram import Telegram, TelegramConflict
@@ -378,8 +378,10 @@ class TelegramCommands:
             lines.append(head)
         lines += await self._emergency_lines(cid)
         shadow = await self.db.fetchone("SELECT id, mint, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
-                                        "exit_reason, entry_price, opened_at, closed_at FROM positions "
-                                        "WHERE candidate_id=? AND kind='shadow' ORDER BY id DESC LIMIT 1", [cid])
+                                        "exit_reason, entry_price, opened_at, closed_at, tokens_initial, "
+                                        "tokens_remaining, last_price, peak_price, sol_usd_entry, runner_active "
+                                        "FROM positions WHERE candidate_id=? AND kind='shadow' ORDER BY id DESC LIMIT 1",
+                                        [cid])
         if shadow and shadow["status"] == "closed":
             ret = (f" ({(float(shadow['proceeds_sol'] or 0) / shadow['cost_sol'] - 1) * 100:+.0f}%)"
                    if shadow["cost_sol"] else "")
@@ -388,8 +390,30 @@ class TelegramCommands:
                          f"{(shadow['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
             lines += await self._fill_lines(shadow)
         elif shadow:
-            lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {shadow['status']}")
+            lines += self._open_shadow_lines(shadow)
+            lines += await self._fill_lines(shadow)
         return redact("\n".join(lines))
+
+    def _open_shadow_lines(self, shadow) -> list[str]:
+        """An open shadow (9 Oct: QI's ran 158x as a runner, and /why said only "open"): where the price
+        is against the entry, and what its sales so far banked and what it still holds."""
+        head = f"shadow ${float(shadow['size_usd'] or 0):.0f}: {shadow['status']}"
+        entry = float(shadow["entry_price"] or 0)
+        if shadow["runner_active"]:
+            head += " (runner)"
+        if entry > 0 and shadow["last_price"]:
+            head += f" · now x{float(shadow['last_price']) / entry:,.3g} the entry"
+            if shadow["peak_price"]:
+                head += f", peak x{float(shadow['peak_price']) / entry:,.3g}"
+        out = [head]
+        row = _open_row(dict(shadow), self.s)
+        if "banked_sol" in row:
+            dollars = f" ({usd(row['banked_usd'])})" if row.get("banked_usd") is not None else ""
+            held = (f", the {1 - row['sold_share']:.0%} still held is worth {row['held_sol']:.4f} SOL now"
+                    if row.get("held_sol") is not None else "")
+            out.append(f"  sold {row['sold_share']:.0%} of the tokens for {row['proceeds_sol']:.4f} SOL: banked "
+                       f"{row['banked_sol']:+.4f} SOL{dollars}{held}")
+        return out
 
     async def _emergency_lines(self, cid: int) -> list[str]:
         """What made an emergency exit fire for this decision's positions (bot/positions.py records it)."""

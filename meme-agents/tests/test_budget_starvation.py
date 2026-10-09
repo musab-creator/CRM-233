@@ -149,3 +149,39 @@ def test_why_shows_every_vote_with_its_reasons_and_the_shadow_outcome(tmp_path):
     assert "analyst: BUY 0.72\n  - Rugcheck score 1" in text
     assert "scout: PASS 0.62 (guard: BUY evidence grounding 0.31 < 0.5)\n  - Three posts" in text
     assert "shadow $5: -$1.50 (-30%) · stop loss · held" in text
+
+
+def test_why_shows_what_an_open_shadow_already_sold_and_still_holds(tmp_path):
+    """9 Oct: QI (#1013) ran 158x while its shadow was open as a runner, and /why said only
+    "shadow $10: open". It now shows the price against the entry, the sales and what is held."""
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "Q" * 32, "symbol": "QI", "created_at": now_s() - 9000})
+            cid = await db.insert("candidates", {"mint": "Q" * 32, "ts": now_s() - 8000, "metrics": "{}",
+                                                 "status": "evaluated", "decision": "PASS", "mean_confidence": 0.64,
+                                                 "gate_reason": "mean confidence 0.640 < 0.65"})
+            pid = await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": "Q" * 32, "candidate_id": cid,
+                                                "creator": "C", "status": "open", "size_usd": 10.0, "cost_sol": 0.09,
+                                                "entry_price": 1e-7, "tokens_initial": 9e5, "tokens_remaining": 9e4,
+                                                "proceeds_sol": 0.4, "last_price": 1.2e-5, "peak_price": 1.58e-5,
+                                                "sol_usd_entry": 110.0, "runner_active": 1, "opened_at": now_s() - 7000})
+            for reason, price, tokens, sol in (("entry", 1e-7, 9e5, 0.09), ("take_profit", 1.6e-7, 4.5e5, 0.071),
+                                               ("core_trailing_stop", 9.1e-7, 3.6e5, 0.329)):
+                await db.insert("fills", {"position_id": pid, "ts": now_s() - 6000, "side": "buy" if reason == "entry"
+                                          else "sell", "reason": reason, "price": price, "tokens": tokens, "sol": sol})
+            tc = TelegramCommands(Telegram(FakeHttp([]), s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            text, _ = await tc.answer("why", str(cid))
+        finally:
+            await db.close()
+        return text
+    text = asyncio.run(go())
+    assert "shadow $10: open (runner) · now x120 the entry, peak x158" in text
+    assert "sold 90% of the tokens for 0.4000 SOL: banked +0.3190 SOL (+$35.09)" in text
+    assert "the 10% still held is worth" in text
+    assert "core trailing stop @ 9.100e-07 (x9.1 entry)" in text
