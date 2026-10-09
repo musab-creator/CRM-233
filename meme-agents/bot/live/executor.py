@@ -153,13 +153,16 @@ class LiveExecutor:
         return f"LiveExecutor(pubkey={self.pubkey}, dry_run={self.dry_run})"
 
     # --- transaction builders ---------------------------------------------------
-    async def build_pumpportal(self, action: str, mint: str, amount, in_sol: bool) -> VersionedTransaction:
-        """`amount`: SOL (buy), tokens, or a percentage string like "100%" (sell)."""
+    async def build_pumpportal(self, action: str, mint: str, amount, in_sol: bool,
+                               urgent: bool = False) -> VersionedTransaction:
+        """`amount`: SOL (buy), tokens, or a percentage string like "100%" (sell). `urgent` sends the
+        higher priority fee (a stop loss, an emergency, the kill switch, a retried sale)."""
         body = {"publicKey": self.pubkey, "action": action, "mint": mint, "amount": amount,
                 "denominatedInSol": "true" if in_sol else "false",
                 # PumpPortal documents slippage as a whole percentage
                 "slippage": max(1, int(round(self.s.ENTRY_SLIPPAGE_PCT if action == "buy" else self.s.EXIT_SLIPPAGE_PCT))),
-                "priorityFee": round(self.s.NETWORK_FEE_SOL * 0.8, 6), "pool": "auto"}
+                "priorityFee": round(self.s.URGENT_PRIORITY_FEE_SOL if urgent else self.s.PRIORITY_FEE_SOL, 6),
+                "pool": "auto"}
         r = await self.http.post(self.s.PUMPPORTAL_TRADE_URL, data=body, timeout=20)
         if r.status_code != 200:
             raise LiveExecutionError(f"trade-local HTTP {r.status_code}: {r.text[:200]}")
@@ -418,18 +421,19 @@ class LiveExecutor:
         return await self._execute(mint, "buy", sol_in, price, tx, "jupiter" if jup else "pumpportal", rid)
 
     async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0,
-                   *, prefer_pumpportal: bool = False) -> Fill:
+                   *, prefer_pumpportal: bool = False, urgent: bool = False) -> Fill:
         """Sell `fraction` of current holdings (`tokens` is the bot's own estimate of that amount).
         `prefer_pumpportal`: route through PumpPortal's "auto" pool even after graduation (a runner's
-        small remainder may be below Jupiter's minimum order)."""
+        small remainder may be below Jupiter's minimum order). `urgent`: PumpPortal sends it with
+        URGENT_PRIORITY_FEE_SOL (Jupiter sets its own priority fee)."""
         if (not isfinite(tokens) or tokens <= 0 or not isfinite(price) or price <= 0
                 or not isfinite(fraction) or not 0 < fraction <= 1):
             raise ValueError("sell tokens/price must be positive and fraction must be within (0,1]")
         async with self._wallet_lock:
-            return await self._sell(mint, tokens, price, fraction, prefer_pumpportal)
+            return await self._sell(mint, tokens, price, fraction, prefer_pumpportal, urgent)
 
     async def _sell(self, mint: str, tokens: float, price: float, fraction: float,
-                    prefer_pumpportal: bool = False) -> Fill:
+                    prefer_pumpportal: bool = False, urgent: bool = False) -> Fill:
         existing = await self.db.kv_get(self._intent_key(mint, "sell"))
         if existing:                                   # see _buy: never simulate over a pending real sell
             return await self._receipt_fill(json.loads(existing))
@@ -439,8 +443,8 @@ class LiveExecutor:
             if jup:
                 tx, _ = await self.build_jupiter(mint, WSOL, int(tokens * 10 ** PUMP_DECIMALS))
             else:
-                tx = await self.build_pumpportal("sell", mint, round(tokens, 6), in_sol=False)
-            f = exit_fill(tokens, price, self.s)
+                tx = await self.build_pumpportal("sell", mint, round(tokens, 6), in_sol=False, urgent=urgent)
+            f = exit_fill(tokens, price, self.s, urgent)
             f.tx_sig = await self._simulate(tx, "jupiter" if jup else "pumpportal", "sell")
             return f
         raw_before, tok_before = await self.chain.token_balance(self.pubkey, mint)
@@ -454,7 +458,7 @@ class LiveExecutor:
             tx, rid = await self.build_jupiter(mint, WSOL, amount_raw)
         else:
             pct = "100%" if full else f"{fraction * 100:.4g}%"
-            tx = await self.build_pumpportal("sell", mint, pct, in_sol=False)
+            tx = await self.build_pumpportal("sell", mint, pct, in_sol=False, urgent=urgent)
             rid = None
         return await self._execute(mint, "sell", tokens, price, tx, "jupiter" if jup else "pumpportal", rid)
 

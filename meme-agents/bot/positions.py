@@ -27,6 +27,12 @@ from .util import now_s
 
 log = logging.getLogger("bot.positions")
 
+
+def urgent_exit(reason: str, attempts: int = 0) -> bool:
+    """A sale that has to land fast: a stop loss, an emergency, the kill switch, or any sale retried
+    after a failure. It pays URGENT_PRIORITY_FEE_SOL; a planned sale pays PRIORITY_FEE_SOL."""
+    return reason in ("stop_loss", "kill_switch") or reason.startswith("emergency") or attempts > 0
+
 TICK_CONFIRM_S = 300.0   # a held mark is confirmed by a second one near it within this long
 
 
@@ -156,7 +162,7 @@ class PositionManager:
 
     async def cash_sol(self) -> float:
         """Paper bankroll: starting SOL + realized PnL - capital tied up in active positions."""
-        if self.executor.mode == "live" and not getattr(self.executor, "dry_run", True):
+        if self._live_sending():
             balance = await self.executor.chain.balance_sol(self.executor.pubkey)
             if not isfinite(balance) or balance < 0:
                 raise ValueError("live wallet balance must be finite and nonnegative")
@@ -245,8 +251,13 @@ class PositionManager:
         sol_in = size_usd / sol_usd
         async with self.lock:
             if kind == "real":
-                ok, why = self.risk.can_open(creator, [asdict(p) for p in self.active("real")],
-                                             await self.cash_sol(), sol_in + self.s.NETWORK_FEE_SOL)
+                active = self.active("real")
+                # live: the wallet pays every sale's fee before its proceeds arrive, so a new buy
+                # leaves one transaction's fee in it for each position already held (a rugged token
+                # returns nothing to pay its own sale), which matters with many positions open
+                reserve = self.s.NETWORK_FEE_SOL * len(active) if self._live_sending() else 0.0
+                ok, why = self.risk.can_open(creator, [asdict(p) for p in active],
+                                             await self.cash_sol(), sol_in + self.s.NETWORK_FEE_SOL + reserve)
                 if not ok:
                     log.info("risk blocked entry %s: %s", mint, why)
                     await self.db.event("risk_block", {"mint": mint, "reason": why}, now_s())
@@ -265,6 +276,10 @@ class PositionManager:
 
     def _is_live(self, p: Position) -> bool:
         return p.kind == "real" and getattr(self.executor, "mode", "paper") == "live"
+
+    def _live_sending(self) -> bool:
+        """Real transactions from a real wallet (live mode, dry run off), as cash_sol reads it."""
+        return self.executor.mode == "live" and not getattr(self.executor, "dry_run", True)
 
     def _spawn(self, p: Position, coro) -> None:
         self._inflight.add(p.id)
@@ -434,8 +449,9 @@ class PositionManager:
             self._spawn(p, self._live_exit(p, fraction, tokens, price, reason))
             return
         ex = self.executor if p.kind == "real" else self.shadow_exec
+        kw = {"urgent": True} if urgent_exit(reason, p.exit_attempts) else {}
         try:
-            f = await ex.sell(p.mint, tokens, price, fraction)
+            f = await ex.sell(p.mint, tokens, price, fraction, **kw)
         except Exception as e:
             await self._exit_failed(p, fraction, reason, e, ts)
             return
@@ -447,6 +463,8 @@ class PositionManager:
                 # a runner's sale may be worth less than Jupiter's minimum order: PumpPortal's
                 # "auto" pool sells on the curve or after graduation alike
                 kw = {"prefer_pumpportal": True} if p.runner_active else {}
+                if urgent_exit(reason, p.exit_attempts):
+                    kw["urgent"] = True
                 f = await self.executor.sell(p.mint, tokens, price, fraction, **kw)
             except Exception as e:
                 async with self.lock:

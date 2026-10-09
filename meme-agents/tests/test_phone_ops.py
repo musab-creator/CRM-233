@@ -73,6 +73,9 @@ def test_settable_allowlist_and_bounds(tmp_path):
     assert ops.validate_set("POSITION_MAX_USD", "15") == "15"
     assert ops.validate_set("position_max_usd", " 7.5 ") == "7.5"
     assert ops.validate_set("MAX_OPEN_POSITIONS", "4") == "4"
+    assert ops.validate_set("MAX_OPEN_POSITIONS", "15") == "15"                 # up to 20 from the phone
+    assert ops.validate_set("PRIORITY_FEE_SOL", "0.0005") == "0.0005"
+    assert ops.validate_set("URGENT_PRIORITY_FEE_SOL", "0.003") == "0.003"
     assert ops.validate_set("PF_MIN_LIQUIDITY_USD", "1e5") == "100000"
     assert ops.validate_set("GATE_NEUTRAL_VOTES", "off") == "false"
     assert ops.validate_set("TRIAGE_ENABLED", "Yes") == "true"
@@ -85,7 +88,8 @@ def test_settable_allowlist_and_bounds(tmp_path):
     with pytest.raises(ops.OpsError, match="use /dryrun on"):
         ops.validate_set("LIVE_DRY_RUN", "maybe")
     for key, raw in [("POSITION_MAX_USD", "50"), ("BANKROLL_USD", "0"), ("BANKROLL_USD", "nan"), ("BANKROLL_USD", "inf"),
-                     ("MAX_OPEN_POSITIONS", "2.5"), ("MAX_OPEN_POSITIONS", "9"), ("CONSENSUS_MIN_MEAN_CONFIDENCE", "0.6"),
+                     ("MAX_OPEN_POSITIONS", "2.5"), ("MAX_OPEN_POSITIONS", "21"),
+                     ("PRIORITY_FEE_SOL", "0"), ("PRIORITY_FEE_SOL", "0.01"), ("URGENT_PRIORITY_FEE_SOL", "0.005"), ("CONSENSUS_MIN_MEAN_CONFIDENCE", "0.6"),
                      ("GATE_NEUTRAL_VOTES", "maybe"), ("TELEGRAM_DIGEST", "loud"), ("LIVE_DRY_RUN", "false"),
                      ("LIVE_DRY_RUN", "0"), ("POSITION_MAX_USD", ""), ("POSITION_MAX_USD", "15; rm -rf /")]:
         with pytest.raises(ops.OpsError):

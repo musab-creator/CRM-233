@@ -4,7 +4,7 @@ import pytest
 
 from bot.db import Database
 from bot.feeds.dexscreener import WSOL
-from bot.paper import PaperExecutor, entry_fill, exit_fill, mark_to_market
+from bot.paper import SIGNATURE_FEE_SOL, PaperExecutor, entry_fill, exit_fill, mark_to_market
 from bot.positions import PositionManager
 from bot.risk import RiskManager
 
@@ -14,31 +14,34 @@ def test_entry_fill_math(s):
     # 1.5% fees, 3% slippage, 0.005 SOL network
     assert f.exec_price == pytest.approx(1.03e-7)
     assert f.tokens == pytest.approx(0.985 / 1.03e-7)
-    assert f.sol == pytest.approx(1.005)
-    assert f.fee_sol == pytest.approx(0.015 + 0.005)
+    assert f.sol == pytest.approx(1.001005)                     # a buy pays PRIORITY_FEE_SOL + the signature fee
+    assert f.fee_sol == pytest.approx(0.015 + 0.001005)
 
 
 def test_exit_fill_math(s):
     f = exit_fill(1_000_000, 1e-7, s)
     gross = 1_000_000 * 1e-7 * 0.95
-    assert f.sol == pytest.approx(gross * 0.985 - 0.005)
-    assert f.fee_sol == pytest.approx(gross * 0.015 + 0.005)
+    assert f.sol == pytest.approx(gross * 0.985 - 0.001005)
+    assert f.fee_sol == pytest.approx(gross * 0.015 + 0.001005)
+    urgent = exit_fill(1_000_000, 1e-7, s, urgent=True)       # a stop loss or emergency pays the urgent fee
+    assert urgent.sol == pytest.approx(gross * 0.985 - 0.004005)
 
 
 def test_round_trip_at_flat_price_loses_costs(s):
     e = entry_fill(0.05, 2e-7, s)
     x = exit_fill(e.tokens, 2e-7, s)
     pnl = x.sol - e.sol
-    expected = 0.05 * 0.985 / 1.03 * 0.95 * 0.985 - 0.005 - 0.05 - 0.005
+    expected = 0.05 * 0.985 / 1.03 * 0.95 * 0.985 - 0.001005 - 0.05 - 0.001005
     assert pnl == pytest.approx(expected)
     assert pnl < 0
 
 
 def test_costs_are_config(s):
     s.ENTRY_SLIPPAGE_PCT = s.EXIT_SLIPPAGE_PCT = s.PUMPFUN_FEE_PCT = s.PUMPPORTAL_FEE_PCT = 0
-    s.NETWORK_FEE_SOL = 0
+    s.PRIORITY_FEE_SOL = s.URGENT_PRIORITY_FEE_SOL = 0
     e = entry_fill(1.0, 1e-7, s)
-    assert exit_fill(e.tokens, 1e-7, s).sol == pytest.approx(1.0)
+    assert e.sol - 1.0 == pytest.approx(SIGNATURE_FEE_SOL)          # only Solana's signature fee is fixed
+    assert exit_fill(e.tokens, 1e-7, s).sol == pytest.approx(1.0 - SIGNATURE_FEE_SOL)
     assert mark_to_market(0, 1e-7, s) == 0
 
 
@@ -71,7 +74,7 @@ def test_entry_fills_at_next_trade_after_decision_and_partial_tp(s):
         assert p.status == "pending"
         await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
         assert p.status == "open" and p.entry_price == 1e-7
-        assert p.cost_sol == pytest.approx(0.105)
+        assert p.cost_sol == pytest.approx(0.101005)              # 0.1 + PRIORITY_FEE_SOL + the signature fee
         tokens = p.tokens_initial
         await pm.on_tick("M", 1.6e-7, p.decided_at + 2, {})  # +60% -> sell half
         assert p.tp_done and p.tokens_remaining == pytest.approx(tokens / 2)
@@ -80,7 +83,7 @@ def test_entry_fills_at_next_trade_after_decision_and_partial_tp(s):
         assert p.status == "open"
         await pm.on_tick("M", 1.39e-7, p.decided_at + 5, {})  # -30.5% from peak: trailing stop
         assert p.status == "closed" and p.exit_reason == "trailing_stop"
-        expected = (exit_fill(tokens / 2, 1.6e-7, s).sol + exit_fill(tokens / 2, 1.39e-7, s).sol) - 0.105
+        expected = (exit_fill(tokens / 2, 1.6e-7, s).sol + exit_fill(tokens / 2, 1.39e-7, s).sol) - 0.101005
         assert p.pnl_sol == pytest.approx(expected)
         assert p.pnl_usd == pytest.approx(expected * 100)
         fills = await db.fetchall("SELECT side, reason FROM fills ORDER BY id")

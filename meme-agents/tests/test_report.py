@@ -132,3 +132,37 @@ def test_report_without_partial_sales_adds_no_banked_lines(s):
         return r
     r = asyncio.run(go())
     assert r["open_banked"] is None and "realized so far" not in render_text(r)
+
+
+def test_triage_bundling_flags_are_checked_on_every_shadow_including_skipped_ones(s):
+    """Triage skips on its bundling flags; the report shows what flagged tokens did, so the flags can
+    be judged on outcomes (a triage-skipped candidate has a shadow but no committee votes)."""
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            rows = [(1, {"same_slot_as_launch_buyers": 4, "max_same_size_cluster_wallets": 6}, 0.02),
+                    (2, {"same_slot_as_launch_buyers": 3}, -0.03),
+                    (3, {"same_slot_as_launch_buyers": 1, "bundle_like_share_of_launch_minute": 0.3}, -0.04),
+                    (4, {"same_slot_as_launch_buyers": 0, "max_same_size_cluster_wallets": 2}, 0.01)]
+            for cid, flow, pnl in rows:
+                await db.insert("candidates", {"id": cid, "mint": f"M{cid}", "ts": 1.0, "metrics": {"flow": flow},
+                                               "status": "evaluated", "decision": "PASS",
+                                               "gate_reason": "triage: bundling" if cid < 3 else None})
+                await db.insert("positions", {"mint": f"M{cid}", "candidate_id": cid, "kind": "shadow",
+                                              "status": "closed", "pnl_sol": pnl, "pnl_usd": pnl * 100,
+                                              "cost_sol": 0.05, "closed_at": 2.0})
+            return await build_report(db, s)
+        finally:
+            await db.close()
+    r = asyncio.run(go())
+    flags = {f["flag"]: f for f in r["triage_flags"]}
+    slot = flags["same_slot_as_launch_buyers >= 3"]
+    assert slot["flagged"]["n"] == 2 and slot["flagged"]["win_rate"] == 0.5
+    assert slot["clear"]["n"] == 2 and slot["clear"]["win_rate"] == 0.5
+    assert flags["bundle_like_share_of_launch_minute > 0.2"]["flagged"]["n"] == 1
+    assert flags["max_same_size_cluster_wallets >= 5"]["flagged"]["n"] == 1
+    sig = {x["signal"]: x for x in r["signals"]}
+    assert sig["same_slot_as_launch_buyers"]["above"]["n"] + sig["same_slot_as_launch_buyers"]["at_or_below"]["n"] == 4
+    text = render_text(r)
+    assert "== Triage's bundling flags on shadow outcomes" in text
+    assert "same_slot_as_launch_buyers >= 3" in text and "triage-skipped ones included" in text

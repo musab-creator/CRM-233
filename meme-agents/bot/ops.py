@@ -72,13 +72,14 @@ _sleep = time.sleep           # replaced in tests
 
 # What the phone may change: (type, low, high) for numbers, bool, a tuple of choices, or
 # ("true",) for a one-way flag. Bounds keep a bad tap inside the brief's limits: the gate
-# never drops below the brief's 0.65, a position never exceeds $20, the bankroll $100.
+# never drops below the brief's 0.65, a position never exceeds $20, the bankroll $100, at most 20
+# positions are open at once (the live wallet's balance limits them first).
 SETTABLE: dict[str, object] = {
     "LLM_DAILY_BUDGET_USD": (float, 0, 50),
     "X_MONTHLY_BUDGET_USD": (float, 0, 200),
     "LLM_BUDGET_PACING": bool,
     "BANKROLL_USD": (float, 1, 100),
-    "MAX_OPEN_POSITIONS": (int, 1, 5),
+    "MAX_OPEN_POSITIONS": (int, 1, 20),
     "POSITION_MIN_USD": (float, 1, 20),
     "POSITION_MAX_USD": (float, 1, 20),
     "DAILY_LOSS_CAP_PCT": (float, 1, 100),
@@ -92,6 +93,8 @@ SETTABLE: dict[str, object] = {
     "RUNNER_MAX_HOLD_HOURS": (float, 1, 336),
     "EMERGENCY_LIQ_DROP_PCT": (float, 20, 90),
     "ENTRY_MAX_LIQ_SLIP_PCT": (float, 0, 90),
+    "PRIORITY_FEE_SOL": (float, 0.0001, 0.004),
+    "URGENT_PRIORITY_FEE_SOL": (float, 0.0005, 0.004),
     "CONSENSUS_MIN_MEAN_CONFIDENCE": (float, 0.65, 1.0),
     "GATE_NEUTRAL_VOTES": bool,
     "TRIAGE_ENABLED": bool,

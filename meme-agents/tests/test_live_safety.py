@@ -178,11 +178,12 @@ class FlakySeller(PaperExecutor):
         self.fails = fails
         self.calls = 0
 
-    async def sell(self, mint, tokens, price, fraction=1.0):
+    async def sell(self, mint, tokens, price, fraction=1.0, urgent=False):
         self.calls += 1
+        self.urgent = getattr(self, "urgent", []) + [urgent]
         if self.calls <= self.fails:
             raise RuntimeError("rpc down")
-        return exit_fill(tokens, price, self.s)
+        return exit_fill(tokens, price, self.s, urgent)
 
 
 async def _manager(s, executor):

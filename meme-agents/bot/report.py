@@ -188,7 +188,13 @@ def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 
 
 
 SIGNALS = ("sniper_top3_share", "bundle_like_buy_share", "early_buyer_retention", "effective_buyers",
-           "top5_buyer_share", "dev_sold_pct_of_bought", "net_flow_sol_5m", "drawdown_from_peak_pct")
+           "top5_buyer_share", "dev_sold_pct_of_bought", "net_flow_sol_5m", "drawdown_from_peak_pct",
+           "same_slot_as_launch_buyers", "bundle_like_share_of_launch_minute", "max_same_size_cluster_wallets",
+           "sniper_top3_share_of_launch_minute")
+
+# Triage's bundling red flags (agents/prompts.py TRIAGE), checked against what flagged tokens did
+TRIAGE_FLAGS = (("same_slot_as_launch_buyers", ">=", 3), ("bundle_like_share_of_launch_minute", ">", 0.2),
+                ("max_same_size_cluster_wallets", ">=", 5))
 
 
 def signal_check(scored: list[dict]) -> list[dict]:
@@ -211,6 +217,42 @@ def signal_check(scored: list[dict]) -> list[dict]:
             lo = [r for v, r in vals if v < med]
             split = "at"
         out.append({"signal": name, "median": med, "split": split, "above": _bucket(hi), "at_or_below": _bucket(lo)})
+    return out
+
+
+async def _flow_outcomes(db: Database) -> list[dict]:
+    """Every evaluated candidate with a closed shadow, triage-skipped ones included (they have no
+    committee votes, so _scored_candidates leaves them out): its flow features and what it did."""
+    rows = await db.fetchall("""
+        SELECT c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
+        FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
+        WHERE c.decision IS NOT NULL AND p.id NOT IN (""" + SPIKED_SHADOWS_SQL + """)
+          AND p.id=(SELECT q.id FROM positions q WHERE q.candidate_id=c.id
+                    AND q.kind='shadow' AND q.status='closed' ORDER BY q.closed_at DESC, q.id DESC LIMIT 1)""")
+    out = []
+    for r in rows:
+        if not all(isinstance(r[k], (int, float)) and math.isfinite(r[k]) for k in ("pnl_sol", "pnl_usd", "cost_sol")) \
+                or r["cost_sol"] <= 0:
+            continue
+        try:
+            metrics = json.loads(r["metrics"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            metrics = {}
+        flow = metrics.get("flow") if isinstance(metrics, dict) else None
+        out.append({"ret": r["pnl_sol"] / r["cost_sol"], "pnl_usd": r["pnl_usd"], "win": r["pnl_sol"] > 0,
+                    "flow": flow if isinstance(flow, dict) else {}})
+    return out
+
+
+def flag_check(rows: list[dict]) -> list[dict]:
+    """Tokens that raise each of triage's bundling flags against the ones that do not."""
+    out = []
+    for name, op, limit in TRIAGE_FLAGS:
+        vals = [(r["flow"].get(name), r) for r in rows if isinstance(r["flow"].get(name), (int, float))
+                and not isinstance(r["flow"].get(name), bool) and math.isfinite(r["flow"][name])]
+        hit = [r for v, r in vals if (v >= limit if op == ">=" else v > limit)]
+        miss = [r for v, r in vals if not (v >= limit if op == ">=" else v > limit)]
+        out.append({"flag": f"{name} {op} {limit:g}", "flagged": _bucket(hit), "clear": _bucket(miss)})
     return out
 
 
@@ -297,6 +339,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "x_budget_month": s.X_MONTHLY_BUDGET_USD,
     }
     scored = await _scored_candidates(db)
+    flows = await _flow_outcomes(db)
     exit_reasons: dict[str, int] = {}
     for p in closed:
         exit_reasons[p["exit_reason"] or "?"] = exit_reasons.get(p["exit_reason"] or "?", 0) + 1
@@ -320,7 +363,8 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
                                 s.BANKROLL_USD),
         **_agent_section(await agent_accuracy(db, s.MODE)),
         "gate_sweep": gate_sweep(scored),
-        "signals": signal_check(scored),
+        "signals": signal_check(flows),
+        "triage_flags": flag_check(flows),
         "shadow_extremes": await shadow_extremes(db),
         "shadow_spiked": await spiked_shadow_count(db),
         "funnel_day": funnel,
@@ -451,7 +495,8 @@ def render_text(r: dict) -> str:
         lines.append(f"{g['rule']:28s} {_f(g['threshold'], '{:.2f}', '-'):>6s} {g['n']:>4d} "
                      f"{_f(g['win_rate'], '{:.0%}'):>6s} {_f(g['avg_return'], '{:+.1%}'):>8s} {g['pnl_usd']:>+8.2f}")
     if r["signals"]:
-        lines += ["", "== Signal check: shadow outcomes above vs at/below each feature's median =="]
+        lines += ["", "== Signal check: shadow outcomes above vs at/below each feature's median ==",
+                  "(every evaluated candidate, triage-skipped ones included)"]
         if any(sg.get("split") == "at" for sg in r["signals"]):
             lines.append("(\"at\" where the median is also the top value: the tokens at it vs the ones below)")
         for sg in r["signals"]:
@@ -461,6 +506,14 @@ def render_text(r: dict) -> str:
                          f"{_f(a['win_rate'], '{:.0%}'):>4s} ret {_f(a['avg_return'], '{:+.1%}'):>7s}  |  "
                          f"below: n {b['n']:>3d} win {_f(b['win_rate'], '{:.0%}'):>4s} "
                          f"ret {_f(b['avg_return'], '{:+.1%}'):>7s}")
+    flags = [f for f in r.get("triage_flags") or [] if f["flagged"]["n"] or f["clear"]["n"]]
+    if flags:
+        lines += ["", "== Triage's bundling flags on shadow outcomes (flagged tokens are skipped) =="]
+        for f in flags:
+            a, b = f["flagged"], f["clear"]
+            lines.append(f"{f['flag']:40s} flagged: n {a['n']:>3d} win {_f(a['win_rate'], '{:.0%}'):>4s} "
+                         f"ret {_f(a['avg_return'], '{:+.1%}'):>7s}  |  clear: n {b['n']:>3d} win "
+                         f"{_f(b['win_rate'], '{:.0%}'):>4s} ret {_f(b['avg_return'], '{:+.1%}'):>7s}")
     sh = r["shadow"]
     lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
               f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]

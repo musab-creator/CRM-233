@@ -125,7 +125,13 @@ class Settings:
     # --- paper costs -----------------------------------------------------------
     PUMPFUN_FEE_PCT: float = 1.0
     PUMPPORTAL_FEE_PCT: float = 0.5
-    NETWORK_FEE_SOL: float = 0.005
+    NETWORK_FEE_SOL: float = 0.005            # the most one transaction may cost (spend and balance checks)
+    # The priority fee sent with each PumpPortal transaction. Buys and planned sells (take-profit,
+    # trailing and time stops, the runner's target) pay PRIORITY_FEE_SOL; a stop loss, an emergency,
+    # the kill switch and any sale retried after a failure pay URGENT_PRIORITY_FEE_SOL, to land fast
+    # in a dump. 9 Oct: a flat 0.004 SOL on every transaction was 9-22% of a $10 trade.
+    PRIORITY_FEE_SOL: float = 0.001
+    URGENT_PRIORITY_FEE_SOL: float = 0.004
     ENTRY_SLIPPAGE_PCT: float = 3.0
     EXIT_SLIPPAGE_PCT: float = 5.0
     ENTRY_FILL_TIMEOUT_S: float = 300.0
@@ -367,3 +373,9 @@ def validate_settings(s: Settings) -> None:
     for name in ("PUMPFUN_FEE_PCT", "PUMPPORTAL_FEE_PCT", "ENTRY_SLIPPAGE_PCT", "EXIT_SLIPPAGE_PCT"):
         if getattr(s, name) >= 100:
             raise ConfigError(f"{name} must be below 100")
+    if not 0 < s.PRIORITY_FEE_SOL <= s.URGENT_PRIORITY_FEE_SOL:
+        raise ConfigError("PRIORITY_FEE_SOL must be above 0 and at most URGENT_PRIORITY_FEE_SOL")
+    if s.URGENT_PRIORITY_FEE_SOL > 0.8 * s.NETWORK_FEE_SOL + 1e-12:
+        # the spend check allows NETWORK_FEE_SOL per transaction; the priority fee keeps 20% of it
+        # for the signature fee and what PumpPortal adds, as the single 0.8 x NETWORK_FEE_SOL did
+        raise ConfigError("URGENT_PRIORITY_FEE_SOL must be at most 80% of NETWORK_FEE_SOL")
