@@ -36,6 +36,7 @@ from solders.pubkey import Pubkey
 log = logging.getLogger("bot.pumpchain")
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
 CURVE_DISCRIMINATOR = hashlib.sha256(b"account:BondingCurve").digest()[:8]
 TOKEN_DECIMALS = 6
 LAMPORTS = 1_000_000_000
@@ -54,6 +55,7 @@ class Curve:
     supply: float
     complete: bool
     creator: str | None = None
+    quote_mint: str | None = None   # None: priced in SOL; otherwise the token the curve is priced in
 
     @property
     def price_sol(self) -> float | None:
@@ -70,13 +72,23 @@ def plausible_curve(c: Curve) -> bool:
 
 
 def decode_curve(data: bytes | None) -> Curve | None:
-    """Bonding-curve account bytes -> Curve, or None if it is not a bonding-curve account."""
+    """Bonding-curve account bytes -> Curve, or None if it is not a bonding-curve account.
+
+    Since May 2026 a curve may be priced in another token (USDC, a listed token, and since 7-8 Oct
+    any pump coin): the reserves at offsets 16 and 32 are then in that token's units, not lamports.
+    pump's IDL (pump-fun/pump-public-docs, 8 Oct 2026) puts quote_mint at bytes 83..115 of the
+    166-byte account; the default key (all zeros) means SOL. Shorter, older accounts are SOL."""
     if not data or len(data) < 49 or data[:8] != CURVE_DISCRIMINATOR:
         return None
     vt, vs, rt, rs, sup = struct.unpack_from("<5Q", data, 8)
     creator = str(Pubkey.from_bytes(data[49:81])) if len(data) >= 81 else None
+    quote = None
+    if len(data) >= 115 and any(data[83:115]):
+        quote = str(Pubkey.from_bytes(data[83:115]))
+        if quote == WSOL_MINT:
+            quote = None
     scale = 10 ** TOKEN_DECIMALS
-    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator)
+    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator, quote)
 
 
 def encode_curve(c: Curve) -> bytes:
@@ -85,7 +97,11 @@ def encode_curve(c: Curve) -> bytes:
     out = CURVE_DISCRIMINATOR + struct.pack("<5Q", round(c.v_tokens * scale), round(c.v_sol * LAMPORTS),
                                             round(c.real_tokens * scale), round(c.real_sol * LAMPORTS),
                                             round(c.supply * scale)) + bytes([int(c.complete)])
-    return out + (bytes(Pubkey.from_string(c.creator)) if c.creator else b"")
+    out += bytes(Pubkey.from_string(c.creator)) if c.creator else b""
+    if c.quote_mint:                                    # the 166-byte layout: mayhem, cashback, quote_mint, rest
+        out = out.ljust(81, b"\0") + b"\0\0" + bytes(Pubkey.from_string(c.quote_mint))
+        out = out.ljust(166, b"\0")
+    return out
 
 
 def _account_keys(tx: dict) -> list[str]:
@@ -173,6 +189,10 @@ class HeliusChain:
             res = await self.h.rpc("getMultipleAccounts", [chunk, {"encoding": "base64", "commitment": "confirmed"}])
             for k, acc in zip(chunk, (res or {}).get("value") or []):
                 data = (acc or {}).get("data")
+                owner = (acc or {}).get("owner")
+                if owner is not None and owner != PUMP_PROGRAM:
+                    out[k] = None                       # not pump's account, whatever its bytes look like
+                    continue
                 out[k] = decode_curve(base64.b64decode(data[0])) if isinstance(data, list) and data else None
         return out
 

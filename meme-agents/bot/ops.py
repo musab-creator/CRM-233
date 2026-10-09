@@ -90,6 +90,8 @@ SETTABLE: dict[str, object] = {
     "RUNNER_FRACTION": (float, 0.01, 0.25),
     "RUNNER_TARGET_MULTIPLE": (float, 2, 1000),
     "RUNNER_MAX_HOLD_HOURS": (float, 1, 336),
+    "EMERGENCY_LIQ_DROP_PCT": (float, 20, 90),
+    "ENTRY_MAX_LIQ_SLIP_PCT": (float, 0, 90),
     "CONSENSUS_MIN_MEAN_CONFIDENCE": (float, 0.65, 1.0),
     "GATE_NEUTRAL_VOTES": bool,
     "TRIAGE_ENABLED": bool,

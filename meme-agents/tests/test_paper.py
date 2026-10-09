@@ -157,15 +157,22 @@ def test_silent_stream_falls_back_to_dexscreener_mark(s):
 
 def test_liquidity_drop_queues_emergency_exit(s):
     class Dex:
+        liq = 10_000
+
         async def tokens(self, mints):
-            return {m: {"priceNative": "1e-7", "liquidity": {"usd": 4_000}} for m in mints}
+            return {m: {"dexId": "pumpswap", "pairAddress": "P", "quoteToken": {"address": WSOL},
+                        "priceNative": "1e-7", "liquidity": {"usd": self.liq}} for m in mints}
 
     async def go():
         db = await Database(s.DB_PATH).open()
         await db.kv_set("bankroll_sol", "0.5")
-        pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), dex=Dex())
+        dex = Dex()
+        pm = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), dex=dex)
         p = await pm.create("M", 1, "real", "C", 5.0, 10_000)
         await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        await pm.periodic()                                    # the graduated pool's figure at the buy
+        assert p.entry_liq_usd == 10_000 and not p.pending_exit
+        dex.liq, pm._last_liq_poll = 4_000, 0
         await pm.periodic()
         assert p.pending_exit == "emergency_liquidity_drop"
         await pm.on_tick("M", 0.9e-7, p.decided_at + 10, {})

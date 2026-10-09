@@ -152,6 +152,8 @@ class Settings:
     RUNNER_TARGET_MULTIPLE: float = 300.0 # sell it when the price reaches this multiple of the entry price
     RUNNER_MAX_HOLD_HOURS: float = 168.0  # counted from the entry
     EMERGENCY_LIQ_DROP_PCT: float = 50.0
+    # a real buy is refused when the curve's depth fell more than this since the scan (0 = off)
+    ENTRY_MAX_LIQ_SLIP_PCT: float = 20.0
     LIQ_POLL_S: float = 60.0
     RUGCHECK_POLL_S: float = 300.0
     # A mark more than this many times above or below the last one is held until a second tick
@@ -356,6 +358,8 @@ def validate_settings(s: Settings) -> None:
                  "VETO_MIN_CONFIDENCE", "TAKE_PROFIT_SELL_FRACTION", "REGIME_MIN_MULTIPLIER"):
         if not 0 < getattr(s, name) <= 1:
             raise ConfigError(f"{name} must be greater than zero and at most one")
+    if not 0 <= s.ENTRY_MAX_LIQ_SLIP_PCT < 100:
+        raise ConfigError("ENTRY_MAX_LIQ_SLIP_PCT must be at least 0 and below 100")
     for name in ("DAILY_LOSS_CAP_PCT", "STOP_LOSS_PCT", "TRAILING_STOP_PCT",
                  "EMERGENCY_LIQ_DROP_PCT", "PF_MAX_TOP10_PCT"):
         if not 0 < getattr(s, name) <= 100:

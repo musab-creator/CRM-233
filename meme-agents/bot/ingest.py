@@ -143,7 +143,7 @@ class Ingestor:
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
-        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "curve_rejected": 0,
+        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "curve_rejected": 0, "non_sol_quote": 0,
                       "migrations": 0, "other_launchpads": 0}
 
     # --- message handling -----------------------------------------------------
@@ -280,9 +280,18 @@ class Ingestor:
         if st is None:
             return False
         self.stats["curve_reads"] += 1
+        if getattr(c, "quote_mint", None):
+            # priced in another token: its reserves are not SOL, so neither its price, inflow nor
+            # depth means what the filters, agents and exits read them as (9 Oct: the flood of
+            # "implausible" reads). Not a candidate; a held coin keeps its last SOL figures.
+            self.stats["non_sol_quote"] = self.stats.get("non_sol_quote", 0) + 1
+            if mint not in self.pinned:
+                log.info("%s: priced in %s, not SOL: no longer tracked", mint, c.quote_mint)
+                await self._drop([mint], f"non-SOL quote {c.quote_mint}")
+            return False
         first = not st.curve_at
-        st.curve_at = ts
         if c.complete:
+            st.curve_at = ts
             # graduated: the curve is emptied into the AMM pool, so keep the inflow it reached
             st.graduated, st.progress = True, 1.0
             st.real_sol = max(st.real_sol or 0.0, c.real_sol, c.v_sol - INITIAL_VIRTUAL_SOL)
@@ -294,6 +303,7 @@ class Ingestor:
             log.warning("%s: rejecting implausible curve read v_sol=%.4g v_tokens=%.4g real_sol=%.4g (last price %s)",
                         mint, c.v_sol, c.v_tokens, c.real_sol, f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")
             return False
+        st.curve_at = ts                                 # only an accepted read counts as the curve read
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
         st.v_sol, st.v_tokens = c.v_sol, c.v_tokens

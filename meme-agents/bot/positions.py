@@ -19,7 +19,7 @@ from typing import Awaitable, Callable
 from .config import Settings
 from .db import Database
 from .exits import RUNNER_FULL_EXITS, ExitState, check_exit
-from .feeds.dexscreener import sol_price_native
+from .feeds.dexscreener import WSOL, sol_price_native
 from .live.executor import LiveExecutionUnknown
 from .paper import Fill, PaperExecutor, mark_to_market
 from .risk import RiskManager, kill_switch_active
@@ -69,6 +69,7 @@ class Position:
     runner_target_multiple: float | None = None
     runner_max_hold_hours: float | None = None
     runner_active: int = 0              # the core is sold and the runner is held
+    liq_source: str | None = None       # what entry_liq_usd was measured on: "curve" or "pool:<address>"
 
     def row(self) -> dict:
         d = asdict(self)
@@ -94,6 +95,12 @@ def _num(v) -> float | None:
 
 
 Notifier = Callable[[str], Awaitable[None]]
+
+
+def _graduated_pool(pair: dict | None) -> bool:
+    """A graduated pump token's own pool: PumpSwap, quoted in wrapped SOL. Any other listing (a side
+    pool, another quote) is not the market the bot sells into."""
+    return bool(pair) and pair.get("dexId") == "pumpswap" and (pair.get("quoteToken") or {}).get("address") == WSOL
 
 
 class PositionManager:
@@ -280,6 +287,10 @@ class PositionManager:
             if self.risk.paused_reason:
                 await self._cancel_entry(p, f"paused before fill: {self.risk.paused_reason}", ts)
                 return
+            slip = self._depth_slip(p)
+            if slip is not None:
+                await self._cancel_entry(p, slip, ts)
+                return
         if self._is_live(p):
             self._spawn(p, self._live_entry(p, price))
             return
@@ -291,6 +302,21 @@ class PositionManager:
             await self._cancel_entry(p, f"entry_error: {e}", ts)
             return
         await self._apply_entry(p, f, price, ts)
+
+    def _curve_depth(self, mint: str) -> float | None:
+        depth = _num(self.curve_liquidity(mint)) if self.curve_liquidity else None
+        return depth if depth is not None and depth > 0 else None
+
+    def _depth_slip(self, p: Position) -> str | None:
+        """The committee judged the curve as the scan found it; minutes of evaluation later it may be
+        draining. A buy into a curve whose depth fell more than ENTRY_MAX_LIQ_SLIP_PCT since then is
+        refused (9 Oct: COMPANY was bought after its curve had already fallen)."""
+        pct = self.s.ENTRY_MAX_LIQ_SLIP_PCT
+        depth, scan = self._curve_depth(p.mint), p.entry_liq_usd
+        if pct <= 0 or depth is None or not scan or scan <= 0 or depth >= scan * (1 - pct / 100):
+            return None
+        return (f"curve depth fell {100 * (1 - depth / scan):.0f}% between the scan and the buy "
+                f"(${scan:,.0f} -> ${depth:,.0f})")
 
     async def _live_entry(self, p: Position, price: float) -> None:
         try:
@@ -348,6 +374,16 @@ class PositionManager:
         p.tokens_initial = p.tokens_remaining = f.tokens
         p.cost_sol = f.sol
         p.exit_reason = None
+        # The liquidity rule measures from the buy, not from the scan minutes earlier (9 Oct: a curve
+        # that fell during evaluation was sold at once for a "drop" the bot never owned).
+        scan, depth = p.entry_liq_usd, self._curve_depth(p.mint)
+        p.entry_liq_usd = p.last_liq_usd = depth
+        p.liq_source = "curve" if depth is not None else None
+        if depth is None:
+            self._last_liq_poll = 0.0                    # take the reference on the next pass, not in a minute
+        if p.kind == "real" and scan:
+            log.info("liquidity reference #%s: scan $%.0f -> buy %s", p.id, scan,
+                     f"${depth:.0f} (curve)" if depth is not None else "next poll")
         await self._persist_fill(p, f, "entry", ts, before)
         if p.kind == "real":
             msg = (f"🟢 ENTRY {await self._symbol(p.mint)} [{p.mode}] ${p.size_usd:.2f} = {p.sol_in:.4f} SOL "
@@ -595,6 +631,11 @@ class PositionManager:
             p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
             await self._save(p)
             log.info("exit queued #%d %s: %s", p.id, p.mint, reason)
+        if (urgent and reason == p.pending_exit and p.status == "open" and self._is_live(p) and p.last_price
+                and (reason == "kill_switch" or reason.startswith("emergency"))):
+            # a live emergency sells now, not at the next trade: a draining curve may not trade again
+            # for minutes (callers hold the lock; _exit's in-flight guard prevents a second sale)
+            await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now_s(), reason)
 
     async def periodic(self) -> None:
         """Timeouts, time stops, kill switch, liquidity + rugcheck polling."""
@@ -641,38 +682,66 @@ class PositionManager:
                                       "last_tick_at": p.last_tick_at, "last_liq_usd": p.last_liq_usd})
 
     async def _poll_liquidity(self, now: float) -> None:
-        if not self.dex or now - self._last_liq_poll < self.s.LIQ_POLL_S:
+        """The emergency liquidity rule, measured on one source per phase: the bonding curve's own
+        depth while the token is on its curve, then its PumpSwap pool quoted in wrapped SOL. A side
+        pool or a pair reporting $0 never stands in for either (9 Oct), a change of source starts a
+        new reference instead of comparing two measures, and a DexScreener failure leaves the curve
+        check running."""
+        if (not self.dex and not self.curve_liquidity) or now - self._last_liq_poll < self.s.LIQ_POLL_S:
             return
         self._last_liq_poll = now
         opened = [p for p in self.positions.values() if p.status == "open"]
         if not opened:
             return
-        try:
-            pairs = await self.dex.tokens(sorted({p.mint for p in opened}))
-        except Exception as e:
-            log.warning("liquidity poll failed: %s", e)
-            return
+        pairs: dict = {}
+        if self.dex:
+            try:
+                pairs = await self.dex.tokens(sorted({p.mint for p in opened})) or {}
+            except Exception as e:
+                log.warning("liquidity poll: DexScreener failed (%s); curve depth is still checked", e)
         async with self.lock:
             for p in opened:
                 pair = pairs.get(p.mint)
-                liq = _num(((pair or {}).get("liquidity") or {}).get("usd"))
-                if liq is None and self.curve_liquidity:
-                    liq = _num(self.curve_liquidity(p.mint))
-                if liq is None or liq < 0:
-                    continue
-                p.last_liq_usd = liq
-                if p.entry_liq_usd is None:
-                    p.entry_liq_usd = liq
-                sig = check_exit(self._state(p), None, now, self.s, liq_usd=liq)
-                if sig and sig.reason.startswith("emergency") and p.status == "open":
-                    await self.queue_exit(p, sig.reason)
-                    continue
+                depth = self._curve_depth(p.mint)
+                if depth is not None:
+                    liq, source = depth, "curve"
+                elif _graduated_pool(pair):
+                    liq, source = _num(((pair or {}).get("liquidity") or {}).get("usd")), f"pool:{pair.get('pairAddress')}"
+                    if liq is not None and liq <= 0:
+                        liq = None
+                else:
+                    liq, source = None, None
+                if liq is not None and p.status == "open":
+                    if source != p.liq_source or not p.entry_liq_usd:
+                        if p.liq_source and p.kind == "real":
+                            log.info("liquidity reference #%s moved from %s to %s: $%.0f", p.id, p.liq_source,
+                                     source, liq)
+                        p.entry_liq_usd, p.liq_source = liq, source
+                    p.last_liq_usd = liq
+                    sig = check_exit(self._state(p), None, now, self.s, liq_usd=liq)
+                    if sig and sig.reason.startswith("emergency"):
+                        log.warning("liquidity drop #%s %s [%s]: $%.0f -> $%.0f on %s, price %s vs entry", p.id,
+                                    p.mint, p.kind, p.entry_liq_usd, liq, source,
+                                    f"{(p.last_price / p.entry_price - 1) * 100:+.0f}%"
+                                    if p.last_price and p.entry_price else "n/a")
+                        await self._event("liq_drop", p, now, {"entry_liq_usd": p.entry_liq_usd, "liq_usd": liq,
+                                                               "source": source, "last_price": p.last_price,
+                                                               "entry_price": p.entry_price})
+                        await self.queue_exit(p, sig.reason)
                 # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key):
-                # use DexScreener's price as the mark so stops still work.
+                # use DexScreener's price as the mark so stops still work, and fill a queued exit.
                 stale = now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S
                 native = sol_price_native(pair)
                 if stale and native and p.status == "open":
                     await self._on_price(p, native, now, "dexscreener", (pair or {}).get("pairAddress"))
+
+    async def _event(self, kind: str, p: Position, now: float, detail: dict) -> None:
+        """Why an emergency fired, kept for /why; never in the way of the exit itself."""
+        try:
+            await self.db.event(kind, {"position_id": p.id, "candidate_id": p.candidate_id, "mint": p.mint,
+                                       "kind": p.kind, **detail}, now)
+        except Exception:
+            log.exception("could not record the %s event for #%s", kind, p.id)
 
     async def _poll_rugcheck(self, now: float) -> None:
         if not self.rugcheck or now - self._last_rug_poll < self.s.RUGCHECK_POLL_S:
@@ -687,6 +756,16 @@ class PositionManager:
             if rep.get("danger"):
                 async with self.lock:
                     if p.status == "open":
+                        named = [r for r in rep.get("risks") or [] if (r.get("level") or "").lower() == "danger"]
+                        names = ", ".join(f"{r.get('name', '?')}" + (f" ({r['value']})" if r.get("value") else "")
+                                          for r in named) or ", ".join(map(str, rep["danger"]))
+                        log.warning("rugcheck danger #%s %s [%s]: %s (score %s)", p.id, p.mint, p.kind, names,
+                                    rep.get("score_normalised"))
+                        await self._event("rug_danger", p, now, {"danger": rep.get("danger"), "risks": named,
+                                                                 "score_normalised": rep.get("score_normalised")})
+                        if p.kind == "real" and self.notify:
+                            await self.notify(f"⚠️ RUGCHECK DANGER {await self._symbol(p.mint)}: {names}\n"
+                                              f"selling everything (emergency)\n{p.mint}")
                         await self.queue_exit(p, "emergency_rugcheck_danger")
 
     async def run(self, stop: asyncio.Event, interval: float = 2.0) -> None:

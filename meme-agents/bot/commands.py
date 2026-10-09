@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from datetime import datetime, timezone
 
@@ -79,7 +80,7 @@ SHOWN_SETTINGS = (
     "BANKROLL_USD", "MAX_OPEN_POSITIONS", "POSITION_MIN_USD", "POSITION_MAX_USD", "DAILY_LOSS_CAP_PCT",
     "STOP_LOSS_PCT", "TAKE_PROFIT_PCT", "TAKE_PROFIT_SELL_FRACTION", "TRAILING_STOP_PCT", "TIME_STOP_HOURS",
     "RUNNER_ENABLED", "RUNNER_FRACTION", "RUNNER_TARGET_MULTIPLE", "RUNNER_MAX_HOLD_HOURS",
-    "EMERGENCY_LIQ_DROP_PCT", "TICK_SANITY_FACTOR", "PF_MIN_AGE_MIN", "PF_MAX_AGE_MIN", "PF_MIN_UNIQUE_BUYERS",
+    "EMERGENCY_LIQ_DROP_PCT", "ENTRY_MAX_LIQ_SLIP_PCT", "TICK_SANITY_FACTOR", "PF_MIN_AGE_MIN", "PF_MAX_AGE_MIN", "PF_MIN_UNIQUE_BUYERS",
     "PF_MIN_NET_INFLOW_SOL", "PF_MAX_TOP10_PCT", "PF_MIN_LIQUIDITY_USD", "CONSENSUS_MIN_MEAN_CONFIDENCE", "GATE_NEUTRAL_VOTES",
     "TRIAGE_ENABLED", "TRIAGE_MIN_CONFIDENCE", "VETO_ENABLED", "VETO_MIN_CONFIDENCE", "REGIME_ENABLED",
     "REGIME_REFRESH_MIN", "TELEGRAM_DIGEST", "HELIUS_MONTHLY_CREDITS",
@@ -367,6 +368,7 @@ class TelegramCommands:
             elif real["exit_reason"]:
                 head += f" · {real['exit_reason']}"
             lines.append(head)
+        lines += await self._emergency_lines(cid)
         shadow = await self.db.fetchone("SELECT id, mint, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
                                         "exit_reason, entry_price, opened_at, closed_at FROM positions "
                                         "WHERE candidate_id=? AND kind='shadow' ORDER BY id DESC LIMIT 1", [cid])
@@ -380,6 +382,28 @@ class TelegramCommands:
         elif shadow:
             lines.append(f"shadow ${float(shadow['size_usd'] or 0):.0f}: {shadow['status']}")
         return redact("\n".join(lines))
+
+    async def _emergency_lines(self, cid: int) -> list[str]:
+        """What made an emergency exit fire for this decision's positions (bot/positions.py records it)."""
+        out = []
+        rows = await self.db.fetchall("SELECT ts, kind, detail FROM events WHERE kind IN ('liq_drop', 'rug_danger') "
+                                      "ORDER BY id DESC LIMIT 500")
+        for r in reversed(rows):
+            try:
+                d = json.loads(r["detail"] or "{}")
+            except ValueError:
+                continue
+            if d.get("candidate_id") != cid:
+                continue
+            when = time.strftime("%H:%MZ", time.gmtime(r["ts"] or 0))
+            if r["kind"] == "liq_drop":
+                out.append(f"  {when} {d.get('kind')}: liquidity ${float(d.get('entry_liq_usd') or 0):,.0f} -> "
+                           f"${float(d.get('liq_usd') or 0):,.0f} on {d.get('source')}")
+            else:
+                names = ", ".join(str(x.get("name", "?")) for x in d.get("risks") or []) or \
+                    ", ".join(map(str, d.get("danger") or []))
+                out.append(f"  {when} {d.get('kind')}: rugcheck danger {names} (score {d.get('score_normalised')})")
+        return out
 
     async def _fill_lines(self, pos) -> list[str]:
         """Every fill of one position with its price against the entry, so a booked return can be
