@@ -85,6 +85,10 @@ def test_results_of_rescue_requests_are_delivered_by_the_watcher(s):
     assert sent == ["✅ restart done (0 s)\nrestart done"]
     left = [res for _, res in ops.results(s)]
     assert [res["id"] for res in left] == [other["id"]]
+    clock[0] += 10                                         # down confirmed: the bot cannot send its own either
+    sent = r.tick()
+    assert sent[0].startswith("⚠️ The bot service is failed") and sent[1].startswith("❌ restart failed (0 s) (exit 1)")
+    assert "sudoers line" in sent[1] and ops.results(s) == []
 
 
 def test_rescue_stops_polling_when_the_bot_is_back_and_backs_off_on_conflict(s):

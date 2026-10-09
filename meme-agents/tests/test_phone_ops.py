@@ -10,7 +10,7 @@ import time
 import pytest
 
 from bot import ops
-from bot.commands import CONFIRM, PANEL, TelegramCommands
+from bot.commands import CONFIRM, PANEL, RESULT_GIVE_UP_S, TelegramCommands
 from bot.config import ROOT, load_settings
 from bot.db import Database
 from bot.telegram import Telegram
@@ -598,15 +598,23 @@ def test_results_reach_the_chat_and_survive_a_refused_send(tmp_path, _isolated):
 
     http = Refusing([])
 
-    async def refused():
+    async def refused_twice():
         db = await Database(s.DB_PATH).open()
         try:
-            return await TelegramCommands(Telegram(http, "1:a", "42"), db, s).deliver_results()
+            tc = TelegramCommands(Telegram(http, "1:a", "42"), db, s)
+            first = await tc.deliver_results()
+            names = sorted(p.name for p in d.iterdir())
+            for key in list(tc._refused):                    # Telegram has kept refusing for longer than the limit
+                tc._refused[key] -= RESULT_GIVE_UP_S + 1
+            return first, names, await tc.deliver_results()
         finally:
             await db.close()
 
-    assert asyncio.run(refused()) == 0
-    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result.bad", "7-restart.result", "8-old.result.bad"]
+    first, names, second = asyncio.run(refused_twice())
+    # an old result survives its first refusal (it may have waited for the bot), then is set aside
+    assert first == 0 and names == ["5-bad.result.bad", "7-restart.result", "8-old.result"]
+    assert second == 0
+    assert sorted(p.name for p in d.iterdir()) == ["5-bad.result.bad", "7-restart.result.bad", "8-old.result.bad"]
 
 
 def test_the_telegram_offset_survives_a_restart_so_a_restart_is_not_replayed(tmp_path, _isolated):
@@ -850,8 +858,11 @@ def test_a_failed_restart_says_what_the_bot_said(tmp_path, _isolated):
     log_file.write_text("2026-10-08 18:51:14,428 ERROR   bot.positions: live entry failed #738: receipt reconciliation failed\n")
     refused = "refusing to start live mode: wallet Ddzf holds 2.9500 SOL > 0.5 SOL limit"
     ops.request(s, "restart")
-    runner = LoggingRunner(_isolated, log_file, [[f"{{ts}} WARNING bot.engine: LIVE MODE wallet Ddzf",
-                                                  f"{{ts}} ERROR   bot.__main__: {refused}"]], states=["failed"])
+    runner = LoggingRunner(_isolated, log_file, [["{ts} ERROR   bot.positions: exit failed #12 (old bot stopping)",
+                                                  "{ts} INFO    bot: starting (pid 4242)",
+                                                  "{ts} WARNING bot.engine: LIVE MODE wallet Ddzf",
+                                                  "{ts} ERROR   bot.engine: LIVE LOCK: not fatal",
+                                                  f"{{ts}} ERROR   bot: {refused}"]], states=["failed"])
     [res] = ops.watch_once(s, runner)
     assert not res["ok"] and f"not active after the restart (failed); the bot said: {refused}" in res["output"]
     assert "journalctl" not in res["output"] and "receipt" not in res["output"]
@@ -860,38 +871,51 @@ def test_a_failed_restart_says_what_the_bot_said(tmp_path, _isolated):
     [res] = ops.watch_once(s, FakeRunner(_isolated))
     assert res["ok"]
     ops.request(s, "restart")
-    crash = ["{ts} ERROR   bot.__main__: command failed; check the error below and run python -m bot preflight",
+    crash = ["{ts} INFO    bot: starting (pid 4244)",
+             "{ts} ERROR   bot: command failed (OperationalError: database is locked); check the error below and "
+             "run python -m bot preflight",
              "Traceback (most recent call last):",
              '  File "/home/bot/CRM-233/meme-agents/bot/db.py", line 251, in open',
              "    await self.conn.executescript(SCHEMA)",
              "sqlite3.OperationalError: database is locked"]
-    runner = LoggingRunner(_isolated, log_file, [[f"{{ts}} ERROR   bot.__main__: {refused}"], crash],
-                           states=["failed"])
+    runner = LoggingRunner(_isolated, log_file, [["{ts} INFO    bot: starting (pid 4243)", f"{{ts}} ERROR   bot: {refused}"],
+                                                 crash], states=["failed"])
     [res] = ops.watch_once(s, runner)
     out = res["output"]
     assert f"the bot said: {refused}" in out and "POSITION_MAX_USD is put back to 10" in out
     assert out.index("the bot said") < out.index("is put back")
-    assert ("the bot is still not active (failed, restart command exit 0); the bot said: command failed; check the "
-            "error below and run python -m bot preflight (sqlite3.OperationalError: database is locked)") in out
+    assert ("the bot is still not active (failed, restart command exit 0); the bot said: command failed "
+            "(OperationalError: database is locked); check the error below and run python -m bot preflight") in out
     # nothing in the log after the restart: the journal is all that is left to point at
-    log_file.write_text("2026-10-08 22:48:01,123 ERROR   bot.__main__: from an earlier run\n")
     ops.request(s, "restart")
     [res] = ops.watch_once(s, FakeRunner(_isolated, states=["failed"]))
     assert "not active after the restart (failed); check journalctl -u meme-agents" in res["output"]
+    # only the old bot wrote while stopping, and the new one died before logging anything: not quoted
+    ops.request(s, "restart")
+    runner = LoggingRunner(_isolated, log_file, [["{ts} ERROR   bot.positions: exit failed #12 (rpc timeout)"]],
+                           states=["failed"])
+    [res] = ops.watch_once(s, runner)
+    assert "check journalctl" in res["output"] and "rpc timeout" not in res["output"]
 
 
 def test_startup_error_reads_only_this_restart_and_masks_keys(tmp_path):
     log_file = tmp_path / "bot.log"
     s = _settings(tmp_path, LOG_FILE=str(log_file))
-    assert ops.startup_error(s, now_s()) is None                       # no log file yet
-    since = now_s() - 5
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    log_file.write_text(f"2020-01-01 00:00:00,000 ERROR   bot.x: ancient\n{now},000 INFO    bot.engine: started\n"
-                        f"{now},500 ERROR   bot.__main__: startup failed: https://x/?api-key=abcdef1234567890abcdef\n"
-                        "garbage line without a timestamp\n")
-    why = ops.startup_error(s, since)
+    mark = ops.log_mark(s)
+    assert mark == (0, 0) and ops.startup_error(s, mark) is None        # no log file yet
+    log_file.write_text("2020-01-01 00:00:00,000 ERROR   bot: ancient\n")
+    mark = ops.log_mark(s)
+    with open(log_file, "a") as f:
+        f.write("2026-10-09 03:00:00,000 INFO    bot: starting (pid 7)\n"
+                "2026-10-09 03:00:01,500 ERROR   bot: startup failed: https://x/?api-key=abcdef1234567890abcdef\n"
+                "garbage line without a timestamp\n")
+    why = ops.startup_error(s, mark)
     assert why.startswith("startup failed: ") and "abcdef1234567890abcdef" not in why and "ancient" not in why
-    assert ops.startup_error(_settings(tmp_path, LOG_FILE=""), now_s()) is None
+    # the log rotated (a new, smaller file): read from its start
+    log_file.write_text("2026-10-09 03:05:00,000 INFO    bot: starting (pid 8)\n"
+                        "2026-10-09 03:05:00,100 ERROR   bot: refusing to start live mode: x\n")
+    assert ops.startup_error(s, mark) == "refusing to start live mode: x"
+    assert ops.startup_error(s, None) is None
 
 
 def test_a_result_sent_late_says_when_it_happened(tmp_path, _isolated):
@@ -916,9 +940,30 @@ def test_a_result_sent_late_says_when_it_happened(tmp_path, _isolated):
     assert asyncio.run(go()) == 2
     late, fresh = [j["text"] for m, j in http.posts if m == "sendMessage"]
     when = time.strftime("%d %b %H:%MZ", time.gmtime(t - 7200))
-    assert late.startswith(f"⏳ from {when}, sent late (the bot was not running to send it)\n❌ restart failed (11 s)")
+    assert late.startswith(f"⏳ from {when}, sent late\n❌ restart failed (11 s)")
     assert fresh.startswith("✅ restart done")
     assert ops.late_note({"finished": None}) == "" and ops.late_note({"finished": t - 100}, now=t) == ""
+    # with the bot's start known: anything that finished before it waited for the bot to come back
+    from types import SimpleNamespace
+    (d / "3-set.result").write_text(json.dumps({**old, "id": "3-set", "action": "set", "ok": True, "code": 0,
+                                                "args": {"key": "POSITION_MAX_USD", "value": "20", "restart": False},
+                                                "started": t - 130, "finished": t - 120, "output": "updated"}))
+    http = FakeHttp([])
+
+    async def after_restart():
+        db = await Database(s.DB_PATH).open()
+        try:
+            tc = TelegramCommands(Telegram(http, "1:a", "42"), db, s, engine=SimpleNamespace(ready_at=t - 60))
+            return await tc.deliver_results()
+        finally:
+            await db.close()
+
+    assert asyncio.run(after_restart()) == 1
+    [(_, msg)] = [(m, j) for m, j in http.posts if m == "sendMessage"]
+    assert msg["text"].startswith(f"⏳ from {time.strftime('%d %b %H:%MZ', time.gmtime(t - 120))}, before the bot "
+                                  "was back up (it was not running to send it)\n✅ set POSITION_MAX_USD=20")
+    assert "restarted since and loaded .env" in msg["text"] and "Restart to apply" not in msg["text"]
+    assert "reply_markup" not in msg                                         # no "Restart now" for an applied value
 
 
 def test_status_and_ops_show_the_code_each_one_runs(tmp_path, _isolated):
@@ -936,6 +981,8 @@ def test_status_and_ops_show_the_code_each_one_runs(tmp_path, _isolated):
 
     first = asyncio.run(status({"ts": now_s(), "started_at": now_s() - 60, "mode": "paper", "code": "18d7e50"}))
     assert first.splitlines()[0].endswith("mode=paper  code=18d7e50")
+    edited = asyncio.run(status({"ts": now_s(), "started_at": now_s() - 60, "mode": "paper", "code": "18d7e50+dirty"}))
+    assert edited.splitlines()[0].endswith("code=18d7e50+dirty")
     odd = asyncio.run(status({"ts": now_s(), "started_at": now_s() - 60, "mode": "paper", "code": "x; rm -rf"}))
     assert "code=" not in odd.splitlines()[0]
     ops.beat(s)
@@ -945,20 +992,26 @@ def test_status_and_ops_show_the_code_each_one_runs(tmp_path, _isolated):
     assert "code" not in ops.format_queue(s).splitlines()[0]
     assert git_commit(tmp_path) is None                                    # not a repository
     head = git_commit(ROOT)
-    assert head is None or (len(head) == 7 and all(c in "0123456789abcdef" for c in head))
+    assert head is None or (len(head.removesuffix("+dirty")) == 7
+                            and all(c in "0123456789abcdef" for c in head.removesuffix("+dirty")))
 
 
 def test_a_refused_env_on_run_reaches_the_log_file(tmp_path, monkeypatch, capsys):
     import bot.config
     from bot.__main__ import main
     monkeypatch.setattr(bot.config, "ROOT", tmp_path)
+    monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)                          # root never creates the log
     (tmp_path / ".env").write_text("LOG_FILE=logs/bot.log\nMODE=weird\n")
-    since = now_s()
+    assert main(["run"]) == 2 and not (tmp_path / "logs" / "bot.log").exists()
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)                       # the service's own user does
+    s = _settings(tmp_path, LOG_FILE=str(tmp_path / "logs" / "bot.log"))
+    mark = ops.log_mark(s)
     assert main(["run"]) == 2
     assert "config error: MODE must be paper or live" in capsys.readouterr().err
-    line = (tmp_path / "logs" / "bot.log").read_text()
-    assert "ERROR   bot.__main__: config error: MODE must be paper or live" in line
-    s = _settings(tmp_path, LOG_FILE=str(tmp_path / "logs" / "bot.log"))
-    assert ops.startup_error(s, since) == "config error: MODE must be paper or live"
-    (tmp_path / ".env").write_text("LOG_FILE=\nMODE=weird\n")                 # no log file configured: stderr only
-    assert main(["run"]) == 2 and (tmp_path / "logs" / "bot.log").read_text() == line
+    text = (tmp_path / "logs" / "bot.log").read_text()
+    assert "ERROR   bot.__main__: config error: MODE must be paper or live" in text
+    assert ops.startup_error(s, mark) == "config error: MODE must be paper or live"
+    # an empty LOG_FILE means the default file, as load_settings reads it
+    (tmp_path / ".env").write_text("LOG_FILE=\nMODE=weird\n")
+    assert main(["run"]) == 2 and (tmp_path / "logs" / "bot.log").read_text().count("config error") == 2

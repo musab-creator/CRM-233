@@ -36,17 +36,19 @@ def _log_refused_config(text: str) -> None:
     startup_error) find it. Best effort: the settings that name the file are the ones being refused."""
     from .config import ROOT, ConfigError, Settings, load_dotenv
     s = Settings()
+    raw: dict = {}
     try:
         raw = load_dotenv(ROOT / ".env")
-        if "LOG_FILE" in raw:
-            s.LOG_FILE = raw["LOG_FILE"]
     except ConfigError:
         pass
-    s.LOG_FILE = os.environ.get("LOG_FILE", s.LOG_FILE)
-    if not s.LOG_FILE:
-        return
+    # resolved as load_settings does: the environment over .env, and empty means the default file
+    value = os.environ["LOG_FILE"] if "LOG_FILE" in os.environ else raw.get("LOG_FILE", "")
+    if value:
+        s.LOG_FILE = value
     try:
         path = s.path(s.LOG_FILE)
+        if os.geteuid() == 0 and not path.exists():
+            return                              # root must not create a log the service's user cannot open
         path.parent.mkdir(parents=True, exist_ok=True)
         now = time.time()                       # the format setup_logging writes, to the millisecond
         stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f",{int(now * 1000) % 1000:03d}"
@@ -285,6 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE)
                       if s.LOG_FILE and cmd in ("run", "simulate", "acceptance") else None)
+        if cmd == "run":
+            # a failed phone restart quotes only errors after this line (bot/ops.py startup_error)
+            log.info("starting (pid %d)", os.getpid())
         if cmd == "ops":
             return _ops(s, a.watch, a.once)
         if cmd == "run":
@@ -310,10 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(redact(f"cannot access a required file or service: {exc}. "
                      "Check the project directory, permissions and network connection."), file=sys.stderr)
+        if cmd == "run":
+            log.error("cannot access a required file or service: %s", exc)
         return 3
-    except Exception:
-        # Keep diagnostics useful while the formatter masks keys even in tracebacks.
-        log.exception("command failed; check the error below and run python -m bot preflight")
+    except Exception as exc:
+        # Keep diagnostics useful while the formatter masks keys even in tracebacks; the first line
+        # names the exception, which is what a failed phone restart quotes.
+        log.exception("command failed (%s: %s); check the error below and run python -m bot preflight",
+                      type(exc).__name__, (str(exc).splitlines() or [""])[0][:200])
         return 1
 
 

@@ -417,20 +417,24 @@ class LiveExecutor:
             rid = None
         return await self._execute(mint, "buy", sol_in, price, tx, "jupiter" if jup else "pumpportal", rid)
 
-    async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0) -> Fill:
-        """Sell `fraction` of current holdings (`tokens` is the bot's own estimate of that amount)."""
+    async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0,
+                   *, prefer_pumpportal: bool = False) -> Fill:
+        """Sell `fraction` of current holdings (`tokens` is the bot's own estimate of that amount).
+        `prefer_pumpportal`: route through PumpPortal's "auto" pool even after graduation (a runner's
+        small remainder may be below Jupiter's minimum order)."""
         if (not isfinite(tokens) or tokens <= 0 or not isfinite(price) or price <= 0
                 or not isfinite(fraction) or not 0 < fraction <= 1):
             raise ValueError("sell tokens/price must be positive and fraction must be within (0,1]")
         async with self._wallet_lock:
-            return await self._sell(mint, tokens, price, fraction)
+            return await self._sell(mint, tokens, price, fraction, prefer_pumpportal)
 
-    async def _sell(self, mint: str, tokens: float, price: float, fraction: float) -> Fill:
+    async def _sell(self, mint: str, tokens: float, price: float, fraction: float,
+                    prefer_pumpportal: bool = False) -> Fill:
         existing = await self.db.kv_get(self._intent_key(mint, "sell"))
         if existing:                                   # see _buy: never simulate over a pending real sell
             return await self._receipt_fill(json.loads(existing))
         full = fraction >= 0.999
-        jup = self._use_jupiter(mint)
+        jup = self._use_jupiter(mint) and not prefer_pumpportal
         if self.dry_run:
             if jup:
                 tx, _ = await self.build_jupiter(mint, WSOL, int(tokens * 10 ** PUMP_DECIMALS))

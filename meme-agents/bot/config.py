@@ -143,6 +143,14 @@ class Settings:
     TAKE_PROFIT_SELL_FRACTION: float = 0.5
     TRAILING_STOP_PCT: float = 30.0
     TIME_STOP_HOURS: float = 6.0
+    # Runner: after a take-profit, the core's trailing or time stop sells all but this share of the
+    # original tokens, kept only while the sales so far plus that one cover the entry cost. The
+    # runner then exits at its price target, its hold limit, the stop loss or an emergency.
+    # Recorded on each position when it is created, so a change applies to new positions only.
+    RUNNER_ENABLED: bool = False
+    RUNNER_FRACTION: float = 0.10         # of the original tokens
+    RUNNER_TARGET_MULTIPLE: float = 300.0 # sell it when the price reaches this multiple of the entry price
+    RUNNER_MAX_HOLD_HOURS: float = 168.0  # counted from the entry
     EMERGENCY_LIQ_DROP_PCT: float = 50.0
     LIQ_POLL_S: float = 60.0
     RUGCHECK_POLL_S: float = 300.0
@@ -326,6 +334,16 @@ def validate_settings(s: Settings) -> None:
             raise ConfigError(f"{name} must be greater than zero")
     if s.POSITION_MIN_USD > s.POSITION_MAX_USD:
         raise ConfigError("POSITION_MIN_USD must not exceed POSITION_MAX_USD")
+    if not 0.01 <= s.RUNNER_FRACTION <= 0.25:
+        raise ConfigError("RUNNER_FRACTION must be between 0.01 and 0.25")
+    if s.RUNNER_TARGET_MULTIPLE <= 1:
+        raise ConfigError("RUNNER_TARGET_MULTIPLE must be greater than 1")
+    if s.RUNNER_MAX_HOLD_HOURS <= 0:
+        raise ConfigError("RUNNER_MAX_HOLD_HOURS must be greater than zero")
+    if s.RUNNER_ENABLED and s.RUNNER_MAX_HOLD_HOURS <= s.TIME_STOP_HOURS:
+        raise ConfigError("RUNNER_MAX_HOLD_HOURS must be longer than TIME_STOP_HOURS")
+    if s.RUNNER_ENABLED and s.TAKE_PROFIT_SELL_FRACTION + s.RUNNER_FRACTION >= 1:
+        raise ConfigError("TAKE_PROFIT_SELL_FRACTION plus RUNNER_FRACTION must stay below 1")
     if s.PF_MIN_AGE_MIN > s.PF_MAX_AGE_MIN:
         raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
     if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:

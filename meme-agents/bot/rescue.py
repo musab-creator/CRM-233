@@ -85,6 +85,8 @@ class Rescue:
             self.noticed = True
             sent.append(self._send(f"⚠️ The bot service is {self.state} and not answering. Send /restart or /update "
                                    "here: the ops service runs them while the bot is down and reports back."))
+        # results the bot itself would send (a failed restart and why) must not wait for it to come back
+        sent += self._deliver_results(everything=True)
         if now < self.conflict_until:
             return sent
         try:
@@ -121,18 +123,19 @@ class Rescue:
         log.warning("rescue: %s queued from Telegram while the bot is %s", name, self.state)
         return f"⏳ {name} queued; the result arrives here in a minute or two"
 
-    def _deliver_results(self) -> list[str]:
-        """Results of the requests this rescue queued: the bot would deliver them, but it may still be down."""
-        from .ops import format_result, results
+    def _deliver_results(self, everything: bool = False) -> list[str]:
+        """Results of the requests this rescue queued: the bot would deliver them, but it may still be down.
+        `everything` (the bot is confirmed down this tick): also those the bot queued itself."""
+        from .ops import format_result, late_note, results
         sent = []
         for path, res in results(self.s):
-            if res.get("from") != WHO:
+            if res.get("from") != WHO and not everything:
                 continue
             try:
                 path.unlink()                                # first: the bot may come up and read it too
             except OSError:
                 continue
-            sent.append(self._send(redact(format_result(res))))
+            sent.append(self._send(redact(late_note(res) + format_result(res))))
         return sent
 
     # --- Telegram, synchronous ------------------------------------------------------------

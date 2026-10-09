@@ -66,7 +66,9 @@ class RiskManager:
         if self.paused_reason:
             return False, self.paused_reason
         active = [p for p in open_positions if p["status"] in ("pending", "open")]
-        if len(active) >= self.s.MAX_OPEN_POSITIONS:
+        # A runner (a winner's leftover tokens, its cost already recovered) does not hold a slot:
+        # it may stay a week, and the slots are for the bankroll's working positions.
+        if sum(1 for p in active if not p.get("runner_active")) >= self.s.MAX_OPEN_POSITIONS:
             return False, f"max open positions ({self.s.MAX_OPEN_POSITIONS})"
         if creator and sum(1 for p in active if p.get("creator") == creator) >= self.s.MAX_POSITIONS_PER_CREATOR:
             return False, "already holding a position from this creator wallet"

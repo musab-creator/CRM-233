@@ -124,7 +124,7 @@ async def build_status(db: Database, s: Settings) -> str:
              "RUNNING" if alive and now - alive < 180 else
              "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started")
     running_mode = hb.get("mode") if hb.get("mode") in ("paper", "live") else s.MODE
-    code = hb.get("code") if isinstance(hb.get("code"), str) and re.fullmatch(r"[0-9a-f]{7}", hb["code"]) else None
+    code = hb.get("code") if isinstance(hb.get("code"), str) and re.fullmatch(r"[0-9a-f]{7}(\+dirty)?", hb["code"]) else None
     lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}"
                  + (f"  code={code}" if code else ""))
     if heartbeat_error:
@@ -200,6 +200,12 @@ async def build_status(db: Database, s: Settings) -> str:
                      f"price {chg} vs entry, peak {peak_change}"
                      f"{', TP taken' if p['tp_done'] else ''}  net {upnl:+.4f} SOL"
                      f"{'  EXIT PENDING: ' + p['pending_exit'] if p['pending_exit'] else ''}")
+        if p.get("runner_active"):
+            share = 100 * (p["tokens_remaining"] or 0) / p["tokens_initial"] if p["tokens_initial"] else 0
+            target = p.get("runner_target_multiple") or s.RUNNER_TARGET_MULTIPLE
+            left = (p.get("runner_max_hold_hours") or s.RUNNER_MAX_HOLD_HOURS) - (now - (p["opened_at"] or now)) / 3600
+            lines.append(f"    🏃 RUNNER {share:.0f}% of the tokens, price {last / entry if entry and last else 0:.2f}x "
+                         f"of entry, target {target:g}x, time exit in {max(0.0, left):.1f} h")
 
     dec = await db.fetchall("SELECT c.id, c.mint, c.ts, c.decision, c.mean_confidence, c.gate_reason, m.symbol "
                             "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL "

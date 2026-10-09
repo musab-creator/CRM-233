@@ -78,6 +78,7 @@ SHOWN_SETTINGS = (
     "MODE", "LIVE_DRY_RUN", "LLM_MODEL", "LLM_DAILY_BUDGET_USD", "LLM_BUDGET_PACING", "LLM_CONCURRENCY", "X_MONTHLY_BUDGET_USD",
     "BANKROLL_USD", "MAX_OPEN_POSITIONS", "POSITION_MIN_USD", "POSITION_MAX_USD", "DAILY_LOSS_CAP_PCT",
     "STOP_LOSS_PCT", "TAKE_PROFIT_PCT", "TAKE_PROFIT_SELL_FRACTION", "TRAILING_STOP_PCT", "TIME_STOP_HOURS",
+    "RUNNER_ENABLED", "RUNNER_FRACTION", "RUNNER_TARGET_MULTIPLE", "RUNNER_MAX_HOLD_HOURS",
     "EMERGENCY_LIQ_DROP_PCT", "TICK_SANITY_FACTOR", "PF_MIN_AGE_MIN", "PF_MAX_AGE_MIN", "PF_MIN_UNIQUE_BUYERS",
     "PF_MIN_NET_INFLOW_SOL", "PF_MAX_TOP10_PCT", "PF_MIN_LIQUIDITY_USD", "CONSENSUS_MIN_MEAN_CONFIDENCE", "GATE_NEUTRAL_VOTES",
     "TRIAGE_ENABLED", "TRIAGE_MIN_CONFIDENCE", "VETO_ENABLED", "VETO_MIN_CONFIDENCE", "REGIME_ENABLED",
@@ -117,6 +118,7 @@ class TelegramCommands:
         self.offset: int | None = None
         self.started_at = now_s()
         self._unknown_chats: set[str] = set()
+        self._refused: dict[str, float] = {}     # result file -> first time Telegram refused it
 
     # --- answers ---------------------------------------------------------------------
     async def answer(self, name: str, arg: str) -> tuple[str, dict | None]:
@@ -270,22 +272,34 @@ class TelegramCommands:
         Telegram refuses stays for the next round; one that cannot be read, or keeps failing, is
         set aside so it never blocks the ones behind it."""
         sent = 0
+        up = getattr(self.engine, "ready_at", None)     # when this bot process came up
         for path, res in results(self.s):
             try:
-                text = redact(late_note(res) + format_result(res))
+                text = format_result(res)
                 markup = None
                 args = res.get("args") if isinstance(res.get("args"), dict) else {}
                 if res.get("ok") and res.get("action") == "set" and not args.get("restart"):
-                    markup = keyboard([[("Restart now", "confirm:restart")]])
+                    try:
+                        restarted = up is not None and float(res.get("finished") or 0) < up
+                    except (TypeError, ValueError):
+                        restarted = False
+                    if restarted:                       # this process loaded .env after the change
+                        text = text.replace(". Restart to apply", "; the bot has restarted since and loaded .env "
+                                            "(/settings shows the value it runs with)", 1)
+                    else:
+                        markup = keyboard([[("Restart now", "confirm:restart")]])
+                text = redact(late_note(res, up_since=up) + text)
                 ok = await (self.tg.send(text, reply_markup=markup) if markup else self.tg.send_long(text))
                 if ok:
                     try:
                         path.unlink()
                     except OSError:
                         pass
+                    self._refused.pop(str(path), None)
                     sent += 1
-                elif now_s() - float(res.get("finished") or 0) > RESULT_GIVE_UP_S:
-                    quarantine(path, "Telegram kept refusing it")
+                elif now_s() - self._refused.setdefault(str(path), now_s()) > RESULT_GIVE_UP_S:
+                    quarantine(path, "Telegram kept refusing it")   # counted from the first refusal, not its age
+                    self._refused.pop(str(path), None)
             except Exception as e:                # a result file the bot cannot make sense of
                 quarantine(path, f"unreadable result: {type(e).__name__}: {e}")
         return sent

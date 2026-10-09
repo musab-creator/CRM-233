@@ -86,6 +86,7 @@ class Engine:
         self.s = s
         self.started_at = now_s()
         self.code: str | None = None     # the commit this process runs, for /status
+        self.ready_at: float | None = None  # when setup finished and systemd was told READY
         self.db = Database(s.path(s.DB_PATH))
         self.lock = InstanceLock(str(s.path(s.DB_PATH)) + ".lock")
         self.http = http or httpx.AsyncClient(timeout=20, headers={"User-Agent": "meme-agents/0.1"})
@@ -827,6 +828,7 @@ class Engine:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
         log.info("bot running in %s mode (model %s, code %s)", self.s.MODE, self.s.LLM_MODEL, self.code or "?")
+        self.ready_at = now_s()
         sd_notify("READY=1")
         clean_stop = False
         try:

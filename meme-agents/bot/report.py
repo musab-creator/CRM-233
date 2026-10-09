@@ -282,7 +282,8 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "spend": spend,
         "exit_reasons": exit_reasons,
         "open_positions": [{"id": p["id"], "mint": p["mint"], "status": p["status"], "size_usd": p["size_usd"],
-                            "entry_price": p["entry_price"], "last_price": p["last_price"]} for p in open_pos],
+                            "entry_price": p["entry_price"], "last_price": p["last_price"],
+                            "runner": bool(p.get("runner_active"))} for p in open_pos],
         "trades": [{"id": p["id"], "mint": p["mint"], "opened": _iso(p["opened_at"]), "closed": _iso(p["closed_at"]),
                     "size_usd": p["size_usd"], "exit": p["exit_reason"], "pnl_sol": p["pnl_sol"],
                     "pnl_usd": p["pnl_usd"]} for p in closed],
@@ -430,7 +431,7 @@ def render_text(r: dict) -> str:
         lines.append("exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
     if r["open_positions"]:
         lines += ["", "== Open =="] + [f"#{p['id']} {p['mint']} {p['status']} ${_f(p['size_usd'])}"
-                                       for p in r["open_positions"]]
+                                       + (" (runner)" if p.get("runner") else "") for p in r["open_positions"]]
     if r["trades"]:
         lines += ["", "== Closed trades =="]
         for t in r["trades"][-30:]:

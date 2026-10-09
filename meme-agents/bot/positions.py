@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .db import Database
-from .exits import ExitState, check_exit
+from .exits import RUNNER_FULL_EXITS, ExitState, check_exit
 from .feeds.dexscreener import sol_price_native
 from .live.executor import LiveExecutionUnknown
 from .paper import Fill, PaperExecutor, mark_to_market
@@ -65,6 +65,10 @@ class Position:
     pending_exit_at: float | None = None
     exit_attempts: int = 0
     next_exit_at: float | None = None   # backoff: no exit attempt before this time
+    runner_fraction: float = 0.0        # the runner policy recorded at creation (0: none)
+    runner_target_multiple: float | None = None
+    runner_max_hold_hours: float | None = None
+    runner_active: int = 0              # the core is sold and the runner is held
 
     def row(self) -> dict:
         d = asdict(self)
@@ -229,7 +233,8 @@ class PositionManager:
             p = Position(id=None, mint=mint, candidate_id=candidate_id, kind=kind,
                          mode=self.executor.mode if kind == "real" else "paper", creator=creator,
                          status="pending", decided_at=now_s(), size_usd=size_usd, sol_in=sol_in,
-                         sol_usd_entry=sol_usd, entry_liq_usd=liq_usd, last_liq_usd=liq_usd)
+                         sol_usd_entry=sol_usd, entry_liq_usd=liq_usd, last_liq_usd=liq_usd,
+                         **self._runner_policy())
             await self._save(p)
         self.pin(mint, True)
         if self.watch_account and creator:
@@ -357,6 +362,13 @@ class PositionManager:
 
     async def _exit(self, p: Position, fraction: float, price: float, ts: float, reason: str) -> None:
         """Caller holds the lock."""
+        if reason.startswith("core_"):
+            # the core's sale keeps the runner's share of the original tokens, whatever partial
+            # fills or retries came before; the share is fixed, the fraction follows the holdings
+            keep = p.tokens_initial * p.runner_fraction
+            if p.tokens_remaining <= keep * (1 + 1e-6):
+                return
+            fraction = (p.tokens_remaining - keep) / p.tokens_remaining
         tokens = p.tokens_remaining if fraction >= 0.999 else p.tokens_remaining * fraction
         if tokens <= 0 or not self._exit_allowed(p, ts):
             return
@@ -378,7 +390,10 @@ class PositionManager:
     async def _live_exit(self, p: Position, fraction: float, tokens: float, price: float, reason: str) -> None:
         try:
             try:
-                f = await self.executor.sell(p.mint, tokens, price, fraction)
+                # a runner's sale may be worth less than Jupiter's minimum order: PumpPortal's
+                # "auto" pool sells on the curve or after graduation alike
+                kw = {"prefer_pumpportal": True} if p.runner_active else {}
+                f = await self.executor.sell(p.mint, tokens, price, fraction, **kw)
             except Exception as e:
                 async with self.lock:
                     await self._exit_failed(p, fraction, reason, e, now_s())
@@ -423,6 +438,27 @@ class PositionManager:
             p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
         p.exit_attempts, p.next_exit_at = 0, None
         closed = full or p.tokens_remaining <= p.tokens_initial * 1e-9
+        runner_note = ""
+        if reason.startswith("core_") and not closed:
+            keep = p.tokens_initial * p.runner_fraction
+            free = p.pending_exit in (None, reason)          # nothing more urgent was queued meanwhile
+            if p.tokens_remaining > keep * 1.001:
+                # a partial fill: the rest of the core still sells (_exit recomputes its share)
+                if free:
+                    p.pending_exit, p.pending_exit_at = reason, ts
+                    p.pending_exit_fraction = (p.tokens_remaining - keep) / p.tokens_remaining
+            elif p.proceeds_sol < p.cost_sol:
+                # the confirmed proceeds fell short of the estimate: no runner on a losing trade
+                if free:
+                    p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = "runner_unfunded", 1.0, ts
+            else:
+                p.runner_active = 1
+                if p.pending_exit == reason:
+                    p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
+                runner_note = (f"\n🏃 RUNNER kept: {p.tokens_remaining:,.0f} tokens "
+                               f"({100 * p.tokens_remaining / p.tokens_initial:.0f}% of the original); sells at "
+                               f"{self._runner_target(p):g}x the entry price, the stop loss, an emergency, or after "
+                               f"{self._runner_hours(p):g} h from entry")
         if closed:
             p.tokens_remaining = 0.0
             p.status, p.closed_at, p.exit_reason = "closed", ts, reason
@@ -440,7 +476,7 @@ class PositionManager:
             else:
                 head = f"EXIT {sym} [{p.mode}] {reason.replace('_', ' ')} (partial)"
             txt = (f"{head}\nsold {f.tokens:,.0f} @ {price:.3e} -> {f.sol:.4f} SOL"
-                   + (f"\nclosed pnl {p.pnl_sol:+.4f} SOL (${p.pnl_usd:+.2f})" if closed else "")
+                   + (f"\nclosed pnl {p.pnl_sol:+.4f} SOL (${p.pnl_usd:+.2f})" if closed else "") + runner_note
                    + f"\n{p.mint}" + (f"\ntx {f.tx_sig}" if f.tx_sig else ""))
             log.info(txt.replace("\n", " | "))
             if self.notify:
@@ -466,9 +502,26 @@ class PositionManager:
         self._suspect.pop(p.id, None)
         self._entry_attempts.pop(p.id, None)
 
+    def _runner_policy(self) -> dict:
+        """The runner settings a new position records (it keeps them whatever changes later)."""
+        if not self.s.RUNNER_ENABLED:
+            return {}
+        return {"runner_fraction": self.s.RUNNER_FRACTION, "runner_target_multiple": self.s.RUNNER_TARGET_MULTIPLE,
+                "runner_max_hold_hours": self.s.RUNNER_MAX_HOLD_HOURS}
+
+    def _runner_target(self, p: Position) -> float:
+        return p.runner_target_multiple or self.s.RUNNER_TARGET_MULTIPLE
+
+    def _runner_hours(self, p: Position) -> float:
+        return p.runner_max_hold_hours or self.s.RUNNER_MAX_HOLD_HOURS
+
     def _state(self, p: Position) -> ExitState:
         return ExitState(p.entry_price, p.peak_price or p.entry_price, bool(p.tp_done), p.opened_at,
-                         p.entry_liq_usd)
+                         p.entry_liq_usd, runner_fraction=p.runner_fraction or 0.0,
+                         runner_target_multiple=self._runner_target(p), runner_max_hold_hours=self._runner_hours(p),
+                         runner_active=bool(p.runner_active), tokens_initial=p.tokens_initial,
+                         tokens_remaining=p.tokens_remaining, cost_sol=p.cost_sol, proceeds_sol=p.proceeds_sol,
+                         last_price=p.last_price)
 
     # --- event handlers ------------------------------------------------------------
     async def on_tick(self, mint: str, price: float, ts: float, msg: dict) -> None:
@@ -536,7 +589,8 @@ class PositionManager:
             await self._save(p)
             await self._release(p)
             return
-        urgent = reason == "kill_switch" or reason.startswith("emergency")
+        urgent = (reason == "kill_switch" or reason.startswith("emergency")
+                  or (reason in RUNNER_FULL_EXITS and (p.pending_exit or "").startswith("core_")))
         if not p.pending_exit or (urgent and (p.pending_exit_fraction or 1.0) < fraction):
             p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
             await self._save(p)

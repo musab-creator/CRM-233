@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS positions (
     proceeds_sol REAL DEFAULT 0, pnl_sol REAL, pnl_usd REAL,
     sol_usd_entry REAL, sol_usd_exit REAL, exit_reason TEXT,
     pending_exit TEXT, pending_exit_fraction REAL, pending_exit_at REAL,
-    exit_attempts INTEGER DEFAULT 0, next_exit_at REAL
+    exit_attempts INTEGER DEFAULT 0, next_exit_at REAL,
+    runner_fraction REAL DEFAULT 0, runner_target_multiple REAL, runner_max_hold_hours REAL,
+    runner_active INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_pos_status ON positions(status, kind);
 CREATE INDEX IF NOT EXISTS ix_pos_candidate ON positions(candidate_id,kind,status);
@@ -134,6 +136,10 @@ MIGRATIONS = [
     ("positions", "pending_exit_fraction", "REAL"),
     ("positions", "exit_attempts", "INTEGER DEFAULT 0"),
     ("positions", "next_exit_at", "REAL"),
+    ("positions", "runner_fraction", "REAL DEFAULT 0"),
+    ("positions", "runner_target_multiple", "REAL"),
+    ("positions", "runner_max_hold_hours", "REAL"),
+    ("positions", "runner_active", "INTEGER DEFAULT 0"),
     ("mints", "real_sol", "REAL"),
     ("mints", "curve_at", "REAL"),
     ("mints", "wallets_ex_dev", "INTEGER"),

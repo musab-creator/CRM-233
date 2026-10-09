@@ -142,7 +142,14 @@ def git_commit(path) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     out = r.stdout.strip()
-    return out[:7] if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{7,40}", out) else None
+    if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{7,40}", out):
+        return None
+    try:                                            # edited files are not that commit: say so
+        d = subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=str(path), capture_output=True, timeout=10,
+                           check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return out[:7]
+    return out[:7] + ("+dirty" if d.returncode == 1 else "")
 
 
 class InstanceLock:
