@@ -160,6 +160,7 @@ def test_triage_bundling_flags_are_checked_on_every_shadow_including_skipped_one
     assert slot["flagged"]["n"] == 2 and slot["flagged"]["win_rate"] == 0.5
     assert slot["clear"]["n"] == 2 and slot["clear"]["win_rate"] == 0.5
     assert flags["bundle_like_share_of_launch_minute > 0.2"]["flagged"]["n"] == 1
+    assert flags["bundle_like_buy_share > 0.2"]["flagged"]["n"] == 0          # no row carries it
     assert flags["max_same_size_cluster_wallets >= 5"]["flagged"]["n"] == 1
     sig = {x["signal"]: x for x in r["signals"]}
     assert sig["same_slot_as_launch_buyers"]["above"]["n"] + sig["same_slot_as_launch_buyers"]["at_or_below"]["n"] == 4

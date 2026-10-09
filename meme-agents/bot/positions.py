@@ -252,12 +252,16 @@ class PositionManager:
         async with self.lock:
             if kind == "real":
                 active = self.active("real")
-                # live: the wallet pays every sale's fee before its proceeds arrive, so a new buy
-                # leaves one transaction's fee in it for each position already held (a rugged token
-                # returns nothing to pay its own sale), which matters with many positions open
-                reserve = self.s.NETWORK_FEE_SOL * len(active) if self._live_sending() else 0.0
-                ok, why = self.risk.can_open(creator, [asdict(p) for p in active],
-                                             await self.cash_sol(), sol_in + self.s.NETWORK_FEE_SOL + reserve)
+                need = sol_in + self.s.NETWORK_FEE_SOL
+                if self._live_sending():
+                    # the wallet pays every sale's fee before its proceeds arrive (a rugged token returns
+                    # nothing to pay its own sale): a buy needs what the spend check allows it (the
+                    # percentage fees, the network fee, a new token account's rent) and leaves one sale's
+                    # fee for each position held, the new one included
+                    fees = (self.s.PUMPFUN_FEE_PCT + self.s.PUMPPORTAL_FEE_PCT) / 100
+                    need = (sol_in * (1 + fees) + self.s.NETWORK_FEE_SOL + self.s.LIVE_ACCOUNT_RENT_SOL
+                            + self.s.NETWORK_FEE_SOL * (len(active) + 1))
+                ok, why = self.risk.can_open(creator, [asdict(p) for p in active], await self.cash_sol(), need)
                 if not ok:
                     log.info("risk blocked entry %s: %s", mint, why)
                     await self.db.event("risk_block", {"mint": mint, "reason": why}, now_s())
@@ -646,6 +650,13 @@ class PositionManager:
         p.last_price, p.last_tick_at = price, ts
         p.peak_price = max(p.peak_price or price, price)
         if p.pending_exit:
+            if not urgent_exit(p.pending_exit):
+                # a planned sale still queued when the price reaches the stop loss: the stop loss takes
+                # it over, selling everything (a runner too) with the urgent priority fee
+                sig = check_exit(self._state(p), price, ts, self.s)
+                if sig and urgent_exit(sig.reason) and sig.fraction >= (p.pending_exit_fraction or 1.0) - 1e-9:
+                    p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = sig.reason, sig.fraction, ts
+                    await self._save(p)
             await self._exit(p, p.pending_exit_fraction or 1.0, price, ts, p.pending_exit)
             return
         sig = check_exit(self._state(p), price, ts, self.s)
@@ -664,7 +675,10 @@ class PositionManager:
             return
         urgent = (reason == "kill_switch" or reason.startswith("emergency")
                   or (reason in RUNNER_FULL_EXITS and (p.pending_exit or "").startswith("core_")))
-        if not p.pending_exit or (urgent and (p.pending_exit_fraction or 1.0) < fraction):
+        # an emergency or the kill switch takes over a queued planned sale (a time stop, a take-profit):
+        # it sells at once and with the urgent priority fee, not at the next trade at the planned one
+        if not p.pending_exit or (urgent and ((p.pending_exit_fraction or 1.0) < fraction
+                                              or (urgent_exit(reason) and not urgent_exit(p.pending_exit)))):
             p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
             await self._save(p)
             log.info("exit queued #%d %s: %s", p.id, p.mint, reason)

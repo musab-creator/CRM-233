@@ -77,8 +77,8 @@ more suggests one actor split buys across wallets.
 launch-minute buyers flip within minutes as a matter of routine, so read it together with the flow \
 fields, never alone.
 - `dev_sold_pct_of_bought` above 50 means the creator has cashed out of the launch buy. That too is \
-routine on pump.fun and in the recorded outcomes such tokens did not do worse than the rest; it matters \
-together with snipers, bundling or a shrinking holder base, not by itself.
+routine on pump.fun and in the recorded outcomes such tokens did not do worse than the rest, so it adds \
+nothing to a sniper, bundling or holder-base concern: judge those on their own numbers.
 - `effective_buyers` or `effective_holders` below 10 means ownership is concentrated, even \
 if there are many wallets.
 - Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum. A large \

@@ -208,6 +208,7 @@ def test_failed_exit_backs_off_instead_of_retrying_every_tick(s):
         assert ex.calls == 2 and p.next_exit_at == pytest.approx(t0 + 6.5 + 10)
         await pm.on_tick("M", 0.5e-7, t0 + 17, {})     # attempt 3 succeeds
         assert ex.calls == 3 and p.status == "closed" and p.exit_reason == "stop_loss"
+        assert ex.urgent == [True, True, True]                       # a stop loss pays the urgent fee
         await db.close()
     asyncio.run(go())
 

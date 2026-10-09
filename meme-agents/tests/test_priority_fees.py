@@ -131,13 +131,14 @@ class LiveWallet(PaperExecutor):
 def test_live_entries_keep_a_sale_fee_for_each_open_position(s):
     async def go():
         s.MAX_OPEN_POSITIONS = 20
-        # $5 at $100/SOL = 0.05 SOL; each pending buy reserves 0.05 + 0.005
-        db, pm = await _manager(s, LiveWallet(s, 0.112))
+        # $5 at $100/SOL = 0.05 SOL. A buy needs 0.05 * 1.015 + 0.005 network + 0.0025 rent, plus one
+        # sale's fee (0.005) for every position held, itself included; a pending buy holds 0.055 of cash
+        db, pm = await _manager(s, LiveWallet(s, 0.122))
         try:
-            assert await pm.create("A", 1, "real", "C1", 5.0, None)
-            # 0.057 SOL left covers the buy (0.055) but not also one sale's fee for the open one (0.005)
+            assert await pm.create("A", 1, "real", "C1", 5.0, None)          # needs 0.06325 of 0.122
+            # 0.067 SOL left: enough for the buy alone, not for it plus the two sales' fees (0.06825)
             assert await pm.create("B", 2, "real", "C2", 5.0, None) is None
-            pm.executor.chain.sol = 0.117
+            pm.executor.chain.sol = 0.124
             assert await pm.create("B", 2, "real", "C2", 5.0, None)
         finally:
             await db.close()
@@ -152,6 +153,70 @@ def test_paper_can_hold_more_than_ten_positions_when_allowed(s):
             for i in range(15):
                 assert await pm.create(f"M{i}", i, "real", f"C{i}", 5.0, None)
             assert await pm.create("M15", 15, "real", "C15", 5.0, None) is None    # the 16th waits for a slot
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+class LiveRecorder(PaperExecutor):
+    """Live mode (sales run off the tick path through _live_exit), paper fills, kwargs recorded."""
+    mode = "live"
+
+    def __init__(self, s):
+        super().__init__(s)
+        self.sells = []
+
+    async def sell(self, mint, tokens, price, fraction=1.0, **kw):
+        self.sells.append(kw)
+        return exit_fill(tokens, price, self.s, kw.get("urgent", False))
+
+
+def test_live_sales_carry_the_urgent_flag_through(s):
+    async def go():
+        ex = LiveRecorder(s)
+        db, pm = await _manager(s, ex)
+        try:
+            p = await pm.create("M", 1, "real", "C", 5.0, None)
+            await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+            await pm.drain(2)
+            await pm.on_tick("M", 1.6e-7, p.decided_at + 2, {})       # take-profit: planned
+            await pm.drain(2)
+            await pm.on_tick("M", 0.59e-7, p.decided_at + 3, {})      # stop loss: urgent
+            await pm.drain(2)
+            assert ex.sells == [{}, {"urgent": True}] and p.exit_reason == "stop_loss"
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_an_emergency_takes_over_a_queued_planned_sale(s):
+    async def go():
+        ex = LiveRecorder(s)
+        db, pm = await _manager(s, ex)
+        try:
+            p = await pm.create("M", 1, "real", "C", 5.0, None)
+            await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+            await pm.drain(2)
+            await pm.queue_exit(p, "time_stop")                       # queued, waiting for the next trade
+            assert p.pending_exit == "time_stop" and ex.sells == []
+            await pm.queue_exit(p, "emergency_liquidity_drop")        # sells now, with the urgent fee
+            await pm.drain(2)
+            assert ex.sells == [{"urgent": True}] and p.exit_reason == "emergency_liquidity_drop"
+        finally:
+            await db.close()
+    asyncio.run(go())
+
+
+def test_the_stop_loss_takes_over_a_queued_planned_sale(s):
+    async def go():
+        ex = Recording(s)
+        db, pm = await _manager(s, ex)
+        try:
+            p = await pm.create("M", 1, "real", "C", 5.0, None)
+            await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+            await pm.queue_exit(p, "time_stop")
+            await pm.on_tick("M", 0.59e-7, p.decided_at + 2, {})      # the next trade is below the stop
+            assert ex.urgent == [True] and p.exit_reason == "stop_loss"
         finally:
             await db.close()
     asyncio.run(go())

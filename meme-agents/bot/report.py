@@ -193,8 +193,8 @@ SIGNALS = ("sniper_top3_share", "bundle_like_buy_share", "early_buyer_retention"
            "sniper_top3_share_of_launch_minute")
 
 # Triage's bundling red flags (agents/prompts.py TRIAGE), checked against what flagged tokens did
-TRIAGE_FLAGS = (("same_slot_as_launch_buyers", ">=", 3), ("bundle_like_share_of_launch_minute", ">", 0.2),
-                ("max_same_size_cluster_wallets", ">=", 5))
+TRIAGE_FLAGS = (("same_slot_as_launch_buyers", ">=", 3), ("bundle_like_buy_share", ">", 0.2),
+                ("bundle_like_share_of_launch_minute", ">", 0.2), ("max_same_size_cluster_wallets", ">=", 5))
 
 
 def signal_check(scored: list[dict]) -> list[dict]:
