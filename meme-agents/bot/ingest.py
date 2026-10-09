@@ -143,6 +143,7 @@ class Ingestor:
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
+        self.non_sol: dict[str, str] = {}   # pinned mints whose curve is priced in another token -> that token
         self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "curve_rejected": 0, "non_sol_quote": 0,
                       "migrations": 0, "other_launchpads": 0}
 
@@ -288,6 +289,13 @@ class Ingestor:
             if mint not in self.pinned:
                 log.info("%s: priced in %s, not SOL: no longer tracked", mint, c.quote_mint)
                 await self._drop([mint], f"non-SOL quote {c.quote_mint}")
+            else:
+                # held or being decided: its curve figures cannot be used, and positions sells it
+                # (PositionManager reads non_sol) rather than hold a coin it can neither mark nor measure
+                if mint not in self.non_sol:
+                    log.warning("%s: priced in %s, not SOL, while held or a candidate", mint, c.quote_mint)
+                self.non_sol[mint] = c.quote_mint
+                st.curve_at = 0.0
             return False
         first = not st.curve_at
         if c.complete:

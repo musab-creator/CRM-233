@@ -385,16 +385,17 @@ class TelegramCommands:
 
     async def _emergency_lines(self, cid: int) -> list[str]:
         """What made an emergency exit fire for this decision's positions (bot/positions.py records it)."""
-        out = []
+        out, seen = [], set()
         rows = await self.db.fetchall("SELECT ts, kind, detail FROM events WHERE kind IN ('liq_drop', 'rug_danger') "
-                                      "ORDER BY id DESC LIMIT 500")
-        for r in reversed(rows):
+                                      "AND json_extract(detail, '$.candidate_id') = ? ORDER BY id LIMIT 40", [cid])
+        for r in rows:
             try:
                 d = json.loads(r["detail"] or "{}")
             except ValueError:
                 continue
-            if d.get("candidate_id") != cid:
+            if (d.get("position_id"), r["kind"]) in seen:          # the first report per position says it
                 continue
+            seen.add((d.get("position_id"), r["kind"]))
             when = time.strftime("%H:%MZ", time.gmtime(r["ts"] or 0))
             if r["kind"] == "liq_drop":
                 out.append(f"  {when} {d.get('kind')}: liquidity ${float(d.get('entry_liq_usd') or 0):,.0f} -> "

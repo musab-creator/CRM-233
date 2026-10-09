@@ -165,7 +165,7 @@ class Engine:
         self.positions = PositionManager(
             self.s, self.db, self.risk, self.executor, self.sol_price, dex=self.dex, rugcheck=self.rug,
             notifier=self.tg.send if self.tg.enabled else None, pin=self._pin, watch_account=self._watch_account,
-            curve_liquidity=self._curve_liquidity)
+            curve_liquidity=self._curve_liquidity, quote_of=self.ingest.non_sol.get)
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
@@ -587,7 +587,8 @@ class Engine:
                 self.triage_skips += 1
                 log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f", cid, ctx_data.get("symbol"), mint,
                          reason, triage.confidence, triage.cost_usd)
-                liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
+                # the scan's curve depth: the buy refuses a curve that fell far below it (positions._depth_slip)
+                liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")
                 await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "",
                                             self.s.POSITION_MIN_USD, liq)
                 await self._finish_mint(mint, "evaluated")
@@ -620,7 +621,7 @@ class Engine:
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
                  ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}"
                            for v in [*votes, *vetoes]), spent)
-        liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
+        liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")       # the scan's curve depth
         await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "", self.s.POSITION_MIN_USD, liq)
         if result.decision == "BUY":
             if kill_switch_active(self.s):

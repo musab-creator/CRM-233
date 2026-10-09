@@ -97,6 +97,17 @@ def _num(v) -> float | None:
 Notifier = Callable[[str], Awaitable[None]]
 
 
+def _own_pool(pairs: list[dict], liq_source: str | None) -> dict | None:
+    """The graduated token's pool to measure: the one measured before if DexScreener still lists it,
+    else the deepest PumpSwap pool quoted in wrapped SOL. A deeper side pool never replaces it."""
+    pools = [q for q in pairs if _graduated_pool(q)]
+    if liq_source and liq_source.startswith("pool:"):
+        same = [q for q in pools if f"pool:{q.get('pairAddress')}" == liq_source]
+        if same:
+            return same[0]
+    return max(pools, key=lambda q: _num((q.get("liquidity") or {}).get("usd")) or 0, default=None)
+
+
 def _graduated_pool(pair: dict | None) -> bool:
     """A graduated pump token's own pool: PumpSwap, quoted in wrapped SOL. Any other listing (a side
     pool, another quote) is not the market the bot sells into."""
@@ -108,7 +119,8 @@ class PositionManager:
                  dex=None, rugcheck=None, notifier: Notifier | None = None,
                  pin: Callable[[str, bool], None] | None = None,
                  watch_account: Callable[[str, bool], Awaitable[None]] | None = None,
-                 curve_liquidity: Callable[[str], float | None] | None = None):
+                 curve_liquidity: Callable[[str], float | None] | None = None,
+                 quote_of: Callable[[str], str | None] | None = None):
         self.s = settings
         self.db = db
         self.risk = risk
@@ -123,6 +135,8 @@ class PositionManager:
         # DexScreener has no liquidity for bonding-curve pairs: the curve's own depth stands in,
         # the same measure the pre-filter recorded as entry liquidity
         self.curve_liquidity = curve_liquidity
+        self.quote_of = quote_of or (lambda mint: None)   # a held coin found priced in another token -> that token
+        self._noted: dict[int, set[str]] = {}            # emergencies already logged/announced per position
         self.positions: dict[int, Position] = {}
         self.lock = asyncio.Lock()
         # live trades run off the tick path, one in flight per position
@@ -290,6 +304,10 @@ class PositionManager:
             slip = self._depth_slip(p)
             if slip is not None:
                 await self._cancel_entry(p, slip, ts)
+                return
+            quote = self.quote_of(p.mint)
+            if quote:
+                await self._cancel_entry(p, f"priced in {quote}, not SOL", ts)
                 return
         if self._is_live(p):
             self._spawn(p, self._live_entry(p, price))
@@ -537,6 +555,7 @@ class PositionManager:
         self.positions.pop(p.id, None)
         self._suspect.pop(p.id, None)
         self._entry_attempts.pop(p.id, None)
+        self._noted.pop(p.id, None)
 
     def _runner_policy(self) -> dict:
         """The runner settings a new position records (it keeps them whatever changes later)."""
@@ -631,24 +650,29 @@ class PositionManager:
             p.pending_exit, p.pending_exit_fraction, p.pending_exit_at = reason, fraction, now_s()
             await self._save(p)
             log.info("exit queued #%d %s: %s", p.id, p.mint, reason)
-        if (urgent and reason == p.pending_exit and p.status == "open" and self._is_live(p) and p.last_price
-                and (reason == "kill_switch" or reason.startswith("emergency"))):
-            # a live emergency sells now, not at the next trade: a draining curve may not trade again
-            # for minutes (callers hold the lock; _exit's in-flight guard prevents a second sale)
-            await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now_s(), reason)
+        await self._sell_urgent_now(p, now_s())
+
+    async def _sell_urgent_now(self, p: Position, now: float) -> None:
+        """A live emergency or kill-switch exit sells now, not at the next trade: a draining curve may
+        not trade again for minutes. Caller holds the lock; _exit's in-flight and backoff guards stop a
+        second sale, and periodic() calls this again once a sale in flight has landed."""
+        pend = p.pending_exit or ""
+        if (p.status == "open" and self._is_live(p) and p.last_price
+                and (pend == "kill_switch" or pend.startswith("emergency"))):
+            await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now, pend)
 
     async def periodic(self) -> None:
         """Timeouts, time stops, kill switch, liquidity + rugcheck polling."""
         now = now_s()
+        notices: list[str] = []                         # sent after the lock is released: never hold sales on Telegram
         async with self.lock:
             if kill_switch_active(self.s):
-                if not self._kill_handled:
-                    log.warning("STOP file present: no new entries, closing all real positions")
-                    if self.notify:
-                        await self.notify("KILL SWITCH: STOP file found, closing all positions")
-                    self._kill_handled = True
                 for p in list(self.active("real")):
                     await self.queue_exit(p, "kill_switch")
+                if not self._kill_handled:
+                    log.warning("STOP file present: no new entries, closing all real positions")
+                    notices.append("KILL SWITCH: STOP file found, closing all positions")
+                    self._kill_handled = True
             else:
                 self._kill_handled = False
             for p in list(self.positions.values()):
@@ -660,8 +684,19 @@ class PositionManager:
                         and now - p.decided_at > self.s.ENTRY_FILL_TIMEOUT_S):
                     await self._cancel_entry(p, f"no trade within {self.s.ENTRY_FILL_TIMEOUT_S:.0f} s of the decision", now)
                     continue
+                quote = self.quote_of(p.mint)
+                if quote and p.status == "pending" and p.id not in self._inflight:
+                    await self._cancel_entry(p, f"priced in {quote}, not SOL", now)
+                    continue
                 if p.status != "open":
                     continue
+                if quote and not (p.pending_exit or "").startswith("emergency"):
+                    # its curve figures are in another token: the bot can neither mark nor measure it
+                    log.warning("#%s %s is priced in %s, not SOL: selling", p.id, p.mint, quote)
+                    if p.kind == "real":
+                        notices.append(f"⚠️ {await self._symbol(p.mint)} turned out to be priced in {quote}, not SOL: "
+                                       f"the bot cannot mark it or measure its liquidity, so it sells\n{p.mint}")
+                    await self.queue_exit(p, "emergency_non_sol_quote")
                 if not p.pending_exit:
                     sig = check_exit(self._state(p), None, now, self.s)
                     if sig:
@@ -672,68 +707,87 @@ class PositionManager:
                 waited = now - (p.pending_exit_at or now) > self.s.EXIT_FILL_TIMEOUT_S
                 if p.pending_exit and p.last_price and (retry_due or waited):
                     await self._exit(p, p.pending_exit_fraction or 1.0, p.last_price, now, p.pending_exit)
+                elif p.exit_attempts == 0:
+                    await self._sell_urgent_now(p, now)  # one queued while another sale was in flight
+        for text in notices:
+            if self.notify:
+                await self.notify(text)
         await self._poll_liquidity(now)
         await self._poll_rugcheck(now)
-        # persist marks so a crash loses at most a few seconds of peak tracking
+        # persist marks and the liquidity reference: a crash or /update must not forget either
         for p in list(self.positions.values()):
             if p.status == "open" and p.id:
                 await self.db.update("positions", "id", p.id,
                                      {"last_price": p.last_price, "peak_price": p.peak_price,
-                                      "last_tick_at": p.last_tick_at, "last_liq_usd": p.last_liq_usd})
+                                      "last_tick_at": p.last_tick_at, "last_liq_usd": p.last_liq_usd,
+                                      "entry_liq_usd": p.entry_liq_usd, "liq_source": p.liq_source})
 
     async def _poll_liquidity(self, now: float) -> None:
         """The emergency liquidity rule, measured on one source per phase: the bonding curve's own
-        depth while the token is on its curve, then its PumpSwap pool quoted in wrapped SOL. A side
-        pool or a pair reporting $0 never stands in for either (9 Oct), a change of source starts a
-        new reference instead of comparing two measures, and a DexScreener failure leaves the curve
-        check running."""
+        depth while the token is on its curve, then its own PumpSwap pool quoted in wrapped SOL (the
+        one measured before, else the deepest such pool), never a side pool, whatever DexScreener
+        ranks first. A $0 figure is no reading, a move from the curve to the pool (or the pool
+        vanishing) starts a new reference, and a DexScreener failure leaves the curve check running."""
         if (not self.dex and not self.curve_liquidity) or now - self._last_liq_poll < self.s.LIQ_POLL_S:
             return
         self._last_liq_poll = now
         opened = [p for p in self.positions.values() if p.status == "open"]
         if not opened:
             return
-        pairs: dict = {}
+        lists: dict[str, list[dict]] = {}
         if self.dex:
+            mints = sorted({p.mint for p in opened})
             try:
-                pairs = await self.dex.tokens(sorted({p.mint for p in opened})) or {}
+                if hasattr(self.dex, "token_pair_lists"):
+                    lists = await self.dex.token_pair_lists(mints) or {}
+                else:                                   # simulator and test doubles: one pair per mint
+                    lists = {m: [q] for m, q in (await self.dex.tokens(mints) or {}).items() if q}
             except Exception as e:
                 log.warning("liquidity poll: DexScreener failed (%s); curve depth is still checked", e)
         async with self.lock:
             for p in opened:
-                pair = pairs.get(p.mint)
+                if p.status != "open":
+                    continue
+                pairs = lists.get(p.mint) or []
                 depth = self._curve_depth(p.mint)
+                pool = None if depth is not None else _own_pool(pairs, p.liq_source)
+                # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key): take
+                # DexScreener's price as the mark first, so stops work and an emergency sells at it.
+                mark_pair = pool or max(pairs, key=lambda q: _num((q.get("liquidity") or {}).get("usd")) or 0,
+                                        default=None)
+                native = sol_price_native(mark_pair)
+                if now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S and native:
+                    await self._on_price(p, native, now, "dexscreener", (mark_pair or {}).get("pairAddress"))
+                    if p.status != "open":
+                        continue
                 if depth is not None:
                     liq, source = depth, "curve"
-                elif _graduated_pool(pair):
-                    liq, source = _num(((pair or {}).get("liquidity") or {}).get("usd")), f"pool:{pair.get('pairAddress')}"
+                elif pool is not None:
+                    liq, source = _num((pool.get("liquidity") or {}).get("usd")), f"pool:{pool.get('pairAddress')}"
                     if liq is not None and liq <= 0:
                         liq = None
                 else:
                     liq, source = None, None
-                if liq is not None and p.status == "open":
-                    if source != p.liq_source or not p.entry_liq_usd:
-                        if p.liq_source and p.kind == "real":
-                            log.info("liquidity reference #%s moved from %s to %s: $%.0f", p.id, p.liq_source,
-                                     source, liq)
-                        p.entry_liq_usd, p.liq_source = liq, source
-                    p.last_liq_usd = liq
-                    sig = check_exit(self._state(p), None, now, self.s, liq_usd=liq)
-                    if sig and sig.reason.startswith("emergency"):
-                        log.warning("liquidity drop #%s %s [%s]: $%.0f -> $%.0f on %s, price %s vs entry", p.id,
-                                    p.mint, p.kind, p.entry_liq_usd, liq, source,
-                                    f"{(p.last_price / p.entry_price - 1) * 100:+.0f}%"
-                                    if p.last_price and p.entry_price else "n/a")
-                        await self._event("liq_drop", p, now, {"entry_liq_usd": p.entry_liq_usd, "liq_usd": liq,
-                                                               "source": source, "last_price": p.last_price,
-                                                               "entry_price": p.entry_price})
-                        await self.queue_exit(p, sig.reason)
-                # Stream gone quiet (e.g. graduated to PumpSwap without a PumpPortal API key):
-                # use DexScreener's price as the mark so stops still work, and fill a queued exit.
-                stale = now - (p.last_tick_at or 0) > self.s.LIQ_POLL_S
-                native = sol_price_native(pair)
-                if stale and native and p.status == "open":
-                    await self._on_price(p, native, now, "dexscreener", (pair or {}).get("pairAddress"))
+                if liq is None:
+                    continue
+                if source != p.liq_source or not p.entry_liq_usd:
+                    if p.liq_source and p.kind == "real":
+                        log.info("liquidity reference #%s moved from %s to %s: $%.0f", p.id, p.liq_source, source, liq)
+                    p.entry_liq_usd, p.liq_source = liq, source
+                p.last_liq_usd = liq
+                sig = check_exit(self._state(p), None, now, self.s, liq_usd=liq)
+                if not (sig and sig.reason.startswith("emergency")):
+                    continue
+                if sig.reason not in self._noted.setdefault(p.id, set()):
+                    self._noted[p.id].add(sig.reason)
+                    log.warning("liquidity drop #%s %s [%s]: $%.0f -> $%.0f on %s, price %s vs entry", p.id, p.mint,
+                                p.kind, p.entry_liq_usd, liq, source,
+                                f"{(p.last_price / p.entry_price - 1) * 100:+.0f}%" if p.last_price and p.entry_price
+                                else "n/a")
+                    await self._event("liq_drop", p, now, {"entry_liq_usd": p.entry_liq_usd, "liq_usd": liq,
+                                                           "source": source, "last_price": p.last_price,
+                                                           "entry_price": p.entry_price})
+                await self.queue_exit(p, sig.reason)
 
     async def _event(self, kind: str, p: Position, now: float, detail: dict) -> None:
         """Why an emergency fired, kept for /why; never in the way of the exit itself."""
@@ -754,8 +808,14 @@ class PositionManager:
                 log.warning("rugcheck poll %s failed: %s", p.mint, e)
                 continue
             if rep.get("danger"):
+                notice = None
                 async with self.lock:
-                    if p.status == "open":
+                    if p.status != "open":
+                        continue
+                    await self.queue_exit(p, "emergency_rugcheck_danger")       # the sale first
+                    noted = self._noted.setdefault(p.id, set())
+                    if "emergency_rugcheck_danger" not in noted:
+                        noted.add("emergency_rugcheck_danger")
                         named = [r for r in rep.get("risks") or [] if (r.get("level") or "").lower() == "danger"]
                         names = ", ".join(f"{r.get('name', '?')}" + (f" ({r['value']})" if r.get("value") else "")
                                           for r in named) or ", ".join(map(str, rep["danger"]))
@@ -763,10 +823,12 @@ class PositionManager:
                                     rep.get("score_normalised"))
                         await self._event("rug_danger", p, now, {"danger": rep.get("danger"), "risks": named,
                                                                  "score_normalised": rep.get("score_normalised")})
-                        if p.kind == "real" and self.notify:
-                            await self.notify(f"⚠️ RUGCHECK DANGER {await self._symbol(p.mint)}: {names}\n"
-                                              f"selling everything (emergency)\n{p.mint}")
-                        await self.queue_exit(p, "emergency_rugcheck_danger")
+                        if p.kind == "real":
+                            state = ("selling now" if p.id in self._inflight else
+                                     f"sale queued ({p.pending_exit})" if p.pending_exit else "sold")
+                            notice = (f"⚠️ RUGCHECK DANGER {await self._symbol(p.mint)}: {names}\n{state}\n{p.mint}")
+                if notice and self.notify:
+                    await self.notify(notice)
 
     async def run(self, stop: asyncio.Event, interval: float = 2.0) -> None:
         while not stop.is_set():

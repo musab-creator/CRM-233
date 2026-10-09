@@ -272,3 +272,135 @@ def test_why_shows_a_liquidity_drop(s):
         await db.close()
         return lines
     assert asyncio.run(go()) == ["  13:46Z real: liquidity $9,600 -> $4,000 on curve"]
+
+
+class Pools:
+    """DexScreener with every pair per mint (token_pair_lists), as the batched endpoint returns them."""
+
+    def __init__(self, pairs):
+        self.pairs = pairs
+
+    async def token_pair_lists(self, mints):
+        return {m: list(self.pairs) for m in mints}
+
+
+def _pool(addr, usd, dex="pumpswap", quote=WSOL):
+    return {"dexId": dex, "pairAddress": addr, "quoteToken": {"address": quote}, "priceNative": "1e-7",
+            "liquidity": {"usd": usd}}
+
+
+def test_a_deeper_side_pool_never_hides_the_own_pool_draining(s):
+    async def go():
+        dex = Pools([_pool("Own", 20_000), _pool("Side", 12_000, dex="meteora")])
+        db, pm = await _manager(s, dex)
+        p = await pm.create("M", 1, "shadow", "C", 10.0, None)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        await pm.periodic()
+        assert p.liq_source == "pool:Own" and p.entry_liq_usd == 20_000
+        # a second, deeper PumpSwap pool appears: the one measured before stays the reference
+        dex.pairs = [_pool("Own", 15_000), _pool("Other", 50_000), _pool("Side", 12_000, dex="meteora")]
+        await _poll(pm)
+        assert p.liq_source == "pool:Own" and p.entry_liq_usd == 20_000 and not p.pending_exit
+        dex.pairs = [_pool("Own", 8_000), _pool("Side", 12_000, dex="meteora")]   # the side pool is deeper now
+        await _poll(pm)
+        assert p.pending_exit == "emergency_liquidity_drop"
+        await db.close()
+    asyncio.run(go())
+
+
+def test_the_reference_survives_a_restart(s):
+    async def go():
+        dex = Pools([_pool("Own", 30_000)])
+        db, pm = await _manager(s, dex)
+        p = await pm.create("M", 1, "shadow", "C", 10.0, None)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        await pm.periodic()
+        assert p.entry_liq_usd == 30_000
+        again = PositionManager(s, db, RiskManager(s, 0), PaperExecutor(s), FixedPrice(), dex=dex)
+        await again.load()
+        q = again.positions[p.id]
+        assert q.entry_liq_usd == 30_000 and q.liq_source == "pool:Own"
+        dex.pairs = [_pool("Own", 12_000)]                                       # -60% after the restart
+        await again.periodic()
+        assert q.pending_exit == "emergency_liquidity_drop"
+        await db.close()
+    asyncio.run(go())
+
+
+def test_an_emergency_is_reported_once_while_it_waits(s):
+    class Rug:
+        async def check(self, mint, max_age_s=0):
+            return {"danger": ["Freeze Authority still enabled"], "risks": [], "score_normalised": 90}
+
+    sent: list[str] = []
+
+    async def go():
+        depth = {"M": 9_000.0}
+        db, pm = await _manager(s, Dex(), depth, rug=Rug(), sent=sent)
+        p = await pm.create("M", 1, "real", "C", 10.0, 9_000)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        depth["M"] = 3_000.0
+        for _ in range(3):
+            pm._last_rug_poll = 0
+            await _poll(pm)
+        events = await db.fetchall("SELECT kind FROM events WHERE kind IN ('liq_drop', 'rug_danger')")
+        await db.close()
+        return sorted(e["kind"] for e in events)
+    assert asyncio.run(go()) == ["liq_drop", "rug_danger"]
+    assert sum("RUGCHECK DANGER" in t for t in sent) == 1
+
+
+def test_a_held_coin_priced_in_another_token_is_sold_and_pending_buys_dropped(s):
+    sent: list[str] = []
+
+    async def go():
+        db, pm = await _manager(s, sent=sent)
+        quotes = {}
+        pm.quote_of = quotes.get
+        p = await pm.create("M", 1, "real", "C", 10.0, None)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        pending = await pm.create("N", 2, "real", "D", 10.0, None)
+        quotes.update({"M": USDC, "N": USDC})
+        await pm.periodic()
+        assert p.pending_exit == "emergency_non_sol_quote"
+        assert pending.status == "cancelled" and pending.exit_reason == f"priced in {USDC}, not SOL"
+        await pm.periodic()
+        await db.close()
+    asyncio.run(go())
+    assert sum("turned out to be priced in" in t for t in sent) == 1        # said once, not every pass
+    assert any(t.startswith("⚪ NO ENTRY N") and f"priced in {USDC}, not SOL" in t for t in sent)
+
+
+def test_an_emergency_queued_during_another_sale_sells_when_that_lands(s):
+    class SlowLive(PaperExecutor):
+        mode = "live"
+
+        def __init__(self, s):
+            super().__init__(s)
+            self.sells, self.gate = [], asyncio.Event()
+
+        async def sell(self, mint, tokens, price, fraction=1.0, **kw):
+            self.sells.append(fraction)
+            if len(self.sells) == 1:
+                await self.gate.wait()                  # the take-profit sale is slow to confirm
+            return await super().sell(mint, tokens, price, fraction)
+
+    async def go():
+        ex = SlowLive(s)
+        db, pm = await _manager(s, ex=ex)
+        p = await pm.create("M", 1, "real", "C", 10.0, None)
+        await pm.on_tick("M", 1e-7, p.decided_at + 1, {})
+        await pm.drain(1)
+        await pm.on_tick("M", 2e-7, p.decided_at + 2, {})                     # take-profit sale in flight
+        await asyncio.sleep(0)
+        async with pm.lock:
+            await pm.queue_exit(p, "emergency_liquidity_drop")
+        assert ex.sells == [s.TAKE_PROFIT_SELL_FRACTION]                      # no second sale while one is out
+        ex.gate.set()
+        await pm.drain(2)
+        assert p.status == "open" and p.pending_exit == "emergency_liquidity_drop"
+        await pm.periodic()                                                   # the emergency goes out now
+        await pm.drain(2)
+        assert len(ex.sells) == 2 and p.status == "closed" and p.exit_reason == "emergency_liquidity_drop"
+        await db.close()
+    asyncio.run(go())
