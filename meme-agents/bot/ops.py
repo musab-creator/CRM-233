@@ -35,6 +35,7 @@ import re
 import signal
 import subprocess
 import time
+from collections import deque
 from pathlib import Path
 
 from .config import (
@@ -48,7 +49,7 @@ from .config import (
     load_settings,
     validate_settings,
 )
-from .util import now_s
+from .util import now_s, redact
 
 log = logging.getLogger("bot.ops")
 
@@ -63,6 +64,10 @@ TIMEOUT_S = {"update": 1500, "restart": 400, "set": 60}
 RESTART_SETTLE_S = 120.0      # how long a restart may sit in systemd's "activating" (its own retries) before it counts as down
 ENV_BACKUP_MAX_AGE_S = 3600.0 # a failed restart undoes a /set made within this long
 KEEP_PAUSE_MAX_AGE_S = 1800.0 # a "keep the loss-cap pause" marker older than this is ignored
+LATE_RESULT_S = 300.0         # a result the bot sends longer than this after it finished waited for the bot to come back
+LOG_TAIL_LINES = 2000         # log lines searched for the bot's own reason when a restart fails
+# one line of the bot's log (bot/util.py setup_logging): "2026-10-08 22:48:01,123 ERROR   bot.__main__: ..."
+LOG_LINE = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(?P<ms>\d{3}) (?P<level>[A-Z]+)\s+[\w.]+: (?P<msg>.*)$")
 SERVICE = "meme-agents"
 _seq = itertools.count()
 _sleep = time.sleep           # replaced in tests
@@ -352,7 +357,8 @@ def info_path(s: Settings) -> Path:
 
 def write_info(s: Settings) -> dict:
     """What the watcher found out about itself at start, for /ops to show."""
-    info = {"pid": os.getpid(), "no_new_privs": no_new_privs(), "started": now_s()}
+    info = {"pid": os.getpid(), "no_new_privs": no_new_privs(), "started": now_s(),
+            "code": (_git_head(s.path(".")) or "")[:7]}
     _write_json(info_path(s), info)
     return info
 
@@ -698,6 +704,7 @@ def _restart(s: Settings, run, run_raw, tick, out: list[str]) -> tuple[bool, int
     back to what it was, never LIVE_DRY_RUN) and restart again: a setting the bot refuses must
     never leave the phone without a bot to talk to. A /set the bot has already started on is
     retired and never undone by a later restart."""
+    since = now_s()
     code = run(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"])
     if code != 0 and sudo_refused(out):          # the bot is still up only because nothing touched it
         return False, code
@@ -707,28 +714,82 @@ def _restart(s: Settings, run, run_raw, tick, out: list[str]) -> tuple[bool, int
         if code != 0:
             out.append("the restart command reported an error but the bot is active")
         return True, 0
+    why = startup_error(s, since)
     change = last_change(s)
     if change is None:
         rec = _read_json(ops_dir(s) / "env.change.json") or {}
         if rec.get("key") == "LIVE_DRY_RUN":
             out.append("the bot is not active after the restart; LIVE_DRY_RUN stays on (it is never turned back on "
-                       f"from here). Check journalctl -u {SERVICE} on the server")
+                       "from here). " + (f"The bot said: {why}" if why else f"Check journalctl -u {SERVICE} on the server"))
         else:
-            out.append(f"the bot is not active after the restart ({state}); check journalctl -u {SERVICE}")
+            out.append(f"the bot is not active after the restart ({state}); "
+                       + (f"the bot said: {why}" if why else f"check journalctl -u {SERVICE}"))
         return False, code or 1
     key, previous = change["key"], change["previous"]
     retire_change(s)
+    if why:
+        out.append(f"the bot said: {why}")
     out.append(f"the bot did not start after {key} changed ({state}): {key} is put back to {previous} and the bot "
                "restarted again")
     code2 = run(["bash", str(s.path(".") / "deploy" / "set-env.sh"), f"{key}={previous}"], TIMEOUT_S["set"])
     if code2 != 0:
         out.append(f"could not write {key}={previous} back; check .env on the server")
         return False, code or 1
+    since = now_s()
     code2 = run(["sudo", "-n", "systemctl", "restart", SERVICE], TIMEOUT_S["restart"])
     state = _settle(run_raw, tick)
-    out.append(f"the bot is active again with {key}={previous}" if state == "active"
-               else f"the bot is still not active ({state}, exit {code2}); check journalctl -u {SERVICE}")
+    if state == "active":
+        out.append(f"the bot is active again with {key}={previous}")
+    else:
+        why = startup_error(s, since)
+        out.append(f"the bot is still not active ({state}, restart command exit {code2}); "
+                   + (f"the bot said: {why}" if why else f"check journalctl -u {SERVICE}"))
     return False, code or 1
+
+
+def startup_error(s: Settings, since: float) -> str | None:
+    """The last error the bot wrote to its log at or after `since` (the restart), so a failed phone
+    restart says why instead of pointing at journalctl, which a phone cannot run. An exception's
+    report ("command failed; ...") is followed by its traceback: the exception line is added.
+    (9 Oct: a restart failed on a wallet over its cap and the chat only said "check journalctl".)"""
+    if not s.LOG_FILE:
+        return None
+    try:
+        with open(s.path(s.LOG_FILE), encoding="utf-8", errors="replace") as f:
+            lines = deque(f, maxlen=LOG_TAIL_LINES)
+    except OSError:
+        return None
+    found, exc = None, None
+    for ln in lines:
+        ln = ln.rstrip("\n")
+        m = LOG_LINE.match(ln)
+        if m is None:
+            if found and ln.strip() and not ln[:1].isspace() and not ln.startswith("Traceback"):
+                exc = ln.strip()                    # the last unindented line of a traceback names the exception
+            continue
+        try:                                        # local time, as logging writes it, to the millisecond
+            ts = time.mktime(time.strptime(m["ts"], "%Y-%m-%d %H:%M:%S")) + int(m["ms"]) / 1000
+        except (ValueError, OverflowError):
+            continue
+        if ts < since - 0.01:                       # written before this restart: an older problem
+            continue
+        if m["level"] in ("ERROR", "CRITICAL"):
+            found, exc = m["msg"].strip(), None
+    if not found:
+        return None
+    return redact(found + (f" ({exc})" if exc else ""))[:400]
+
+
+def late_note(res: dict, now: float | None = None) -> str:
+    """A first line for a result the bot sends long after it finished: it waited while the bot was
+    down, and must not read as news (9 Oct: last night's failed restart arrived the next morning
+    and was taken for a new failure)."""
+    finished = _num(res.get("finished"))
+    now = now_s() if now is None else now
+    if finished <= 0 or now - finished <= LATE_RESULT_S:
+        return ""
+    return (f"⏳ from {time.strftime('%d %b %H:%MZ', time.gmtime(finished))}, sent late "
+            "(the bot was not running to send it)\n")
 
 
 # --- the watcher ---------------------------------------------------------------------------
@@ -880,6 +941,9 @@ def format_queue(s: Settings) -> str:
         state = f"ops service: DOWN (last seen {age / 60:.0f} min ago). On the server: sudo systemctl restart {SERVICE}-ops"
     else:
         state = f"ops service: running (seen {age:.0f} s ago)"
+        code = str(watcher_info(s).get("code") or "")
+        if re.fullmatch(r"[0-9a-f]{7}", code):
+            state += f", code {code}"
     lines = [state]
     if age is not None and age <= HEARTBEAT_STALE_S and watcher_info(s).get("no_new_privs"):
         lines.append("⚠️ " + NNP_HINT)

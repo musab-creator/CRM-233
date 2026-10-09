@@ -43,7 +43,7 @@ from .regime import Regime, apply_regime_size, market_snapshot, run_regime
 from .report import write_daily
 from .risk import RiskManager, kill_switch_active
 from .telegram import Telegram
-from .util import InstanceLock, backoff_delay, now_s, sd_notify
+from .util import InstanceLock, backoff_delay, git_commit, now_s, sd_notify
 
 log = logging.getLogger("bot.engine")
 
@@ -85,6 +85,7 @@ class Engine:
         validate_settings(s)
         self.s = s
         self.started_at = now_s()
+        self.code: str | None = None     # the commit this process runs, for /status
         self.db = Database(s.path(s.DB_PATH))
         self.lock = InstanceLock(str(s.path(s.DB_PATH)) + ".lock")
         self.http = http or httpx.AsyncClient(timeout=20, headers={"User-Agent": "meme-agents/0.1"})
@@ -138,6 +139,7 @@ class Engine:
             raise StartupError(f"another bot process is already using {self.s.path(self.s.DB_PATH)}; "
                                "stop it first (systemctl stop meme-agents, or Ctrl-C the other terminal)")
         await self.db.open()
+        self.code = await asyncio.to_thread(git_commit, self.s.path("."))
         await self.risk.startup()
         try:
             kp = await check_live_startup(self.s, self.helius.balance_sol)
@@ -707,7 +709,8 @@ class Engine:
                  f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
                  f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else "")
         await self.db.kv_set("heartbeat", json.dumps({
-            "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "tracked": len(self.ingest.mints),
+            "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
+            "tracked": len(self.ingest.mints),
             "simulated": bool(getattr(self, "simulated", False)),
             "launches": st["creates"], "trades": st["trades"], "curve_reads": st["curve_reads"],
             "stream_trades": st["stream_trades"], "trade_stream": self.stream_mode,
@@ -823,7 +826,7 @@ class Engine:
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
-        log.info("bot running in %s mode (model %s)", self.s.MODE, self.s.LLM_MODEL)
+        log.info("bot running in %s mode (model %s, code %s)", self.s.MODE, self.s.LLM_MODEL, self.code or "?")
         sd_notify("READY=1")
         clean_stop = False
         try:

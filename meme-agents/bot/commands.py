@@ -32,6 +32,7 @@ from .ops import (
     describe,
     format_queue,
     format_result,
+    late_note,
     quarantine,
     request,
     results,
@@ -271,7 +272,7 @@ class TelegramCommands:
         sent = 0
         for path, res in results(self.s):
             try:
-                text = redact(format_result(res))
+                text = redact(late_note(res) + format_result(res))
                 markup = None
                 args = res.get("args") if isinstance(res.get("args"), dict) else {}
                 if res.get("ok") and res.get("action") == "set" and not args.get("restart"):

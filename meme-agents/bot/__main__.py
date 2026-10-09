@@ -18,14 +18,42 @@ import logging
 import math
 from dataclasses import fields
 from datetime import date
+import os
 import signal
 import sys
+import time
 
 from .config import load_settings
 from .live.guard import LiveRefused
 from .util import redact, register_secrets, setup_logging
 
 log = logging.getLogger("bot")
+
+
+def _log_refused_config(text: str) -> None:
+    """The service refusing its .env prints to stderr, which only the journal keeps and a phone cannot
+    read; the same line goes into the log file, where /log and a failed phone restart (bot/ops.py
+    startup_error) find it. Best effort: the settings that name the file are the ones being refused."""
+    from .config import ROOT, ConfigError, Settings, load_dotenv
+    s = Settings()
+    try:
+        raw = load_dotenv(ROOT / ".env")
+        if "LOG_FILE" in raw:
+            s.LOG_FILE = raw["LOG_FILE"]
+    except ConfigError:
+        pass
+    s.LOG_FILE = os.environ.get("LOG_FILE", s.LOG_FILE)
+    if not s.LOG_FILE:
+        return
+    try:
+        path = s.path(s.LOG_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()                       # the format setup_logging writes, to the millisecond
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f",{int(now * 1000) % 1000:03d}"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} ERROR   bot.__main__: {text}\n")
+    except OSError:
+        pass
 
 
 def _install_signals(engine) -> None:
@@ -237,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as e:
         if cmd != "ops":
             print(redact(f"config error: {e}"), file=sys.stderr)
+            if cmd == "run":
+                _log_refused_config(redact(f"config error: {e}"))
             return 2
         # The ops service must stay up on a broken .env: a /set from the phone is how it gets repaired.
         from .config import ROOT, Settings, load_dotenv

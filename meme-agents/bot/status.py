@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 
 from .budget import pace_released, utc_day, utc_month
@@ -123,7 +124,9 @@ async def build_status(db: Database, s: Settings) -> str:
              "RUNNING" if alive and now - alive < 180 else
              "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started")
     running_mode = hb.get("mode") if hb.get("mode") in ("paper", "live") else s.MODE
-    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}")
+    code = hb.get("code") if isinstance(hb.get("code"), str) and re.fullmatch(r"[0-9a-f]{7}", hb["code"]) else None
+    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}"
+                 + (f"  code={code}" if code else ""))
     if heartbeat_error:
         lines.append(heartbeat_error)
     if hb.get("mode") in ("paper", "live") and running_mode != s.MODE:
