@@ -404,3 +404,53 @@ def test_an_emergency_queued_during_another_sale_sells_when_that_lands(s):
         assert len(ex.sells) == 2 and p.status == "closed" and p.exit_reason == "emergency_liquidity_drop"
         await db.close()
     asyncio.run(go())
+
+
+def test_a_curve_that_reads_implausibly_twice_is_dropped_unless_held(s, caplog):
+    """9 Oct, after the quote_mint check: dozens of new curves still read v_sol≈0.42 against 1.073B
+    tokens and were warned about every few minutes for an hour. An unheld one is logged once with
+    its account bytes and dropped on the second such read; a held one is never dropped."""
+    odd_raw = encode_curve(Curve(1.073e9, 0.4222, 7.93e8, 0.0, 1e9, False, CREATOR)).ljust(166, b"\0")
+    odd = decode_curve(odd_raw)
+    assert odd.quote_mint is None and odd.size == 166 and odd.extra == "00" * 85
+    good = Curve(1.0e9, 32.0, 7e8, 2.0, 1e9, False)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            return await check(db)
+        finally:
+            await db.close()
+
+    async def check(db):
+        ing = Ingestor(s, db)
+        mints = {"A" * 44: "K" * 44, "B" * 44: "J" * 44, "H" * 44: "L" * 44}
+        for m, key in mints.items():
+            await ing.handle({"txType": "create", "mint": m, "traderPublicKey": "D" * 44, "bondingCurveKey": key,
+                              "solAmount": 0.0, "initialBuy": 0, "vSolInBondingCurve": 30.0,
+                              "vTokensInBondingCurve": 1.073e9}, ts=1000)
+        ing.pinned.add("H" * 44)
+        caplog.clear()
+        with caplog.at_level("INFO", logger="bot.ingest"):
+            assert await ing.apply_curve("A" * 44, odd, 1060) is False
+            assert "A" * 44 in ing.mints                                   # one bad read may be a glitch
+            assert await ing.apply_curve("A" * 44, odd, 1300) is False
+            assert "A" * 44 not in ing.mints
+            # an accepted read in between starts the count again
+            await ing.apply_curve("B" * 44, odd, 1060)
+            await ing.apply_curve("B" * 44, good, 1300)
+            assert ing.mints["B" * 44].curve_at == 1300 and ing.mints["B" * 44].bad_curve_reads == 0
+            await ing.apply_curve("B" * 44, odd, 1540)
+            assert "B" * 44 in ing.mints
+            for t in (1060, 1300, 1540):
+                await ing.apply_curve("H" * 44, odd, t)
+            assert "H" * 44 in ing.mints and not ing.mints["H" * 44].curve_at
+        row = await db.fetchone("SELECT status, status_reason FROM mints WHERE mint=?", ["A" * 44])
+        assert row["status"] == "dropped" and row["status_reason"] == "implausible curve reads"
+        assert ing.stats["curve_unreadable"] == 1 and ing.stats["curve_rejected"] == 7
+        return [(r.levelname, r.getMessage()) for r in caplog.records]
+    records = asyncio.run(go())
+    warnings = [m for lvl, m in records if lvl == "WARNING"]
+    assert len(warnings) == 3 and all(m.startswith("H" * 44) for m in warnings)    # only the held coin warns
+    first = [m for lvl, m in records if lvl == "INFO" and m.startswith("A" * 44)]
+    assert "account 166 bytes, bytes 81+: " + "00" * 85 in first[0] and "no longer tracked" in first[1]

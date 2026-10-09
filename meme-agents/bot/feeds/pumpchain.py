@@ -29,7 +29,7 @@ import base64
 import hashlib
 import logging
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from solders.pubkey import Pubkey
 
@@ -56,6 +56,9 @@ class Curve:
     complete: bool
     creator: str | None = None
     quote_mint: str | None = None   # None: priced in SOL; otherwise the token the curve is priced in
+    # the account as read, for the log when a read makes no sense as a SOL curve
+    size: int = field(default=0, compare=False)
+    extra: str = field(default="", compare=False, repr=False)   # hex of bytes 81..166
 
     @property
     def price_sol(self) -> float | None:
@@ -88,7 +91,8 @@ def decode_curve(data: bytes | None) -> Curve | None:
         if quote == WSOL_MINT:
             quote = None
     scale = 10 ** TOKEN_DECIMALS
-    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator, quote)
+    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator, quote,
+                 len(data), data[81:166].hex())
 
 
 def encode_curve(c: Curve) -> bytes:

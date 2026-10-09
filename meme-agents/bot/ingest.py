@@ -89,6 +89,7 @@ class MintState:
     streamed: bool = False              # every trade since launch came from the paid stream
     mayhem: bool = False                # pump.fun Mayhem Mode: an AI agent trades it for 24 h
     supply: float | None = None         # token_total_supply from the curve (Mayhem mints extra)
+    bad_curve_reads: int = 0            # implausible curve reads in a row
     snapshots: deque = field(default_factory=lambda: deque(maxlen=240), repr=False)  # (ts, price, real_sol)
 
     @property
@@ -308,9 +309,23 @@ class Ingestor:
         if not plausible_curve(c):
             # a corrupt read must not become a tick, a snapshot or the token's market cap
             self.stats["curve_rejected"] += 1
-            log.warning("%s: rejecting implausible curve read v_sol=%.4g v_tokens=%.4g real_sol=%.4g (last price %s)",
-                        mint, c.v_sol, c.v_tokens, c.real_sol, f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")
+            st.bad_curve_reads += 1
+            read = f"v_sol={c.v_sol:.4g} v_tokens={c.v_tokens:.4g} real_sol={c.real_sol:.4g}"
+            if mint in self.pinned:
+                log.warning("%s: rejecting implausible curve read %s (last price %s)", mint, read,
+                            f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")
+            elif st.bad_curve_reads == 1:
+                # 9 Oct: dozens of new curves read like this every few minutes, still after the quote_mint
+                # check, so one line per coin keeps the account's bytes for working out what they are
+                log.info("%s: implausible curve read %s (account %d bytes, bytes 81+: %s)", mint, read, c.size,
+                         c.extra or "none")
+            else:
+                # no SOL curve reads like this twice in a row: not a candidate, stop reading it
+                self.stats["curve_unreadable"] = self.stats.get("curve_unreadable", 0) + 1
+                log.info("%s: implausible curve read again (%s): no longer tracked", mint, read)
+                await self._drop([mint], "implausible curve reads")
             return False
+        st.bad_curve_reads = 0
         st.curve_at = ts                                 # only an accepted read counts as the curve read
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
