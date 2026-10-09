@@ -75,7 +75,7 @@ _sleep = time.sleep           # replaced in tests
 # never drops below the brief's 0.65, a position never exceeds $20, the bankroll $100, at most 20
 # positions are open at once (the live wallet's balance limits them first).
 SETTABLE: dict[str, object] = {
-    "LLM_DAILY_BUDGET_USD": (float, 0, 50),
+    "LLM_DAILY_BUDGET_USD": (float, 0, 150),
     "X_MONTHLY_BUDGET_USD": (float, 0, 200),
     "LLM_BUDGET_PACING": bool,
     "BANKROLL_USD": (float, 1, 500),
