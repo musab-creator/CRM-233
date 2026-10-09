@@ -533,8 +533,10 @@ class PositionManager:
                     p.pending_exit = p.pending_exit_fraction = p.pending_exit_at = None
                 runner_note = (f"\n🏃 RUNNER kept: {p.tokens_remaining:,.0f} tokens "
                                f"({100 * p.tokens_remaining / p.tokens_initial:.0f}% of the original); sells at "
-                               f"{self._runner_target(p):g}x the entry price, the stop loss, an emergency, or after "
-                               f"{self._runner_hours(p):g} h from entry")
+                               f"{self._runner_target(p):g}x the entry price, "
+                               f"{'the stop loss, ' if self.s.RUNNER_STOP_LOSS else ''}an emergency, or after "
+                               f"{self._runner_hours(p):g} h from entry"
+                               + ("" if self.s.RUNNER_STOP_LOSS else "; no stop loss, its cost is already covered"))
         if closed:
             p.tokens_remaining = 0.0
             p.status, p.closed_at, p.exit_reason = "closed", ts, reason

@@ -6,7 +6,8 @@ assumption 3). Order of precedence: emergency > time stop > stop loss > take pro
 A position created with a runner policy (RUNNER_* settings) keeps part of a winner: after its
 take-profit, the core's trailing or time stop sells all but RUNNER_FRACTION of the original
 tokens, provided the sales so far plus that one cover the entry cost. The runner left over has
-no trailing or time stop; it exits on an emergency, the stop loss, its price target or its hold limit.
+no trailing or time stop, and no stop loss unless RUNNER_STOP_LOSS is on (its cost is already
+covered); it exits on an emergency, its price target or its hold limit.
 """
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ def check_exit(p: ExitState, price: float | None, now: float, s: Settings,
         if liq_usd <= p.entry_liq_usd * (1 - s.EMERGENCY_LIQ_DROP_PCT / 100):
             return ExitSignal("emergency_liquidity_drop", 1.0)
     if p.runner_active:
-        if price is not None and 0 < price <= p.entry_price * (1 - s.STOP_LOSS_PCT / 100):
+        if s.RUNNER_STOP_LOSS and price is not None and 0 < price <= p.entry_price * (1 - s.STOP_LOSS_PCT / 100):
             return ExitSignal("stop_loss", 1.0)
         if now - p.opened_at >= p.runner_max_hold_hours * 3600:
             return ExitSignal("runner_time_stop", 1.0)

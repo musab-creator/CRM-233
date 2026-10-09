@@ -91,6 +91,7 @@ SETTABLE: dict[str, object] = {
     "RUNNER_FRACTION": (float, 0.01, 0.25),
     "RUNNER_TARGET_MULTIPLE": (float, 2, 1000),
     "RUNNER_MAX_HOLD_HOURS": (float, 1, 336),
+    "RUNNER_STOP_LOSS": bool,
     "EMERGENCY_LIQ_DROP_PCT": (float, 20, 90),
     "ENTRY_MAX_LIQ_SLIP_PCT": (float, 0, 90),
     "MOONSHOT_ALERT_MULTIPLE": (float, 0, 10000),

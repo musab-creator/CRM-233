@@ -151,12 +151,16 @@ class Settings:
     TIME_STOP_HOURS: float = 6.0
     # Runner: after a take-profit, the core's trailing or time stop sells all but this share of the
     # original tokens, kept only while the sales so far plus that one cover the entry cost. The
-    # runner then exits at its price target, its hold limit, the stop loss or an emergency.
+    # runner then exits at its price target, its hold limit or an emergency (see RUNNER_STOP_LOSS).
     # Recorded on each position when it is created, so a change applies to new positions only.
     RUNNER_ENABLED: bool = False
     RUNNER_FRACTION: float = 0.10         # of the original tokens
     RUNNER_TARGET_MULTIPLE: float = 300.0 # sell it when the price reaches this multiple of the entry price
     RUNNER_MAX_HOLD_HOURS: float = 168.0  # counted from the entry
+    # A runner exists only once the sales so far covered the entry cost, so it has no stop loss unless
+    # this is on: a dip below the entry must not sell the free tokens of a coin that may still run 500x.
+    # Read at every price, so it applies to runners already open; emergencies and the kill switch still sell.
+    RUNNER_STOP_LOSS: bool = False
     EMERGENCY_LIQ_DROP_PCT: float = 50.0
     # a real buy is refused when the curve's depth fell more than this since the scan (0 = off)
     ENTRY_MAX_LIQ_SLIP_PCT: float = 20.0

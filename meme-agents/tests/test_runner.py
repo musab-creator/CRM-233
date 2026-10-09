@@ -1,6 +1,6 @@
 """The runner: after a take-profit, the core's trailing or time stop keeps RUNNER_FRACTION of the
 original tokens when the sales cover the entry cost; the runner then exits on its target, its hold
-limit, the stop loss or an emergency, and does not hold one of the position slots."""
+limit or an emergency (the stop loss only with RUNNER_STOP_LOSS), and does not hold a position slot."""
 import asyncio
 import sqlite3
 
@@ -61,10 +61,15 @@ def test_exit_rules_with_a_runner_policy(s):
     # the time stop with no fresh price values the core at the last mark
     sig = check_exit(_state(last_price=1.3e-7), None, 7 * 3600, s)
     assert sig.reason == "core_time_stop" and sig.fraction == pytest.approx(0.8)
-    # an active runner: no trailing stop, only the loss stop, its hold limit, its target, emergencies
+    # an active runner: no trailing stop and, its cost being covered, no stop loss by default; only its
+    # hold limit, its target and emergencies
     run = _state(runner_active=True, tokens_remaining=1e6, proceeds_sol=1.5)
     assert check_exit(run, 1.05e-7, 100, s) is None                       # far below its peak of 2e-7
+    assert check_exit(run, 0.59e-7, 100, s) is None                       # 41% below the entry: kept
+    assert check_exit(run, 0.01e-7, 100, s) is None                       # 99% below: still kept
+    s.RUNNER_STOP_LOSS = True
     assert check_exit(run, 0.59e-7, 100, s).reason == "stop_loss"
+    s.RUNNER_STOP_LOSS = False
     assert check_exit(run, 1e-7, 168 * 3600, s).reason == "runner_time_stop"
     assert check_exit(run, 3e-5, 100, s).reason == "runner_target"
     assert check_exit(run, 1e-7, 100, s, rug_danger=True).reason == "emergency_rugcheck_danger"
@@ -105,9 +110,31 @@ def test_no_runner_when_the_sales_do_not_cover_the_cost(s):
     asyncio.run(go())
 
 
-def test_the_runner_stops_at_the_loss_stop_and_its_hold_limit(s):
+def test_the_runner_rides_through_a_dip_below_the_entry_and_stops_at_its_hold_limit(s):
+    """9 Oct: "I'm looking for the 500x". The runner's tokens are free (the sales covered the cost), so
+    a dip below the entry no longer sells them; the coin can still run to the target afterwards."""
     async def go():
         db, pm, p = await _open(_runner(s))
+        t = p.decided_at
+        for i, price in enumerate((1.7e-7, 2.5e-7, 1.6e-7)):
+            await pm.on_tick("M", price, t + 2 + i, {})
+        assert p.runner_active == 1
+        await pm.on_tick("M", 0.59e-7, t + 10, {})                        # 41% below the entry: kept
+        await pm.on_tick("M", 0.3e-7, t + 11, {})                         # 70% below: kept
+        assert p.status == "open" and p.runner_active == 1
+        await pm.on_tick("M", 5.2e-7, t + 12, {})                         # then 5.2x the entry: its target
+        assert p.status == "closed" and p.exit_reason == "runner_target" and p.pnl_sol > 0
+        await db.close()
+    asyncio.run(go())
+    s2 = _runner(s)
+    run = _state(runner_active=True, opened_at=1000.0, runner_max_hold_hours=2.0)
+    assert check_exit(run, None, 1000 + 7199, s2) is None
+    assert check_exit(run, None, 1000 + 7200, s2).reason == "runner_time_stop"
+
+
+def test_with_runner_stop_loss_on_the_runner_sells_at_the_loss_stop(s):
+    async def go():
+        db, pm, p = await _open(_runner(s, RUNNER_STOP_LOSS=True))
         t = p.decided_at
         for i, price in enumerate((1.7e-7, 2.5e-7, 1.6e-7)):
             await pm.on_tick("M", price, t + 2 + i, {})
@@ -116,10 +143,14 @@ def test_the_runner_stops_at_the_loss_stop_and_its_hold_limit(s):
         assert p.status == "closed" and p.exit_reason == "stop_loss"
         await db.close()
     asyncio.run(go())
-    s2 = _runner(s)
-    run = _state(runner_active=True, opened_at=1000.0, runner_max_hold_hours=2.0)
-    assert check_exit(run, None, 1000 + 7199, s2) is None
-    assert check_exit(run, None, 1000 + 7200, s2).reason == "runner_time_stop"
+
+
+def test_runner_stop_loss_is_a_phone_switch(s):
+    assert s.RUNNER_STOP_LOSS is False
+    assert validate_set("RUNNER_STOP_LOSS", "on", s) == "true"
+    assert validate_set("RUNNER_STOP_LOSS", "false", s) == "false"
+    with pytest.raises(OpsError):
+        validate_set("RUNNER_STOP_LOSS", "maybe", s)
 
 
 def test_a_partial_core_receipt_sells_the_rest_of_the_core_only(s):
