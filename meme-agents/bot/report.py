@@ -11,6 +11,7 @@ from pathlib import Path
 from .budget import utc_day
 from .config import Settings
 from .db import SPIKE_FACTOR, SPIKED_SHADOWS_SQL, Database
+from .paper import mark_to_market
 from .util import now_s
 
 
@@ -202,8 +203,48 @@ def signal_check(scored: list[dict]) -> list[dict]:
         med = xs[len(xs) // 2]
         hi = [r for v, r in vals if v > med]
         lo = [r for v, r in vals if v <= med]
-        out.append({"signal": name, "median": med, "above": _bucket(hi), "at_or_below": _bucket(lo)})
+        split = "above"
+        if not hi:
+            # the median is also the largest value (9 Oct: dev_sold_pct_of_bought, most devs had sold
+            # 100%), so "above" is empty: compare the tokens at that value with the ones below it
+            hi = [r for v, r in vals if v >= med]
+            lo = [r for v, r in vals if v < med]
+            split = "at"
+        out.append({"signal": name, "median": med, "split": split, "above": _bucket(hi), "at_or_below": _bucket(lo)})
     return out
+
+
+def _finite(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and math.isfinite(v) else None
+
+
+def _open_row(p: dict, s: Settings) -> dict:
+    """An open position plus what its sales so far realized: the proceeds minus the cost of the share
+    of tokens sold. A runner has banked its take-profit and core sales while it stays open for days
+    (9 Oct: #862 had banked about 0.12 SOL that no closed-trade figure counted)."""
+    row = {"id": p["id"], "mint": p["mint"], "status": p["status"], "size_usd": p["size_usd"],
+           "entry_price": p["entry_price"], "last_price": p["last_price"], "runner": bool(p.get("runner_active"))}
+    cost, init = _finite(p.get("cost_sol")), _finite(p.get("tokens_initial"))
+    rem, last = _finite(p.get("tokens_remaining")), _finite(p.get("last_price"))
+    if p["status"] != "open" or not cost or cost <= 0 or not init or init <= 0 or rem is None or not 0 <= rem < init:
+        return row
+    sold = 1 - rem / init
+    got = _finite(p.get("proceeds_sol")) or 0.0
+    banked = got - cost * sold
+    rate = _finite(p.get("sol_usd_entry"))
+    row.update({"sold_share": sold, "proceeds_sol": got, "banked_sol": banked,
+                "banked_usd": banked * rate if rate and rate > 0 else None,
+                "held_sol": mark_to_market(rem, last, s) if last and last > 0 else None})
+    return row
+
+
+def _open_banked(rows: list[dict]) -> dict | None:
+    banked = [r for r in rows if "banked_sol" in r]
+    if not banked:
+        return None
+    usd = [r["banked_usd"] for r in banked]
+    return {"n": len(banked), "sol": math.fsum(r["banked_sol"] for r in banked),
+            "usd": math.fsum(usd) if all(u is not None for u in usd) else None}
 
 
 async def build_report(db: Database, s: Settings, day: str | None = None) -> dict:
@@ -219,7 +260,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     closed_day = [p for p in closed if day_start <= (p["closed_at"] or 0) < day_end]
     opening_equity = s.BANKROLL_USD + math.fsum(p["pnl_usd"] for p in closed
                                                if p["closed_at"] is not None and p["closed_at"] < day_start)
-    shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd FROM positions WHERE kind='shadow' "
+    shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd, exit_reason FROM positions WHERE kind='shadow' "
                                         "AND status='closed' AND id NOT IN (" + SPIKED_SHADOWS_SQL + ") "
                                         "ORDER BY closed_at, id")
     shadows = [p for p in shadows_recorded if all(isinstance(p[k], (int, float)) and math.isfinite(p[k])
@@ -259,6 +300,10 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     exit_reasons: dict[str, int] = {}
     for p in closed:
         exit_reasons[p["exit_reason"] or "?"] = exit_reasons.get(p["exit_reason"] or "?", 0) + 1
+    shadow_exits: dict[str, int] = {}
+    for p in shadows:
+        shadow_exits[p["exit_reason"] or "?"] = shadow_exits.get(p["exit_reason"] or "?", 0) + 1
+    open_rows = [_open_row(p, s) for p in open_pos]
     return {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
         "mode": s.MODE,
@@ -281,9 +326,9 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "funnel_day": funnel,
         "spend": spend,
         "exit_reasons": exit_reasons,
-        "open_positions": [{"id": p["id"], "mint": p["mint"], "status": p["status"], "size_usd": p["size_usd"],
-                            "entry_price": p["entry_price"], "last_price": p["last_price"],
-                            "runner": bool(p.get("runner_active"))} for p in open_pos],
+        "shadow_exit_reasons": dict(sorted(shadow_exits.items(), key=lambda kv: -kv[1])),
+        "open_positions": open_rows,
+        "open_banked": _open_banked(open_rows),
         "trades": [{"id": p["id"], "mint": p["mint"], "opened": _iso(p["opened_at"]), "closed": _iso(p["closed_at"]),
                     "size_usd": p["size_usd"], "exit": p["exit_reason"], "pnl_sol": p["pnl_sol"],
                     "pnl_usd": p["pnl_usd"]} for p in closed],
@@ -343,6 +388,14 @@ def _f(v, fmt="{:.2f}", none="n/a"):
 
 def render_text(r: dict) -> str:
     m = r["all_time"]
+    banked = []
+    ob = r.get("open_banked")
+    if ob:
+        usd = f"  /  ${ob['usd']:+.2f}" if ob["usd"] is not None else ""
+        both = f"  /  ${m['pnl_usd'] + ob['usd']:+.2f}" if ob["usd"] is not None else ""
+        banked = [f"+ open positions' sales {ob['sol']:+.4f} SOL{usd}  (proceeds minus the cost of the tokens "
+                  f"sold, {ob['n']} position{'s' if ob['n'] != 1 else ''}; dollars at the buy's SOL price)",
+                  f"= realized so far   {m['pnl_sol'] + ob['sol']:+.4f} SOL{both}"]
     lines = [
         f"meme-agents report ({r['mode']} mode), generated {r['generated_at']}",
         "",
@@ -355,6 +408,7 @@ def render_text(r: dict) -> str:
         f"max drawdown      ${_f(m['max_drawdown_usd'])}  ({_f(m['max_drawdown_pct'], '{:.1f}')}%) "
         "[closed-trade realized equity]",
         f"PnL               {m['pnl_sol']:+.4f} SOL  /  ${m['pnl_usd']:+.2f}",
+        *banked,
         "",
         f"== Day {r['day']} ==",
         f"closed {r['day_metrics']['closed_trades']}, PnL ${r['day_metrics']['pnl_usd']:+.2f}  | funnel: "
@@ -398,9 +452,12 @@ def render_text(r: dict) -> str:
                      f"{_f(g['win_rate'], '{:.0%}'):>6s} {_f(g['avg_return'], '{:+.1%}'):>8s} {g['pnl_usd']:>+8.2f}")
     if r["signals"]:
         lines += ["", "== Signal check: shadow outcomes above vs at/below each feature's median =="]
+        if any(sg.get("split") == "at" for sg in r["signals"]):
+            lines.append("(\"at\" where the median is also the top value: the tokens at it vs the ones below)")
         for sg in r["signals"]:
             a, b = sg["above"], sg["at_or_below"]
-            lines.append(f"{sg['signal']:26s} median {sg['median']:<9.4g} above: n {a['n']:>3d} win "
+            at = sg.get("split") == "at"
+            lines.append(f"{sg['signal']:26s} median {sg['median']:<9.4g} {'at' if at else 'above'}: n {a['n']:>3d} win "
                          f"{_f(a['win_rate'], '{:.0%}'):>4s} ret {_f(a['avg_return'], '{:+.1%}'):>7s}  |  "
                          f"below: n {b['n']:>3d} win {_f(b['win_rate'], '{:.0%}'):>4s} "
                          f"ret {_f(b['avg_return'], '{:+.1%}'):>7s}")
@@ -427,11 +484,21 @@ def render_text(r: dict) -> str:
         lines += [_row(x) for x in ex["best"]]
         lines.append("  worst:")
         lines += [_row(x) for x in ex["worst"]]
+    if r.get("shadow_exit_reasons"):
+        lines.append("shadow exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["shadow_exit_reasons"].items()))
     if r["exit_reasons"]:
-        lines.append("exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
+        lines.append("real trades' exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
     if r["open_positions"]:
-        lines += ["", "== Open =="] + [f"#{p['id']} {p['mint']} {p['status']} ${_f(p['size_usd'])}"
-                                       + (" (runner)" if p.get("runner") else "") for p in r["open_positions"]]
+        lines += ["", "== Open =="]
+        for p in r["open_positions"]:
+            row = f"#{p['id']} {p['mint']} {p['status']} ${_f(p['size_usd'])}" + (" (runner)" if p.get("runner") else "")
+            if "banked_sol" in p:
+                usd = f" (${p['banked_usd']:+.2f})" if p.get("banked_usd") is not None else ""
+                held = (f", the {1 - p['sold_share']:.0%} still held is worth {p['held_sol']:.4f} SOL now"
+                        if p.get("held_sol") is not None else "")
+                row += (f"\n    sold {p['sold_share']:.0%} of the tokens for {p['proceeds_sol']:.4f} SOL: "
+                        f"banked {p['banked_sol']:+.4f} SOL{usd}{held}")
+            lines.append(row)
     if r["trades"]:
         lines += ["", "== Closed trades =="]
         for t in r["trades"][-30:]:
