@@ -675,18 +675,26 @@ class PositionManager:
         if sig:
             await self._exit(p, sig.fraction, price, ts, sig.reason)
 
-    async def insider_exit(self, position_id: int, note: str) -> bool:
+    async def insider_exit(self, position_id: int, note: str) -> bool | None:
         """InsiderWatch with INSIDER_EXIT=true: the coin's insiders have sold enough since the buy, so
         the position sells as an emergency. A runner (its cost already covered) keeps riding, as it
-        does through a stop loss; an emergency or kill switch already queued is left alone."""
+        does through a stop loss; an emergency, the kill switch or another full sale already queued
+        is left alone. True: the insider sale is queued (or done). False: nothing to do. None: the buy
+        is not settled yet, ask again later. The sale is queued before anything is written, so a
+        failed write never keeps it from happening."""
         async with self.lock:
             p = self.positions.get(position_id)
             if (p is None or p.status != "open" or p.runner_active
                     or (p.pending_exit or "").startswith("emergency") or p.pending_exit == "kill_switch"):
                 return False
-            log.warning("INSIDER EXIT #%d %s: %s", p.id, p.mint, note)
-            await self.db.event("insider_exit", {"position": p.id, "mint": p.mint, "note": note}, now_s())
+            if p.id in self._entry_uncertain:
+                return None
             await self.queue_exit(p, "emergency_insider_sell")
+            if "emergency_insider_sell" not in (p.pending_exit, p.exit_reason):
+                log.info("insider sell on #%d %s: already selling (%s): %s", p.id, p.mint, p.pending_exit, note)
+                return False
+            log.warning("INSIDER EXIT #%d %s: %s", p.id, p.mint, note)
+            await self._event("insider_exit", p, now_s(), {"note": note})
         if p.kind == "real" and self.notify:
             self._say(f"🚨 INSIDER SELL {await self._symbol(p.mint)} #{p.id}: {note}. Selling now\n{p.mint}")
         return True

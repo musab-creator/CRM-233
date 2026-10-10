@@ -110,6 +110,16 @@ def encode_curve(c: Curve) -> bytes:
     return out
 
 
+def bonding_curve_key(mint: str) -> str | None:
+    """The bonding-curve account of a pump.fun mint: the program address from the seeds
+    ("bonding-curve", mint). None for a string that is not a public key."""
+    try:
+        return str(Pubkey.find_program_address([b"bonding-curve", bytes(Pubkey.from_string(mint))],
+                                               Pubkey.from_string(PUMP_PROGRAM))[0])
+    except (ValueError, TypeError):
+        return None
+
+
 def _account_keys(tx: dict) -> list[str]:
     """Static keys then address-table keys (writable, readonly): the order balances use."""
     msg = (tx.get("transaction") or {}).get("message") or {}

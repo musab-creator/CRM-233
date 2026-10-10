@@ -91,6 +91,9 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
             assert any("early" in roles for roles in mine) and any("top" in roles for roles in mine)
         else:
             assert "distinct_buyers_ex_dev" in flow and flow["trades"] > 0
+            # from the streamed launch minute: the creator and the launch buyers (no holder snapshot here)
+            mine = [i["roles"] for i in r["insiders"] if i["candidate_id"] == c["id"]]
+            assert any("early" in roles for roles in mine) and not any("top" in roles for roles in mine)
     if stream == "off":
         assert eng.ingest.stats["curve_reads"] > 0 and eng.ingest.stats["stream_trades"] == 0
         assert int(r["credits"]) > 0  # Helius credits are metered and persisted

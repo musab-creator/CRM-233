@@ -142,13 +142,16 @@ CREATE TABLE IF NOT EXISTS insiders (
     PRIMARY KEY (candidate_id, wallet)
 );
 CREATE INDEX IF NOT EXISTS ix_insiders_wallet ON insiders(wallet);
--- positions whose coin's trades were streamed, and every insider sale after their entry
+-- positions whose coin's trades were streamed (from when a subscription covering them was confirmed),
+-- and every insider trade after their entry; cum_supply_pct = the insiders' net sales since entry
 CREATE TABLE IF NOT EXISTS insider_watch (position_id INTEGER PRIMARY KEY, mint TEXT, kind TEXT, started_at REAL);
-CREATE TABLE IF NOT EXISTS insider_sells (
-    id INTEGER PRIMARY KEY, position_id INTEGER, mint TEXT, ts REAL, wallet TEXT, roles TEXT,
+CREATE TABLE IF NOT EXISTS insider_trades (
+    id INTEGER PRIMARY KEY, position_id INTEGER, mint TEXT, ts REAL, side TEXT, wallet TEXT, roles TEXT,
     tokens REAL, sol REAL, price REAL, cum_supply_pct REAL, signature TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_insider_sells_pos ON insider_sells(position_id, ts);
+CREATE INDEX IF NOT EXISTS ix_insider_trades_pos ON insider_trades(position_id, ts);
+CREATE INDEX IF NOT EXISTS ix_insider_trades_sig ON insider_trades(position_id, signature, wallet);
+CREATE INDEX IF NOT EXISTS ix_fills_pos ON fills(position_id, side, ts);
 """
 
 # Columns added after the first release: (table, column, type). Applied with ALTER TABLE when
