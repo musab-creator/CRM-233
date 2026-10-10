@@ -130,15 +130,16 @@ def test_triage_no_longer_skips_on_the_creator_selling_alone():
     assert "`early_buyer_retention` below 0.4 by itself" in weak                 # ... to a weak signal
     assert "the creator selling, even all of the launch buy" in weak
     assert "`net_flow_sol_5m` is negative (net outflow) after a positive" in hard
-    assert "did not do worse than the rest" in ANALYST                          # on-chain glossary
+    assert "returned about the same on average as the rest" in ANALYST           # on-chain glossary
     assert "cashing out" not in SCOUT and "cashing out" not in HUNTER and "cashing out" not in ANALYST
 
 
 def test_the_analyst_weighs_the_flow_fields_by_the_recorded_outcomes():
-    """9 Oct signal check: launch buyers still holding (retention above the 0.1 median) won 26% against
-    16%; a bigger 5-minute inflow did not help (16% against 20%)."""
+    """10 Oct signal check (909 tokens): launch buyers still holding (retention above the 0.1 median) won
+    24% against 19%; a bigger 5-minute inflow did not help (18% against 19%, -37% against -33%)."""
     for prompt in (ROLE_PROMPTS["analyst"], NEUTRAL_PROMPTS["analyst"]):
-        assert "above 0.1, 26% of the tokens were winners with an average return of -26%" in prompt
+        assert "(909 tokens) those above 0.1 were winners 24% of the time with an average return of -31%" in prompt
+        assert "26%" not in prompt and "better than any other flow field" not in prompt   # the 9 Oct overstatement
         assert "Low retention alone is not a red flag." in prompt
         assert "a large inflow is not positive evidence by itself" in prompt
         assert "below 0.4 means most early buyers already exited" not in prompt

@@ -53,9 +53,10 @@ and cap your confidence at 0.7: a catalyst could have been posted where you cann
 news feed still counts as a source.
 """
 
-# The outcome figures in the glossary are the 9 Oct /report signal check (closed shadows of every
-# evaluated candidate): early_buyer_retention n 152 above its median / 185 at or below,
-# net_flow_sol_5m 109 / 111, drawdown_from_peak_pct 188 / 190. Refresh them from /report as they drift.
+# The outcome figures in the glossary are the 10 Oct 00:12 UTC /report signal check (closed shadows of
+# every evaluated candidate): early_buyer_retention n 360 above its median / 549 at or below,
+# dev_sold_pct_of_bought 579 at 100 / 281 below, net_flow_sol_5m 250 / 252, drawdown_from_peak_pct
+# 494 / 495. The 9 Oct figures (337 tokens) overstated the retention edge. Refresh them from /report.
 ANALYST_BODY = """
 Your role: Analyst (البروفيسور), on-chain and market structure.
 Check:
@@ -78,20 +79,22 @@ It is worse if `snipers_still_holding` shows they are still in, because they can
 more suggests one actor split buys across wallets.
 - `early_buyer_retention` is the share of the first 20 buyers (creator excluded) still holding at \
 least a tenth of what they bought. Launch-minute buyers flip within minutes as a matter of routine, so \
-most values are low (0.1 is the median over the tokens this bot evaluated), yet in the recorded outcomes \
-it separated winners from losers better than any other flow field: above 0.1, 26% of the tokens were \
-winners with an average return of -26%; at 0.1 or below, 16% with -38%. Retention above 0.1 is positive \
-evidence a confident BUY can rest on; at 0.1 or below a confident BUY needs clearly strong evidence \
-elsewhere. Low retention alone is not a red flag.
+most values are low (0.1 is the median over the tokens this bot evaluated). In the recorded outcomes \
+(909 tokens) those above 0.1 were winners 24% of the time with an average return of -31%, against 19% and \
+-35% at 0.1 or below: a modest edge, one of the clearer ones among the flow fields. Retention above 0.1 is \
+positive evidence a confident BUY can rest on; at 0.1 or below a confident BUY needs clearly strong \
+evidence elsewhere. Low retention alone is not a red flag.
 - `dev_sold_pct_of_bought` above 50 means the creator has cashed out of the launch buy. That too is \
-routine on pump.fun and in the recorded outcomes such tokens did not do worse than the rest, so it adds \
-nothing to a sniper, bundling or holder-base concern: judge those on their own numbers.
+routine on pump.fun, and in the recorded outcomes such tokens returned about the same on average as the \
+rest (-33% against -34%, winners 20% of the time against 24%), so it adds little to a sniper, bundling or \
+holder-base concern: judge those on their own numbers.
 - `effective_buyers` or `effective_holders` below 10 means ownership is concentrated, even \
 if there are many wallets.
 - Compare `net_flow_sol_5m` with `net_flow_sol_prev_5m` for momentum, but a large inflow is not \
-positive evidence by itself: in the recorded outcomes, tokens above the median 5-minute net inflow (16 \
-SOL) were winners 16% of the time, against 20% below it. Tokens already more than 8.5% under their peak \
-(`drawdown_from_peak_pct`) were winners 18% of the time, against 24% nearer their high, and a large \
+positive evidence by itself: in the recorded outcomes, tokens above the median 5-minute net inflow (14 \
+SOL) were winners 18% of the time with an average return of -37%, against 19% and -33% below it. Tokens \
+already more than about 11% under their peak (`drawdown_from_peak_pct`) were winners 18% of the time, \
+against 24% nearer their high, and a large \
 drawdown means the move may be over.
 - `mayhem_mode` true means the creator opted into pump.fun's Mayhem Mode: pump.fun's own AI \
 agent holds extra minted supply and trades the token for its first 24 hours, so early volume, \
@@ -140,8 +143,8 @@ pump is over; you would buy into the dump);
 - a name or symbol that is a plain copy of a major coin with nothing else to it, plus no website or socials.
 
 Weak signals (never enough alone for PASS): the creator selling, even all of the launch buy \
-(`dev_sold_pct_of_bought` 100): most tokens here show it, and in the recorded outcomes those did no worse than \
-the rest (22% winners against 23%, and smaller average losses), so it neither makes nor strengthens a red \
+(`dev_sold_pct_of_bought` 100): most tokens here show it, and in the recorded outcomes those returned about the \
+same on average as the rest (-33% against -34%, 20% winners against 24%), so it neither makes nor strengthens a red \
 flag; judge the sniper and bundling flags on their own numbers. Also weak: \
 `early_buyer_retention` below 0.4 by itself (early buyers flipping is routine), barely clearing a \
 pre-filter threshold, a paid DexScreener boost, `mayhem_mode` true (pump.fun's own agent trades the token \
