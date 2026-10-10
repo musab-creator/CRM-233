@@ -17,7 +17,11 @@ def utc_midnight(ts: float) -> float:
 
 
 class RiskManager:
-    """Max open positions, one position per creator wallet, daily loss cap (pauses until restart)."""
+    """Max open positions, one position per creator wallet, daily loss cap (pauses until a reset).
+
+    The cap counts realized losses since UTC midnight, or since the last reset of the loss window
+    that day: a clean stop and start (/restart reset, or a restart on the server) resets it; a crash
+    restart and every other restart from the phone (/update, /restart, a /set) keep it."""
 
     def __init__(self, settings: Settings, started_at: float, db=None):
         self.s = settings
@@ -26,7 +30,8 @@ class RiskManager:
         self.db = db
 
     async def startup(self) -> None:
-        """An automatic crash restart must not clear the operator's loss pause."""
+        """A crash restart, or a phone restart that marked itself (bot/ops.py keep_pause), keeps the
+        previous run's loss window and a daily-loss pause: neither may hand the bot a fresh cap."""
         if self.db is None:
             return
         raw = await self.db.kv_get(f"risk_state:{self.s.MODE}")

@@ -457,6 +457,7 @@ def test_phone_commands_queue_for_the_ops_service(tmp_path, _isolated):
     assert PANEL[2][2][1] == "confirm:stop"
     assert sent[2]["text"].startswith("/update:") and sent[2]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "update"
     assert sent[3]["text"].startswith("queued: update.") and "pause" not in sent[3]["text"]
+    assert "Losses so far today keep counting toward the daily loss cap (/restart reset starts over)" in sent[3]["text"]
     assert sent[4]["text"].startswith("/set KEY=VALUE") and "POSITION_MAX_USD=10.0  (1 to 20)" in sent[4]["text"]
     assert "Not from the phone: MODE, LIVE_CONFIRM" in sent[4]["text"]
     assert sent[5]["text"].startswith("queued: set POSITION_MAX_USD=15.")
@@ -468,6 +469,7 @@ def test_phone_commands_queue_for_the_ops_service(tmp_path, _isolated):
     assert sent[11]["text"] == "MODE=paper: nothing is ever sent. /dryrun applies to live mode only"
     assert sent[12]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "dryrun on" and CONFIRM["dryrun"] == "dryrun on"
     assert sent[13]["text"].startswith("queued: restart.") and "pause" not in sent[13]["text"]
+    assert "Losses so far today keep counting toward the daily loss cap" in sent[13]["text"]
     assert sent[14]["text"].startswith("ops service: running") and "queued: 3" in sent[14]["text"]
     assert "· update" in sent[14]["text"] and "· set POSITION_MAX_USD=15" in sent[14]["text"] and "· restart" in sent[14]["text"]
     assert sent[15]["text"] == sent[14]["text"]
@@ -478,7 +480,8 @@ def test_phone_commands_queue_for_the_ops_service(tmp_path, _isolated):
     queued = ops.pending(s)
     assert [(r["action"], r["args"]) for r in queued] == [
         ("update", {}), ("set", {"key": "POSITION_MAX_USD", "value": "15", "restart": False}), ("restart", {})]
-    assert all(r["from"] == "telegram" and r["keep_pause"] is False for r in queued)
+    # an /update or /restart keeps the day's loss window even when not paused; a /set alone restarts nothing
+    assert [r["keep_pause"] for r in queued] == [True, False, True] and all(r["from"] == "telegram" for r in queued)
 
 
 def test_dryrun_on_in_live_mode_refuses_while_positions_are_open(tmp_path, _isolated):
@@ -717,6 +720,41 @@ def test_engine_keeps_the_loss_cap_pause_when_the_marker_is_set(tmp_path):
     assert state["clean_stop"] is False and state["paused_reason"] == reason and not marker_left
     state, _ = asyncio.run(seed_and_run(marker=False))
     assert state["clean_stop"] is True
+
+
+def test_a_loss_from_before_a_phone_restart_still_counts_toward_the_daily_cap(tmp_path, _isolated):
+    """10 Oct: a phone /update while the bot was not paused started the daily loss count over, so
+    every deploy or /set handed the bot a fresh cap. A phone restart keeps the window (the marker
+    makes its stop unclean, as for a paused bot); only /restart reset, a clean stop, starts it over."""
+    import json as _json
+
+    from bot.risk import utc_midnight
+    from bot.sim import SIM_OVERRIDES, build_sim_engine
+    base = dict(SIM_OVERRIDES, DB_PATH=str(tmp_path / "e.db"), LOG_FILE="", STOP_FILE=str(tmp_path / "STOP"),
+                REPORTS_DIR=str(tmp_path / "rep"), BANKROLL_USD="50", DAILY_LOSS_CAP_PCT="50")   # a $25 cap
+    now = now_s()
+    began = utc_midnight(now) + (now - utc_midnight(now)) / 2        # the old run's start: today, before now
+    closed = began + (now - began) / 2
+
+    async def seed_and_start(clean_stop: bool):
+        db = await Database(base["DB_PATH"]).open()
+        try:
+            await db.kv_set("risk_state:paper", _json.dumps({"started_at": began, "paused_reason": None,
+                                                             "clean_stop": clean_stop}))
+            if not await db.fetchone("SELECT 1 FROM positions WHERE mint='LOSS'"):
+                await db.insert("positions", {"mint": "LOSS", "kind": "real", "mode": "paper", "status": "closed",
+                                              "opened_at": began, "closed_at": closed, "cost_sol": 0.2,
+                                              "pnl_usd": -30.0, "pnl_sol": -0.2, "exit_reason": "stop_loss"})
+        finally:
+            await db.close()
+        eng = build_sim_engine(load_settings(overrides=base), 1)
+        await eng.run(0.3)
+        return eng.risk
+
+    risk = asyncio.run(seed_and_start(clean_stop=False))      # what a phone /update's marker leaves
+    assert risk.started_at == began and str(risk.paused_reason).startswith("daily loss cap hit: -30.00 USD")
+    risk = asyncio.run(seed_and_start(clean_stop=True))       # /restart reset (or a restart on the server)
+    assert risk.started_at > now and risk.paused_reason is None
 
 
 def test_dry_run_executor_reads_the_receipt_of_a_pending_real_transaction(tmp_path):

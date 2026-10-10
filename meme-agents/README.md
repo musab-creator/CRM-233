@@ -208,8 +208,9 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 7. **Risk.**
    - at most 3 open positions
    - at most 1 position per creator wallet
-   - a daily loss cap of 50% of the bankroll pauses entries until you restart the bot (a restart from
-     the phone keeps the pause; `/restart reset` ends it)
+   - a daily loss cap of 50% of the bankroll pauses entries until you reset it: realized losses count
+     from UTC midnight or the day's last reset, and a restart from the phone (`/update`, `/restart`,
+     a `/set`) keeps both the count and the pause; `/restart reset` ends the pause and starts over
    - entries are refused when the bankroll can't fund them
 
 Every evaluated candidate also gets a **shadow position**: a $5 paper position with no bankroll
@@ -274,7 +275,8 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   rules as `.env` would load afterwards, `.env` is backed up first, and a value the bot will not
   start on is put back (that one key; never `LIVE_DRY_RUN`) and the bot restarted again, so the
   phone cannot lock itself out. A
-  restart from the phone keeps a daily-loss pause (`/restart reset` ends it); `/dryrun on` is
+  restart from the phone keeps the day's loss count and a daily-loss pause (`/restart reset` ends
+  both); `/dryrun on` is
   refused while live positions are open (`/dryrun on force` overrides). Requests run one at a
   time and wait behind an update; one the service only finds 10 minutes after it was made is
   refused; one found half-done after the service's own restart is reported rather than run

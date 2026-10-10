@@ -268,7 +268,8 @@ def _read_json(path: Path) -> dict | None:
 def request(s: Settings, action: str, args: dict | None = None, who: str = "telegram",
             keep_pause: bool = False) -> dict:
     """Queue one action for the watcher. Returns the request as written. `keep_pause` asks the
-    watcher to mark the restart this causes so it does not end a daily-loss pause (bot/engine.py)."""
+    watcher to mark the restart this causes so it keeps the day's loss window and any daily-loss
+    pause (bot/engine.py, bot/risk.py): every phone restart but /restart reset asks for it."""
     args = validate(action, args, current_settings(s))
     d = ops_dir(s)
     d.mkdir(parents=True, exist_ok=True)

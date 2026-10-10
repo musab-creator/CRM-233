@@ -218,13 +218,19 @@ class TelegramCommands:
                           "environment (a few minutes), then restarts the bot. The result arrives here",
                 "restart": "the service restarts; open positions are kept and resumed. The result arrives here",
             }[name]
+            # Every restart from the phone keeps the day's loss window (and a daily-loss pause): an
+            # /update or a /set must not hand the bot a fresh daily loss cap. /restart reset starts it over.
             reset = arg.lower() == "reset"
             paused = self._loss_cap_paused()
             if paused and reset:
                 note += ". This ends the daily-loss pause and restarts the loss window"
             elif paused:
                 note += ". The daily-loss pause is kept across this restart (/restart reset would end it)"
-            return self._queue(name, {}, note, keep_pause=paused and not reset)
+            elif reset:
+                note += ". This restarts the loss window: losses so far today stop counting toward the daily cap"
+            else:
+                note += ". Losses so far today keep counting toward the daily loss cap (/restart reset starts over)"
+            return self._queue(name, {}, note, keep_pause=not reset)
         if name == "set":
             if not arg:
                 return settable_text(self.s), None
@@ -258,7 +264,7 @@ class TelegramCommands:
             note = ("LIVE_DRY_RUN=true is written and the bot restarts without real sends"
                     + (f"; {len(held)} open position(s) will be closed in paper, tokens stay in the wallet" if held else "")
                     + (". The daily-loss pause is kept" if paused else ""))
-            return self._queue("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True}, note, keep_pause=paused)
+            return self._queue("set", {"key": "LIVE_DRY_RUN", "value": "true", "restart": True}, note, keep_pause=True)
         if name == "ops":
             return format_queue(self.s), None
         return f"unknown command /{name}. /help lists them", None

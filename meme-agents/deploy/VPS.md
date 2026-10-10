@@ -159,7 +159,7 @@ set. The fix is always the same: `bash deploy/update.sh && bash deploy/install.s
 | In the chat | What happens on the server |
 |---|---|
 | `/update` (or the Update button) | `bash deploy/update.sh`: fetches the branch the server tracks, builds and tests it in a separate environment (a few minutes), then restarts the bot. Nothing changes if the tests fail. The result, including "already on the latest code", comes back as a message. |
-| `/restart` | `sudo -n systemctl restart meme-agents`. Open positions are kept and resumed. A daily-loss pause survives a restart from the phone; `/restart reset` is the one that ends it and starts a new loss window. |
+| `/restart` | `sudo -n systemctl restart meme-agents`. Open positions are kept and resumed. The day's loss count and a daily-loss pause survive a restart from the phone (`/update`, `/restart`, a `/set`); `/restart reset` is the one that ends the pause and starts a new loss window. |
 | `/set KEY=VALUE` | `bash deploy/set-env.sh KEY=VALUE`, then a **Restart now** button (it asks to confirm) to apply it. `/set` alone lists every key you can change, its running value, its limits, and a value already waiting in `.env`; for example `POSITION_MAX_USD` 1 to 20, `BANKROLL_USD` 1 to 500, `LLM_DAILY_BUDGET_USD` 0 to 150, `CONSENSUS_MIN_MEAN_CONFIDENCE` 0.65 to 1. A value the bot's own rules reject (a minimum above its maximum) is refused before anything is written. |
 | `/dryrun on` | Writes `LIVE_DRY_RUN=true` and restarts: live mode keeps running but sends nothing. One way only. It is refused while live positions are open, because after the restart they would be closed in paper with the tokens still in the wallet: `/stop`, wait until `/status` shows no open positions, then `/dryrun on`. `/dryrun on force` switches anyway. |
 | `/ops` | Is the service running, what is queued, the last five results. |
@@ -235,8 +235,9 @@ Updates are serialized and fast-forward only. Local tracked edits or commits are
 preserved and stop deployment with an error. If the systemd template changes, stop the
 service, run `bash deploy/install.sh --systemd`, then start it to install the new unit.
 
-A daily-loss pause survives an unclean crash or watchdog restart. To deliberately reset
-its baseline, stop the service cleanly and start it again.
+A daily-loss pause and the day's loss count survive an unclean crash or watchdog restart, and
+every restart from the phone except `/restart reset`. To deliberately reset the baseline, send
+`/restart reset`, or stop the service cleanly on the server and start it again.
 
 ## Everyday commands
 

@@ -1001,8 +1001,10 @@ class Engine:
             self.stop.set()
             await asyncio.gather(*tasks, return_exceptions=True)
             if clean_stop and consume_keep_pause(self.s):
-                # a restart queued from Telegram while the daily-loss pause is on: the pause survives it
-                log.warning("restart from Telegram keeps the daily-loss pause and its loss window")
+                # a restart queued from Telegram (not /restart reset): the day's loss window survives it,
+                # and so does a daily-loss pause
+                log.warning("restart from Telegram keeps the daily loss window%s",
+                            " and the daily-loss pause" if self.risk.paused_reason else "")
                 clean_stop = False
             await self.shutdown(clean_stop=clean_stop)
 
