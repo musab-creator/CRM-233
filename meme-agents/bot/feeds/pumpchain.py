@@ -245,11 +245,13 @@ class HeliusChain:
         return holder_snapshot(rows, curve_key, creator, complete)
 
     async def early_trades(self, mint: str, curve_key: str, window_s: float = 60.0, max_tx: int = 80,
-                           max_pages: int = 10) -> dict:
+                           max_pages: int = 10, concurrency: int | None = None) -> dict:
         """Trades in the first `window_s` seconds after launch (at most `max_tx` transactions).
 
         Signatures come newest first, 1,000 per call (1 credit). Paging back to the launch stops
-        after `max_pages`; `reached_launch` says whether it got there.
+        after `max_pages`; `reached_launch` says whether it got there. `concurrency` caps the
+        transaction reads in flight, so a background reader never queues dozens of calls ahead of
+        the position price reads on the shared rate limiter.
         """
         sigs: list[dict] = []
         before = None
@@ -274,9 +276,16 @@ class HeliusChain:
             return {"trades": [], "reached_launch": reached, "transactions": 0}
         t0 = ok[0].get("blockTime") or 0
         pick = [x for x in ok if (x.get("blockTime") or t0) - t0 <= window_s][:max_tx] if reached else []
-        txs = await asyncio.gather(*[self.h.rpc("getTransaction", [x["signature"], {
-            "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]) for x in pick],
-            return_exceptions=True)
+        gate = asyncio.Semaphore(concurrency) if concurrency else None
+
+        async def read(sig: str):
+            if gate is None:
+                return await self.h.rpc("getTransaction", [sig, {
+                    "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}])
+            async with gate:
+                return await self.h.rpc("getTransaction", [sig, {
+                    "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}])
+        txs = await asyncio.gather(*[read(x["signature"]) for x in pick], return_exceptions=True)
         trades: list[dict] = []
         for seq, tx in enumerate(txs):  # seq: block order, the tiebreaker inside a slot
             if isinstance(tx, dict):

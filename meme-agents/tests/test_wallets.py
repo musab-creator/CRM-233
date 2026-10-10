@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -133,15 +134,17 @@ class FakeChain:
     def __init__(self, results):
         self.results, self.calls = results, []
 
-    async def early_trades(self, mint, curve, window_s, max_tx, max_pages=10):
-        self.calls.append((mint, curve, max_pages))
+    async def early_trades(self, mint, curve, window_s, max_tx, max_pages=10, concurrency=None):
+        self.calls.append((mint, curve, max_pages, concurrency))
         r = self.results[mint]
         if isinstance(r, Exception):
             raise r
         return r
 
 
-def test_past_coins_are_read_back_winners_first_and_failures_stop_after_three_tries(s):
+def test_past_coins_are_read_back_newest_first_and_failures_stop_after_three_tries(s):
+    """Newest first, never winners first: 12 Oct review, reading 2x coins first filled the walk-forward
+    with winners and showed 'smart' buyers at 58% wins against 21% in a world where wallets mean nothing."""
     async def go():
         db = await Database(s.DB_PATH).open()
         try:
@@ -150,72 +153,110 @@ def test_past_coins_are_read_back_winners_first_and_failures_stop_after_three_tr
             await _coin(db, "WIN", now - 40 * H, peak=5e-7, peak_at=now - 39 * H, wallets=())
             await _coin(db, "FAIL", now - 20 * H, wallets=())
             await _coin(db, "HAVE", now - 10 * H, wallets=("W9",))
-            await db.execute("UPDATE mints SET bonding_curve_key='CURVE_' || mint WHERE mint IN ('WIN','FAIL')")
+            cid = await _coin(db, "TOPONLY", now - 5 * H, wallets=())          # its launch minute failed live
+            await db.save_insiders(cid, "TOPONLY", {"DEV": {"roles": ["creator"], "tokens": 0.0},
+                                                    "WHALE": {"roles": ["top"], "tokens": 5e6}})
+            await db.execute("UPDATE mints SET bonding_curve_key='CURVE_' || mint WHERE mint IN ('WIN','FAIL','TOPONLY')")
             trades = [{"ts": 1, "slot": 5, "side": "buy", "trader": "DEV", "sol": 1.0},
                       {"ts": 1, "slot": 5, "side": "buy", "trader": "B1", "sol": 0.5},
                       {"ts": 2, "slot": 6, "side": "buy", "trader": "ME", "sol": 0.1},
                       {"ts": 3, "slot": 7, "side": "buy", "trader": "E1", "sol": 0.2}]
             chain = FakeChain({"WIN": {"trades": trades, "reached_launch": True},
+                               "TOPONLY": {"trades": trades, "reached_launch": True},
                                "So11111111111111111111111111111111111111112": {"trades": [], "reached_launch": False},
                                "FAIL": RuntimeError("timeout")})
             mem = WalletMemory(s, db, chain, exclude={"ME", None})
             await mem.load()
             await mem.refresh()
             order = [o["mint"] for o in reversed(mem._queue)]
-            got = [await mem.read_back_once() for _ in range(4)]
+            got = [await mem.read_back_once() for _ in range(5)]
             for _ in range(BACKFILL_ATTEMPTS):
                 await mem.refresh()
                 await mem.read_back_once()
             await mem.refresh()
-            rows = await db.fetchall("SELECT wallet, roles FROM insiders WHERE mint='WIN' ORDER BY wallet")
+            rows = await db.fetchall("SELECT wallet, roles, source FROM insiders WHERE mint='WIN' ORDER BY wallet")
+            top = await db.fetchall("SELECT wallet, roles, source FROM insiders WHERE mint='TOPONLY' ORDER BY wallet")
             back = {r["mint"]: (r["status"], r["attempts"]) for r in await db.fetchall("SELECT * FROM wallet_backfill")}
-            return order, got, rows, back, chain, mem
+            return order, got, rows, top, back, chain, mem
         finally:
             await db.close()
-    order, got, rows, back, chain, mem = asyncio.run(go())
-    assert order == ["WIN", "FAIL", "So11111111111111111111111111111111111111112"]   # 2x first, then newest
-    assert got == ["ok", "error", "empty", None]
-    assert [(r["wallet"], r["roles"]) for r in rows] == [("B1", "bundle,sniper,early"), ("DEV", "creator"),
-                                                         ("E1", "sniper,early")]          # never the bot's own
+    order, got, rows, top, back, chain, mem = asyncio.run(go())
+    assert order == ["TOPONLY", "FAIL", "So11111111111111111111111111111111111111112", "WIN"]
+    assert got == ["ok", "error", "empty", "ok", None]
+    assert [(r["wallet"], r["roles"], r["source"]) for r in rows] == [
+        ("B1", "bundle,sniper,early", "read_back"), ("DEV", "creator", "read_back"),
+        ("E1", "sniper,early", "read_back")]                                   # never the bot's own wallet
+    # rows recorded at evaluation are never replaced; the read-back only adds the launch buyers
+    assert [(r["wallet"], r["source"]) for r in top] == [("B1", "read_back"), ("DEV", None), ("E1", "read_back"),
+                                                         ("WHALE", None)]
     assert back["WIN"] == ("ok", 1) and back["FAIL"] == ("error", BACKFILL_ATTEMPTS)
     assert back["So11111111111111111111111111111111111111112"] == ("empty", 1)
-    assert [c[0] for c in chain.calls] == ["WIN", "FAIL", "So11111111111111111111111111111111111111112",
-                                           "FAIL", "FAIL"]
-    assert chain.calls[0] == ("WIN", "CURVE_WIN", 100)
-    assert chain.calls[2][1] == "6PiyjiAPkp2KdZtqkyQYzVsD1Prv7t8v4TaYd8ip4YFd"         # derived from the mint
-    assert "WIN" in mem.book.coins and mem._queue == []
+    assert [c[0] for c in chain.calls] == ["TOPONLY", "FAIL", "So11111111111111111111111111111111111111112",
+                                           "WIN", "FAIL", "FAIL"]
+    assert chain.calls[3] == ("WIN", "CURVE_WIN", 100, 3)                      # three reads in flight at most
+    assert chain.calls[2][1] == "6PiyjiAPkp2KdZtqkyQYzVsD1Prv7t8v4TaYd8ip4YFd"   # derived from the mint
+    assert {"WIN", "TOPONLY"} <= set(mem.book.coins) and mem._queue == []
 
 
 def test_the_walk_forward_scores_each_coin_on_what_was_known_then(s):
     """Wallets that bought early into coins that ran come back in more winners: the walk-forward
     shows it, without a coin's own outcome ever reaching its numbers."""
+    from bot.wallets import BURN_IN_S, HORIZON_S
+
     async def go():
         db = await Database(s.DB_PATH).open()
         try:
-            t0 = time.time() - 6 * 24 * H
+            now = time.time()
+            t0 = now - 6 * 24 * H
             for i in range(120):
                 t = t0 + i * H
                 good = i % 4 == 0
                 await _coin(db, f"M{i}", t, creator=f"D{i}", peak=(6e-7 if good else 1.1e-7), peak_at=t + H,
                             pnl=0.03 if good else -0.02,
                             wallets=(("S1", "S2", f"F{i}") if good else (f"F{i}", f"G{i}")))
-            rows = await walk_forward(db, s)
-            m = await wallet_summary(db, s)
-            return rows, m
+            return now, t0, await walk_forward(db, s, now), await wallet_summary(db, s)
         finally:
             await db.close()
-    rows, m = asyncio.run(go())
-    assert len(rows) == 120 - 24 and m["scored"] == len(rows)          # a day of burn-in
-    smart = next(c for c in feature_check(rows) if c["feature"] == "wm_launch_smart")
+    now, t0, wf, m = asyncio.run(go())
+    start = (t0 // 86400) * 86400
+    want = [i for i in range(120) if start + BURN_IN_S <= t0 + i * H <= now - HORIZON_S]
+    assert wf["covered_from"] == start and len(wf["rows"]) == len(want) > 40 and m["scored"] == len(want)
+    smart = next(c for c in feature_check(wf["rows"]) if c["feature"] == "wm_launch_smart")
     assert smart["split"] == "above" and smart["hi"]["x2_rate"] == 1.0 and smart["lo"]["x2_rate"] == 0.0
     assert smart["hi"]["win_rate"] == 1.0 and smart["lo"]["win_rate"] == 0.0
-    first_good = next(r for r in rows if r["x2"])
+    first_good = next(r for r in wf["rows"] if r["x2"])
     assert first_good["flow"]["wm_launch_known"] == 2              # S1 and S2, from earlier coins only
     text = "\n".join(wallet_lines(m))
     assert "== Wallet memory (launch buyers' and creators' records; the agents do not see these yet) ==" in text
     assert "coins with launch buyers: 120 of 120 evaluated in 14 days" in text
-    assert "walk-forward over 96 coins" in text and "wm_launch_smart" in text
+    assert f"walk-forward over {len(want)} coins from" in text and "wm_launch_smart" in text
+    assert "reached twice the bot's price within 24 hours" in text
     assert wallet_lines(None) == []
+
+
+def test_the_walk_forward_scores_only_fully_recorded_days(s):
+    """Coins whose launch buyers are missing (not read back yet, or not readable) are not random: if
+    only some days' winners were on record, their buyers would look smart. Days below COVERAGE_MIN are
+    left out of the replay and of the scores, from the newest such day back."""
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            now = time.time()
+            today = (now // 86400) * 86400
+            for day in range(1, 6):                          # five days back, 20 coins a day
+                for k in range(20):
+                    t = today - day * 86400 + k * 3600
+                    good = k % 5 == 0
+                    recorded = day <= 3 or good                 # days 4-5: only the winners were read back
+                    await _coin(db, f"D{day}K{k}", t, creator=f"C{day}{k}", peak=(5e-7 if good else 1.2e-7),
+                                peak_at=t + H, wallets=(("SAME",) if recorded else ()))
+            return today, await walk_forward(db, s, now)
+        finally:
+            await db.close()
+    today, wf = asyncio.run(go())
+    assert wf["covered_from"] == today - 3 * 86400                  # days 4 and 5 fall short of 90%
+    assert all(r["flow"]["wm_launch_serial"] <= 1 for r in wf["rows"])
+    assert wf["with_launch"] == 60 + 8 and wf["coins"] == 100
 
 
 def test_the_live_signal_check_includes_the_wallet_numbers(s):
@@ -240,12 +281,15 @@ def test_the_live_signal_check_includes_the_wallet_numbers(s):
 def test_the_launch_memory_settings_and_their_phone_bounds(s):
     validate_settings(s)
     assert (s.LAUNCH_MEMORY_DAYS, s.LAUNCH_BACKFILL_PER_MIN) == (7.0, 10.0)
-    for bad in ({"LAUNCH_MEMORY_DAYS": 31}, {"LAUNCH_MEMORY_DAYS": -1}, {"LAUNCH_BACKFILL_PER_MIN": 61}):
-        with pytest.raises(ConfigError):
+    for bad in ({"LAUNCH_MEMORY_DAYS": 15}, {"LAUNCH_MEMORY_DAYS": -1}, {"LAUNCH_MEMORY_DAYS": 0.2},
+                {"LAUNCH_BACKFILL_PER_MIN": 61}):
+        with pytest.raises(ConfigError):                 # under a day, coins would leave before being judged
             validate_settings(dataclasses.replace(s, **bad))
+    validate_settings(dataclasses.replace(s, LAUNCH_MEMORY_DAYS=0))
     assert validate_set("LAUNCH_MEMORY_DAYS", "0", s) == "0" and validate_set("LAUNCH_BACKFILL_PER_MIN", "30", s) == "30"
-    with pytest.raises(OpsError):
-        validate_set("LAUNCH_BACKFILL_PER_MIN", "61", s)
+    for key, raw in (("LAUNCH_BACKFILL_PER_MIN", "61"), ("LAUNCH_MEMORY_DAYS", "15"), ("LAUNCH_MEMORY_DAYS", "0.5")):
+        with pytest.raises(OpsError):
+            validate_set(key, raw, s)
 
 
 def test_launch_buyers_load_a_page_at_a_time_without_losing_any(s):
@@ -288,3 +332,118 @@ def test_a_book_that_cannot_load_retries_once_a_minute(s, monkeypatch):
             await db.close()
     asyncio.run(go())
     assert calls == [1]
+
+
+def test_a_coin_without_launch_buyers_gets_no_numbers_not_zeros(s):
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            mem = WalletMemory(s, db)
+            await mem.load()
+            return await mem.features("X", {"DEV": {"roles": ["creator"]}, "W": {"roles": ["top"]}}, "DEV")
+        finally:
+            await db.close()
+    assert asyncio.run(go()) is None                    # the launch minute could not be read: a gap, not zeros
+
+
+def test_new_coins_are_looked_at_once(s):
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            now = time.time()
+            mem = WalletMemory(s, db)
+            await mem.load()
+            await _coin(db, "A", now - 60, wallets=("W1",))
+            await _coin(db, "B", now - 50, wallets=())                     # no launch buyers on record
+            first = await mem.add_new()
+            calls = []
+            orig = db.fetchall
+
+            async def counting(sql, params=()):
+                calls.append(sql)
+                return await orig(sql, params)
+            db.fetchall = counting
+            second = await mem.add_new()
+            return first, second, calls, mem
+        finally:
+            await db.close()
+    first, second, calls, mem = asyncio.run(go())
+    assert (first, second) == (1, 0) and set(mem.book.coins) == {"A"}
+    assert len(calls) == 1 and "FROM insiders" not in calls[0]           # B is not looked up every minute
+
+
+def test_read_back_rows_stay_out_of_the_insider_watch(s):
+    from bot.insiders import InsiderWatch
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.save_insiders(7, "M", {"LIVE": {"roles": ["top"], "tokens": 1.0}})
+            await db.save_insiders(7, "M", {"BACK": {"roles": ["early"], "tokens": None},
+                                            "LIVE": {"roles": ["early"], "tokens": None}}, source="read_back")
+            w = InsiderWatch(s, db, SimpleNamespace(positions={}), lambda m: None)
+            return await w._insiders_of(7)
+        finally:
+            await db.close()
+    assert asyncio.run(go()) == {"LIVE": {"roles": ["top"], "tokens": 1.0}}
+
+
+def test_a_read_back_keeps_at_most_three_transaction_reads_in_flight():
+    from bot.feeds.pumpchain import HeliusChain
+
+    class Helius:
+        key = "k"
+
+        def __init__(self):
+            self.live = self.peak = 0
+
+        async def rpc(self, method, params):
+            if method == "getSignaturesForAddress":
+                return [{"signature": f"S{i}", "slot": i, "blockTime": 100 + i, "err": None} for i in range(20)]
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+            await asyncio.sleep(0.01)
+            self.live -= 1
+            return None
+
+    async def go():
+        h = Helius()
+        await HeliusChain(h).early_trades("M", "C", 60, 80, concurrency=3)
+        capped = h.peak
+        h.peak = 0
+        await HeliusChain(h).early_trades("M", "C", 60, 80)
+        return capped, h.peak
+    assert asyncio.run(go()) == (3, 20)                 # the live path keeps its parallel reads
+
+
+def test_read_backs_run_only_well_inside_the_months_helius_pace(s):
+    from bot.engine import Engine, month_fraction
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            from bot.budget import utc_month
+            eng = SimpleNamespace(db=db, s=dataclasses.replace(s, HELIUS_MONTHLY_CREDITS=1_000_000),
+                                  helius=SimpleNamespace(credits=0), _credits_saved=0, _credits_over_pace=False,
+                                  _credits_exhausted=False, _credits_headroom=False)
+            pace = 1_000_000 * max(month_fraction(time.time()), 1 / 30)
+            out = []
+            for used in (0.5 * pace, 0.9 * pace):
+                await db.kv_set(f"helius_credits:{utc_month()}", str(int(used)))
+                await Engine._record_credits(eng)
+                out.append((eng._credits_headroom, eng._credits_over_pace))
+            return out
+        finally:
+            await db.close()
+    assert asyncio.run(go()) == [(True, False), (False, False)]      # stops before the pace line, not at 110%
+
+
+def test_a_coin_added_again_never_takes_an_old_coins_events():
+    b = WalletBook(1)
+    b.add("A", 0.0, ["W"], None)
+    b.advance(86400 + 1)                                  # judged at 6h, gone after a day
+    assert "A" not in b.coins
+    b._push(90000.0, "judge", "A", 0)                     # a stale event for the old copy
+    b.add("A", 90000.0, ["W"], None)
+    b.advance(90001.0)
+    assert b.coins["A"]["judged"] is False and b.stats["W"] == [1, 0, 0]

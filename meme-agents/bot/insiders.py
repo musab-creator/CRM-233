@@ -229,8 +229,8 @@ class InsiderWatch:
             if len(self._insiders) > 2000:
                 self._insiders.clear()
             try:
-                rows = await self.db.fetchall("SELECT wallet, roles, tokens FROM insiders WHERE candidate_id=?",
-                                              [candidate_id])
+                rows = await self.db.fetchall("SELECT wallet, roles, tokens FROM insiders WHERE candidate_id=? "
+                                              "AND source IS NULL", [candidate_id])   # not wallets.py's read-backs
             except Exception as e:
                 log.warning("insider watch: could not read candidate %d's insiders: %s", candidate_id, e)
                 return None                          # not cached: read again at the next refresh

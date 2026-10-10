@@ -99,7 +99,7 @@ SETTABLE: dict[str, object] = {
     "INSIDER_EXIT": bool,
     "INSIDER_EXIT_SUPPLY_PCT": (float, 0.5, 20),
     "INSIDER_WATCH_MAX": (int, 1, 200),
-    "LAUNCH_MEMORY_DAYS": (float, 0, 30),
+    "LAUNCH_MEMORY_DAYS": (int, 0, 14),
     "LAUNCH_BACKFILL_PER_MIN": (float, 0, 60),
     "CURVE_POLL_CALLS_PER_MIN": (float, 1, 60),
     "CURVE_HOT_POLL_S": (float, 3, 60),

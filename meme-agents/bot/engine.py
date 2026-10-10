@@ -147,6 +147,7 @@ class Engine:
         self._credits_saved = 0
         self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
+        self._credits_headroom = False    # well inside the month's pace: background read-backs may run
         self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
         self.regime = Regime()                   # market regime: sizes entries down or pauses them
         self.live_lock: str | None = None        # a failed live check: entries locked, phone commands alive
@@ -192,8 +193,7 @@ class Engine:
                                           paused=lambda: self._credits_exhausted,
                                           over_pace=lambda: self._credits_over_pace)
         self.wallets = WalletMemory(self.s, self.db, self.chain, exclude={getattr(self.executor, "pubkey", None)},
-                                    paused=lambda: self._credits_exhausted,
-                                    over_pace=lambda: self._credits_over_pace)
+                                    budget_ok=lambda: self._credits_headroom and not self._credits_exhausted)
         if self.live_lock and self.tg.enabled:
             await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
                                + (", exits of open positions still run." if kp is not None
@@ -448,6 +448,11 @@ class Engine:
                         int(self.s.HELIUS_MONTHLY_CREDITS * max(month_fraction(now_s()), 1 / 30)),
                         "slowed to half speed" if over else "back to full speed")
         self._credits_over_pace, self._credits_exhausted = over, exhausted
+        # Background read-backs (wallets.py) only below 80% of the pace line and with 5% of the month
+        # left, so they never push the trading reads to half speed or spend the budget they need.
+        monthly = self.s.HELIUS_MONTHLY_CREDITS
+        self._credits_headroom = (total <= 0.8 * monthly * max(month_fraction(now_s()), 1 / 30)
+                                  and total <= 0.95 * monthly)
         return total
 
     async def refresh_holders(self, st: MintState) -> None:

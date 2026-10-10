@@ -178,6 +178,7 @@ MIGRATIONS = [
     ("mints", "holders_now", "INTEGER"),
     ("mints", "holders_at", "REAL"),
     ("mints", "mayhem", "INTEGER DEFAULT 0"),
+    ("insiders", "source", "TEXT"),          # NULL: recorded at evaluation; 'read_back': wallets.py, from the chain
 ]
 
 MINT_COLS = (
@@ -343,11 +344,15 @@ class Database:
         vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in row.values()]
         return await self.execute(f"INSERT INTO {table} ({cols}) VALUES ({qs})", vals)
 
-    async def save_insiders(self, candidate_id: int, mint: str, insiders: dict[str, dict]) -> None:
-        """A candidate's insider set (insiders.insider_set) at evaluation."""
+    async def save_insiders(self, candidate_id: int, mint: str, insiders: dict[str, dict],
+                            source: str | None = None) -> None:
+        """A candidate's insider set (insiders.insider_set) at evaluation. `source='read_back'`: the
+        launch minute read back later (wallets.py); those rows never replace ones recorded live."""
+        verb = "INSERT OR IGNORE" if source else "INSERT OR REPLACE"
         await self.executemany(
-            "INSERT OR REPLACE INTO insiders (candidate_id, mint, wallet, roles, tokens) VALUES (?,?,?,?,?)",
-            [(candidate_id, mint, w, ",".join(e.get("roles") or []), e.get("tokens")) for w, e in insiders.items()])
+            f"{verb} INTO insiders (candidate_id, mint, wallet, roles, tokens, source) VALUES (?,?,?,?,?,?)",
+            [(candidate_id, mint, w, ",".join(e.get("roles") or []), e.get("tokens"), source)
+             for w, e in insiders.items()])
 
     async def update(self, table: str, key: str, key_val: Any, row: dict) -> None:
         sets = ",".join(f"{c}=?" for c in row)

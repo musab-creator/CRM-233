@@ -22,10 +22,15 @@ them live (Engine.evaluate) and replays the past for the report (walk_forward), 
 measures what the bot would have seen.
 
 Measured first: the numbers are stored with each candidate and checked in /report against what the
-coins did; the agents do not see them until that check shows they separate winners from losers.
-Coins evaluated before launch buyers were recorded are read back from the chain (the launch minute
-only: one signature page per 1,000 curve transactions and up to BACKFILL_MAX_TX transactions, 1
-credit each), coins that reached 2x first.
+coins did; the agents do not see them until that check shows they separate winners from losers. The
+check scores only days on which nearly every evaluated coin has its launch buyers on record, and a
+fixed 24-hour outcome, so neither missing coins nor recent coins' unfinished runs can fake a signal.
+
+Coins evaluated before launch buyers were recorded are read back from the chain, newest first (never
+winners first: that would fill the check with them), only while Helius spending is well inside the
+month's pace, three transaction reads at a time: one signature page per 1,000 curve transactions and
+up to BACKFILL_MAX_TX transactions, 1 credit each. Those rows are marked as read back; the insider
+watch keeps using only the sets recorded at evaluation.
 """
 from __future__ import annotations
 
@@ -46,6 +51,7 @@ from .util import now_s
 log = logging.getLogger("bot.wallets")
 
 LAUNCH_ROLES = frozenset({"early", "sniper", "bundle"})
+LAUNCH_SQL = "(instr(i.roles,'early')>0 OR instr(i.roles,'sniper')>0 OR instr(i.roles,'bundle')>0)"
 MATURE_S = 6 * 3600.0         # a coin's outcome is judged this long after the bot evaluated it
 KNOWN_N = 2                   # earlier launch coins for a buyer to count as known
 SERIAL_N = 10                 # ... as a sniper bot
@@ -56,8 +62,11 @@ NEW_COINS_S = 60.0            # newly decided coins join the book this often
 REFRESH_S = 600.0             # coins' peaks and results are re-read this often
 BACKFILL_DAYS = 14.0          # coins evaluated this far back are read back from the chain
 BACKFILL_PAGES = 100          # signature pages to reach a busy (often graduated) coin's launch
+BACKFILL_CONCURRENCY = 3      # transaction reads in flight for one read-back
 BACKFILL_ATTEMPTS = 3
-BURN_IN_S = 86400.0           # the walk-forward scores coins this long after its data starts
+BURN_IN_S = 86400.0           # the walk-forward scores coins this long after its covered data starts
+HORIZON_S = 86400.0           # the walk-forward's outcome: the coin reached 2x within this long
+COVERAGE_MIN = 0.9            # share of a day's evaluated coins with launch buyers for the day to count
 FEATURES = ("wm_creator_launches", "wm_creator_best_x", "wm_launch_known", "wm_launch_serial",
             "wm_launch_smart", "wm_launch_2x_rate")
 
@@ -65,6 +74,13 @@ FEATURES = ("wm_creator_launches", "wm_creator_best_x", "wm_launch_known", "wm_l
 def launch_wallets(insiders: dict[str, dict] | None) -> list[str]:
     """The launch-minute buyers of an insider set: bundles, snipers and the first buyers."""
     return [w for w, e in (insiders or {}).items() if LAUNCH_ROLES & set(e.get("roles") or [])]
+
+
+async def _first_cid(db: Database, since: float) -> int:
+    """The first candidate id evaluated since `since`: ids grow with time, so insider rows from there on
+    can be read along the table's primary key instead of scanning it."""
+    row = await db.fetchone("SELECT MIN(id) i FROM candidates WHERE ts >= ?", [since])
+    return int(row["i"]) if row and row["i"] is not None else 2 ** 62
 
 
 async def coin_outcomes(db: Database, since: float) -> dict[str, dict]:
@@ -98,34 +114,54 @@ async def coin_outcomes(db: Database, since: float) -> dict[str, dict]:
                 peaks.append((c["peak_price"] / ref, c["peak_at"]))
             if peaks:
                 x, x_at = max(peaks, key=lambda pk: pk[0])
-        ret = pnl_usd = ret_at = None
+        ret = pnl_usd = None
         if (first and first["status"] == "closed" and first["id"] not in spiked
                 and isinstance(first["pnl_sol"], (int, float)) and math.isfinite(first["pnl_sol"])
                 and (first["cost_sol"] or 0) > 0):
-            ret, pnl_usd, ret_at = first["pnl_sol"] / first["cost_sol"], first["pnl_usd"] or 0.0, first["closed_at"]
+            ret, pnl_usd = first["pnl_sol"] / first["cost_sol"], first["pnl_usd"] or 0.0
         out[c["mint"]] = {"mint": c["mint"], "cid": c["cid"], "t": c["first_ts"], "creator": c["creator"],
-                          "x": x, "x_at": x_at or c["first_ts"], "ret": ret, "pnl_usd": pnl_usd, "ret_at": ret_at}
+                          "x": x, "x_at": x_at or c["first_ts"], "ret": ret, "pnl_usd": pnl_usd}
     return out
 
 
 async def launch_rows(db: Database, since: float, page: int = 20_000) -> dict[str, list[str]]:
-    """mint -> its launch-minute buyers, for coins evaluated since `since`. Read a page at a time, each
-    address kept once: two weeks hold some 300,000 rows, the busiest bots in thousands of them."""
+    """mint -> its launch-minute buyers (recorded at evaluation or read back), for coins evaluated since
+    `since`. Read a page at a time along the primary key, each address kept once: two weeks hold some
+    300,000 rows, the busiest bots in thousands of them."""
     out: dict[str, set[str]] = defaultdict(set)
     pool: dict[str, str] = {}
-    last_cid, last_wallet = -1, ""
+    cid, wallet = await _first_cid(db, since) - 1, ""
     while True:
         rows = await db.fetchall(
             "SELECT i.candidate_id, i.mint, i.wallet, i.roles FROM insiders i JOIN candidates c ON c.id=i.candidate_id "
-            "WHERE c.ts >= ? AND (i.candidate_id > ? OR (i.candidate_id = ? AND i.wallet > ?)) "
-            "ORDER BY i.candidate_id, i.wallet LIMIT ?", [since, last_cid, last_cid, last_wallet, page])
+            "WHERE (i.candidate_id, i.wallet) > (?, ?) AND c.ts >= ? ORDER BY i.candidate_id, i.wallet LIMIT ?",
+            [cid, wallet, since, page])
         for r in rows:
             if LAUNCH_ROLES & set((r["roles"] or "").split(",")):
                 out[r["mint"]].add(pool.setdefault(r["wallet"], r["wallet"]))
         if len(rows) < page:
             break
-        last_cid, last_wallet = rows[-1]["candidate_id"], rows[-1]["wallet"]
+        cid, wallet = rows[-1]["candidate_id"], rows[-1]["wallet"]
     return {m: sorted(ws) for m, ws in out.items()}
+
+
+def covered_since(outcomes: dict[str, dict], launches: dict[str, list[str]], now: float) -> float | None:
+    """The start of the run of UTC days, back from today, on which at least COVERAGE_MIN of the evaluated
+    coins have launch buyers on record (days without coins are skipped); None if today falls short."""
+    days: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+    for o in outcomes.values():
+        d = days[int(o["t"] // 86400)]
+        d[0] += 1
+        d[1] += o["mint"] in launches
+    start = None
+    for day in sorted(days, reverse=True):
+        if day > int(now // 86400):
+            continue
+        n, covered = days[day]
+        if covered < COVERAGE_MIN * n:
+            break
+        start = day * 86400.0
+    return start
 
 
 class WalletBook:
@@ -141,25 +177,26 @@ class WalletBook:
         self._pool: dict[str, str] = {}                     # one copy of each address
         self._events: list[tuple] = []
         self._seq = itertools.count()
+        self._gen = itertools.count()                       # a coin added again never takes an old event
         self.now = 0.0
 
-    def _push(self, when: float, kind: str, mint: str) -> None:
-        heapq.heappush(self._events, (when, next(self._seq), kind, mint))
+    def _push(self, when: float, kind: str, mint: str, gen: int) -> None:
+        heapq.heappush(self._events, (when, next(self._seq), kind, mint, gen))
 
     def add(self, mint: str, t: float, wallets, creator: str | None, x: float | None = None,
             x_at: float | None = None) -> None:
         if mint in self.coins or (self.window and t < self.now - self.window):
             return
         c = {"t": t, "wallets": tuple(sorted({self._pool.setdefault(w, w) for w in wallets})), "creator": creator,
-             "x": None, "x_at": None, "judged": False, "hit": False}
+             "x": None, "x_at": None, "judged": False, "hit": False, "gen": next(self._gen)}
         self.coins[mint] = c
         for w in c["wallets"]:
             self.stats.setdefault(w, [0, 0, 0])[0] += 1
         if creator:
             self.by_creator[creator].add(mint)
-        self._push(t + MATURE_S, "judge", mint)
+        self._push(t + MATURE_S, "judge", mint, c["gen"])
         if self.window:
-            self._push(t + self.window, "expire", mint)
+            self._push(t + self.window, "expire", mint, c["gen"])
         self.outcome(mint, x, x_at)
 
     def outcome(self, mint: str, x: float | None, x_at: float | None) -> None:
@@ -169,13 +206,13 @@ class WalletBook:
             return
         c["x"], c["x_at"] = x, x_at if x_at is not None else c["t"]
         if not c["hit"] and x >= HIT_X:
-            self._push(max(c["t"] + MATURE_S, c["x_at"]), "hit", mint)
+            self._push(max(c["t"] + MATURE_S, c["x_at"]), "hit", mint, c["gen"])
 
     def advance(self, now: float) -> None:
         while self._events and self._events[0][0] <= now:
-            when, _, kind, mint = heapq.heappop(self._events)
+            when, _, kind, mint, gen = heapq.heappop(self._events)
             c = self.coins.get(mint)
-            if c is None:
+            if c is None or c["gen"] != gen:
                 continue
             if kind == "judge" and not c["judged"]:
                 c["judged"] = True
@@ -259,15 +296,15 @@ class WalletMemory:
     peaks every 10 minutes, and asked for each candidate's numbers at evaluation. It also reads back
     the launch buyers of coins evaluated before they were recorded."""
 
-    def __init__(self, s: Settings, db: Database, chain=None, exclude=frozenset(), paused=None, over_pace=None):
+    def __init__(self, s: Settings, db: Database, chain=None, exclude=frozenset(), budget_ok=None):
         self.s, self.db, self.chain = s, db, chain
         self.exclude = frozenset(w for w in exclude if w)   # the bot's own wallet
-        self.paused = paused or (lambda: False)
-        self.over_pace = over_pace or (lambda: False)
+        self.budget_ok = budget_ok or (lambda: True)        # Helius spending well inside the month's pace
         self.book = WalletBook(s.LAUNCH_MEMORY_DAYS)
         self.loaded = False
         self.stats = {"read_back": 0, "no_launch_data": 0, "errors": 0}
-        self._queue: list[dict] = []                         # past coins to read back, next one last
+        self._queue: list[dict] = []                         # past coins to read back, the newest last
+        self._checked: dict[int, float] = {}                 # decided candidates add_new has looked at
 
     @property
     def window(self) -> float:
@@ -278,59 +315,72 @@ class WalletMemory:
         since = now - self.window
         outcomes = await coin_outcomes(self.db, since)
         launches = await launch_rows(self.db, since)
-        for o in sorted(outcomes.values(), key=lambda o: o["t"]):
+        for i, o in enumerate(sorted(outcomes.values(), key=lambda o: o["t"])):
             if o["mint"] in launches:
                 self.book.add(o["mint"], o["t"], launches[o["mint"]], o["creator"], o["x"], o["x_at"])
+            if i % 500 == 499:
+                await asyncio.sleep(0)                       # a long replay never holds up the trading loops
         self.book.advance(now)
         self.loaded = True
         log.info("wallet memory: %d coins, %d wallets (%d in 2+ launches, %d sniper bots, %d smart)",
                  *self.book.summary().values())
 
     async def add_new(self) -> int:
-        """Coins decided since the last pass that have launch buyers on record."""
+        """Coins decided since the last pass, each candidate looked at once."""
         now = now_s()
         rows = await self.db.fetchall(
-            "SELECT c.mint, MIN(c.ts) t, m.creator FROM candidates c LEFT JOIN mints m ON m.mint=c.mint "
-            "WHERE c.decision IS NOT NULL AND c.ts >= ? GROUP BY c.mint", [now - 6 * 3600])
-        new = [r for r in rows if r["mint"] not in self.book.coins]
-        if not new:
+            "SELECT c.id, c.mint, c.ts, m.creator FROM candidates c LEFT JOIN mints m ON m.mint=c.mint "
+            "WHERE c.decision IS NOT NULL AND c.ts >= ? ORDER BY c.ts", [now - 6 * 3600])
+        fresh = [r for r in rows if r["id"] not in self._checked]
+        for cid in [cid for cid, t in self._checked.items() if t < now - 7 * 3600]:
+            del self._checked[cid]
+        if not fresh:
             return 0
-        launches = await launch_rows(self.db, min(r["t"] for r in new) - 1)
+        wallets: dict[int, set[str]] = defaultdict(set)
+        for i in await self.db.fetchall(
+                f"SELECT i.candidate_id, i.wallet FROM insiders i WHERE i.candidate_id IN "
+                f"({','.join('?' * len(fresh))}) AND {LAUNCH_SQL}", [r["id"] for r in fresh]):
+            wallets[i["candidate_id"]].add(i["wallet"])
         n = 0
-        for r in sorted(new, key=lambda r: r["t"]):
-            if r["mint"] in launches:
-                self.book.add(r["mint"], r["t"], launches[r["mint"]], r["creator"])
+        for r in fresh:
+            self._checked[r["id"]] = r["ts"]
+            if wallets.get(r["id"]) and r["mint"] not in self.book.coins:
+                self.book.add(r["mint"], r["ts"], wallets[r["id"]], r["creator"])
                 n += 1
         self.book.advance(now)
         return n
 
     async def refresh(self) -> None:
         """Peaks move for days: hand the book each coin's latest, and line up the past coins that still
-        have no launch buyers on record."""
+        have no launch buyers on record, newest first."""
         now = now_s()
-        outcomes = await coin_outcomes(self.db, now - max(self.window, BACKFILL_DAYS * 86400))
+        since = now - max(self.window, BACKFILL_DAYS * 86400)
+        outcomes = await coin_outcomes(self.db, since)
         for o in outcomes.values():
             self.book.outcome(o["mint"], o["x"], o["x_at"])
         self.book.advance(now)
         have = {r["mint"] for r in await self.db.fetchall(
-            "SELECT DISTINCT i.mint FROM insiders i JOIN candidates c ON c.id=i.candidate_id WHERE c.ts >= ?",
-            [now - BACKFILL_DAYS * 86400])}
+            f"SELECT DISTINCT i.mint FROM insiders i WHERE i.candidate_id >= ? AND {LAUNCH_SQL}",
+            [await _first_cid(self.db, since)])}
         done = {r["mint"] for r in await self.db.fetchall(
             "SELECT mint FROM wallet_backfill WHERE status IN ('ok','empty') OR attempts >= ?", [BACKFILL_ATTEMPTS])}
         todo = [o for m, o in outcomes.items() if m not in have and m not in done
                 and o["t"] >= now - BACKFILL_DAYS * 86400]
-        self._queue = sorted(todo, key=lambda o: ((o["x"] or 0) >= HIT_X, o["t"]))   # 2x coins, newest, last
+        # In time order only: winners first would fill the report's check with winners' buyers.
+        self._queue = sorted(todo, key=lambda o: o["t"])
 
     async def features(self, mint: str, insiders: dict[str, dict] | None, creator: str | None) -> dict | None:
-        """A candidate's six numbers, or None while the book is loading or the coin has no launch data."""
-        if not self.loaded or not insiders:
+        """A candidate's six numbers, or None while the book is loading or the coin has no launch buyers
+        on record (its launch minute could not be read), so a gap never reads as zeros."""
+        wallets = launch_wallets(insiders)
+        if not self.loaded or not wallets:
             return None
         now = now_s()
         launches = await _creator_launches(self.db, creator, mint, now, self.window)
-        return self.book.features(launch_wallets(insiders), creator, launches, now, exclude=mint)
+        return self.book.features(wallets, creator, launches, now, exclude=mint)
 
     async def read_back_once(self) -> str | None:
-        """One past coin's launch buyers from the chain, filed as its insiders and added to the book."""
+        """One past coin's launch buyers from the chain, filed as read back and added to the book."""
         if not self._queue:
             return None
         o = self._queue.pop()
@@ -342,7 +392,7 @@ class WalletMemory:
             if not curve:
                 raise ValueError("no bonding-curve key")
             early = await self.chain.early_trades(mint, curve, self.s.BACKFILL_WINDOW_S, self.s.BACKFILL_MAX_TX,
-                                                  max_pages=BACKFILL_PAGES)
+                                                  max_pages=BACKFILL_PAGES, concurrency=BACKFILL_CONCURRENCY)
             ins = insider_set(early.get("trades") or [], None, m.get("creator") or o["creator"], curve,
                               exclude=self.exclude)
             wallets = launch_wallets(ins)
@@ -350,7 +400,7 @@ class WalletMemory:
                 status, detail = "empty", "launch not reached" if not early.get("reached_launch") else "no buyers"
                 self.stats["no_launch_data"] += 1
             else:
-                await self.db.save_insiders(o["cid"], mint, ins)
+                await self.db.save_insiders(o["cid"], mint, ins, source="read_back")
                 self.book.add(mint, o["t"], wallets, m.get("creator") or o["creator"], o["x"], o["x_at"])
                 status = "ok"
                 self.stats["read_back"] += 1
@@ -397,8 +447,8 @@ class WalletMemory:
                     next_refresh = now + REFRESH_S
                     await self.refresh()
                 per_min = self.s.LAUNCH_BACKFILL_PER_MIN
-                reading = (per_min > 0 and self._queue and self.chain is not None
-                           and getattr(self.chain, "enabled", False) and not self.paused() and not self.over_pace())
+                reading = bool(per_min > 0 and self._queue and self.chain is not None
+                               and getattr(self.chain, "enabled", False) and self.budget_ok())
                 if reading and now >= next_back:
                     next_back = now + 60.0 / per_min
                     await self.read_back_once()
@@ -419,49 +469,53 @@ class WalletMemory:
             return " | wallet memory: loading"
         b = self.book.summary()
         return (f" | wallet memory: {b['coins']} coins, {b['known']} known wallets, {b['smart']} smart, "
-                f"{self.stats['read_back']} read back")
+                f"{self.stats['read_back']} read back, {len(self._queue)} to read back")
 
 
 # --- report -----------------------------------------------------------------------------------
 
-async def walk_forward(db: Database, s: Settings, now: float | None = None) -> list[dict]:
-    """Every coin first evaluated in the data (BACKFILL_DAYS) after a day of burn-in, scored with the
-    six numbers as the live book would have computed them when the bot evaluated it, and what it did."""
+async def walk_forward(db: Database, s: Settings, now: float | None = None) -> dict:
+    """Replays the covered days (covered_since) through a book as the live one would have run, and scores
+    each coin evaluated at least a day after they start and a day before now with the six numbers it
+    would have had and what it did: its shadow's result and whether it reached 2x within HORIZON_S."""
     now = now or now_s()
     since = now - BACKFILL_DAYS * 86400
     outcomes = await coin_outcomes(db, since)
     launches = await launch_rows(db, since)
-    coins = sorted((o for o in outcomes.values() if o["mint"] in launches), key=lambda o: o["t"])
-    if not coins:
-        return []
+    start = covered_since(outcomes, launches, now)
+    out = {"covered_from": start, "rows": [], "coins": len(outcomes),
+           "with_launch": sum(1 for m in outcomes if m in launches)}
+    if start is None:
+        return out
+    coins = sorted((o for o in outcomes.values() if o["t"] >= start and o["mint"] in launches), key=lambda o: o["t"])
     window = s.LAUNCH_MEMORY_DAYS * 86400.0
     creator_times: dict[str, list[float]] = defaultdict(list)
     created: dict[str, float] = {}
     for r in await db.fetchall(
             "SELECT mint, creator, COALESCE(created_at, first_trade_at) t FROM mints WHERE creator IN "
             "(SELECT m2.creator FROM mints m2 JOIN candidates c ON c.mint=m2.mint WHERE c.ts >= ?) "
-            "AND COALESCE(created_at, first_trade_at) >= ?", [since, since - window]):
+            "AND COALESCE(created_at, first_trade_at) >= ?", [start, start - window]):
         if r["creator"] and r["t"] is not None:
             creator_times[r["creator"]].append(r["t"])
             created[r["mint"]] = r["t"]
     for ts in creator_times.values():
         ts.sort()
     book = WalletBook(s.LAUNCH_MEMORY_DAYS)
-    start = coins[0]["t"] + BURN_IN_S
-    rows = []
-    for o in coins:
-        if o["t"] >= start and o["ret"] is not None:
+    for i, o in enumerate(coins):
+        if start + BURN_IN_S <= o["t"] <= now - HORIZON_S and o["ret"] is not None:
             launches_n = None
             if o["creator"]:                          # as _creator_launches counts them: the coin itself left out
                 ts = creator_times.get(o["creator"], [])
                 own = created.get(o["mint"])
                 launches_n = (bisect_left(ts, o["t"]) - bisect_left(ts, o["t"] - window)
                               - (own is not None and o["t"] - window <= own < o["t"]))
-            rows.append({"flow": book.features(launches[o["mint"]], o["creator"], launches_n, o["t"]),
-                         "ret": o["ret"], "win": o["ret"] > 0, "pnl_usd": o["pnl_usd"] or 0.0,
-                         "x2": (o["x"] or 0) >= HIT_X})
+            out["rows"].append({"flow": book.features(launches[o["mint"]], o["creator"], launches_n, o["t"]),
+                                "ret": o["ret"], "win": o["ret"] > 0, "pnl_usd": o["pnl_usd"] or 0.0,
+                                "x2": (o["x"] or 0) >= HIT_X and o["x_at"] - o["t"] <= HORIZON_S})
         book.add(o["mint"], o["t"], launches[o["mint"]], o["creator"], o["x"], o["x_at"])
-    return rows
+        if i % 500 == 499:
+            await asyncio.sleep(0)
+    return out
 
 
 def _bucket(rows: list[dict]) -> dict:
@@ -494,32 +548,36 @@ async def wallet_summary(db: Database, s: Settings) -> dict | None:
     if s.LAUNCH_MEMORY_DAYS <= 0:
         return None
     now = now_s()
+    wf = await walk_forward(db, s, now)
     since = now - BACKFILL_DAYS * 86400
-    evaluated = (await db.fetchone("SELECT COUNT(DISTINCT mint) n FROM candidates WHERE decision IS NOT NULL "
-                                   "AND ts >= ?", [since]))["n"]
-    with_launch = (await db.fetchone("SELECT COUNT(DISTINCT i.mint) n FROM insiders i JOIN candidates c "
-                                     "ON c.id=i.candidate_id WHERE c.ts >= ?", [since]))["n"]
-    back = {r["status"]: r["n"] for r in await db.fetchall(      # a failed read-back that a later evaluation
-        "SELECT status, COUNT(*) n FROM wallet_backfill WHERE status='ok' "   # filled in no longer counts
-        "OR mint NOT IN (SELECT mint FROM insiders) GROUP BY status")}
-    rows = await walk_forward(db, s, now)
-    return {"evaluated": evaluated, "with_launch": with_launch, "read_back": back.get("ok", 0),
-            "no_launch_data": back.get("empty", 0), "failed": back.get("error", 0), "scored": len(rows),
-            "checks": feature_check(rows), "days": s.LAUNCH_MEMORY_DAYS}
+    back = {r["status"]: r["n"] for r in await db.fetchall(
+        "SELECT b.status, COUNT(*) n FROM wallet_backfill b WHERE b.mint IN "
+        "(SELECT mint FROM candidates WHERE ts >= ?) AND b.mint NOT IN "
+        f"(SELECT i.mint FROM insiders i WHERE i.candidate_id >= ? AND {LAUNCH_SQL} AND i.source IS NULL) "
+        "GROUP BY b.status", [since, await _first_cid(db, since)])}
+    return {"evaluated": wf["coins"], "with_launch": wf["with_launch"], "covered_from": wf["covered_from"],
+            "read_back": back.get("ok", 0), "no_launch_data": back.get("empty", 0), "failed": back.get("error", 0),
+            "scored": len(wf["rows"]), "checks": feature_check(wf["rows"]), "days": s.LAUNCH_MEMORY_DAYS}
 
 
 def wallet_lines(m: dict | None) -> list[str]:
     if not m:
         return []
+    from datetime import datetime, timezone
     lines = ["", "== Wallet memory (launch buyers' and creators' records; the agents do not see these yet) ==",
              f"coins with launch buyers: {m['with_launch']} of {m['evaluated']} evaluated in "
              f"{BACKFILL_DAYS:g} days (read back from the chain: {m['read_back']}, no launch data "
              f"{m['no_launch_data']}, failed {m['failed']})"]
-    if not m["checks"]:
-        lines.append(f"walk-forward: {m['scored']} coins scored so far; it needs 20 per feature")
+    if m["covered_from"] is None:
+        lines.append(f"walk-forward: waits for days on which {COVERAGE_MIN:.0%} of the evaluated coins have "
+                     f"launch buyers on record")
         return lines
-    lines.append(f"walk-forward over {m['scored']} coins, each scored on what the bot knew when it evaluated "
-                 f"it ({m['days']:g}-day memory):")
+    since = datetime.fromtimestamp(m["covered_from"], timezone.utc).strftime("%m-%d")
+    if not m["checks"]:
+        lines.append(f"walk-forward from {since}: {m['scored']} coins scored so far; it needs 20 per feature")
+        return lines
+    lines.append(f"walk-forward over {m['scored']} coins from {since} (fully recorded days), each scored on what "
+                 f"the bot knew when it evaluated it ({m['days']:g}-day memory):")
     lines.append("feature                median   above/at: n  win  avg ret  2x  | below: n  win  avg ret  2x")
     for c in m["checks"]:
         def cell(b):
@@ -527,6 +585,6 @@ def wallet_lines(m: dict | None) -> list[str]:
                     if b["n"] else f"{0:>5d}")
         lines.append(f"{c['feature']:22s} {c['median']:<8.3g} {'at' if c['split'] == 'at' else 'ab'} {cell(c['hi'])}"
                      f"  | {cell(c['lo'])}")
-    lines.append("(win, avg ret: the coin's shadow under the bot's exits; 2x: the coin reached twice the bot's "
-                 "price within 14 days)")
+    lines.append(f"(win, avg ret: the coin's shadow under the bot's exits; 2x: the coin reached twice the bot's "
+                 f"price within {HORIZON_S / 3600:g} hours)")
     return lines
