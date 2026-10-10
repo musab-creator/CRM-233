@@ -58,7 +58,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("report", "the full report, all time and today"),
     ("moonshots", "every evaluated coin's peak over 14 days: which went 10x/100x/500x and what the bot did"),
     ("trades", "the last closed trades"),
-    ("why", "/why [id]: every vote on the latest decision (or candidate #id) with its reasons"),
+    ("why", "/why [id or address]: every vote on the latest decision, on decision #id, or on the coin whose "
+            "address starts with those letters (6 or more), with its reasons and what its positions did"),
     ("log", "/log [n] [word]: the last n lines of the bot's log, or the last n that contain word"),
     ("settings", "the current settings (read-only)"),
     ("pause", "no new entries; open positions keep running"),
@@ -72,6 +73,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("help", "this list"),
 ]
 PAUSE_REASON = "paused from Telegram (/resume to continue)"
+B58 = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 STALE_COMMAND_S = 120   # commands sent while the bot was down are not answered on restart
 RESULTS_POLL_S = 2.0    # how often finished server actions are looked for
 RESULT_GIVE_UP_S = 600  # a result Telegram keeps refusing is set aside after this long
@@ -159,7 +161,7 @@ class TelegramCommands:
         if name == "trades":
             return await self._trades(10), None
         if name == "why":
-            return await self._why(int(arg) if arg.isdigit() else None), None
+            return await self._why(arg.strip() or None), None
         if name == "log":
             words = arg.split()
             n = next((int(w) for w in words if w.isdigit()), 30)
@@ -331,10 +333,26 @@ class TelegramCommands:
                        f"{(p['exit_reason'] or 'exit').replace('_', ' ')} · held {held}")
         return "\n".join(out)
 
-    async def _why(self, cid: int | None) -> str:
+    async def _why(self, ref: str | None) -> str:
         """One decision in full: every vote with its first reasons, the gate's verdict, and what the
         shadow position did afterwards. The status shows only votes and confidences; this is for
-        reading why the gate stays shut."""
+        reading why the gate stays shut.
+
+        `ref` is a decision number (DECISION #id in the log) or a coin's address or its first letters:
+        trade and insider lines number positions, not decisions, so /why with their number would show
+        another coin; each of them prints the coin's address."""
+        cid = None
+        if ref and ref.lstrip("#").isdecimal():
+            cid = int(ref.lstrip("#"))
+        elif ref:
+            if len(ref) < 6 or not set(ref) <= B58:
+                return ("/why takes a decision number (DECISION #id in the log) or a coin's address, or its "
+                        "first 6 or more letters")
+            row = await self.db.fetchone("SELECT id FROM candidates WHERE mint >= ? AND mint < ? "
+                                         "ORDER BY decision IS NULL, ts DESC LIMIT 1", [ref, ref + "~"])
+            if not row:
+                return f"no evaluated coin's address starts with {ref} (addresses are case-sensitive)"
+            cid = row["id"]
         if cid is None:
             row = await self.db.fetchone("SELECT id FROM candidates WHERE decision IS NOT NULL ORDER BY ts DESC LIMIT 1")
             if not row:
@@ -366,9 +384,9 @@ class TelegramCommands:
                 head += f" (error: {str(v['error'])[:100]})"
             lines.append(head)
             lines += [f"  - {str(r)[:220]}" for r in (reasons or [])[:2]]
-        for real in await self.db.fetchall("SELECT mode, status, size_usd, cost_sol, proceeds_sol, pnl_usd, exit_reason, "
-                                           "opened_at, closed_at FROM positions WHERE candidate_id=? AND kind='real' "
-                                           "ORDER BY id", [cid]):
+        for real in await self.db.fetchall("SELECT id, mode, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
+                                           "exit_reason, entry_price, opened_at, closed_at FROM positions "
+                                           "WHERE candidate_id=? AND kind='real' ORDER BY id", [cid]):
             head = f"real ${float(real['size_usd'] or 0):.2f} [{real['mode']}]: {real['status']}"
             if real["status"] == "closed":
                 ret = (f" ({(float(real['proceeds_sol'] or 0) / real['cost_sol'] - 1) * 100:+.0f}%)"
@@ -379,6 +397,9 @@ class TelegramCommands:
             elif real["exit_reason"]:
                 head += f" · {real['exit_reason']}"
             lines.append(head)
+            warning = await self._insider_warning(real)
+            if warning:
+                lines.append(warning[1])
         lines += await self._emergency_lines(cid)
         shadow = await self.db.fetchone("SELECT id, mint, status, size_usd, cost_sol, proceeds_sol, pnl_usd, "
                                         "exit_reason, entry_price, opened_at, closed_at, tokens_initial, "
@@ -450,8 +471,12 @@ class TelegramCommands:
                                        "WHERE position_id=? ORDER BY id", [pos["id"]])
         entry = float(pos["entry_price"] or 0)
         factor = max(self.s.TICK_SANITY_FACTOR, 1.0) if self.s.TICK_SANITY_FACTOR else 20.0
+        warning = await self._insider_warning(pos)
         out = []
         for f in fills:
+            if warning and float(f["ts"] or 0) > warning[0]:
+                out.append(warning[1])
+                warning = None
             price = float(f["price"] or 0)
             when = datetime.fromtimestamp(float(f["ts"] or 0), timezone.utc).strftime("%H:%M:%S")
             x = f" (x{price / entry:,.4g} entry)" if entry > 0 and f["side"] == "sell" else ""
@@ -468,7 +493,27 @@ class TelegramCommands:
                 else:
                     line += "\n    ⚠️ price spike: no stored trade within 5 s, so a curve read or DexScreener mark priced it"
             out.append(line)
+        if warning:
+            out.append(warning[1])
         return out
+
+    async def _insider_warning(self, pos) -> tuple[float, str] | None:
+        """When the insiders' net sales since this position's buy first reached INSIDER_EXIT_SUPPLY_PCT (the
+        insider watch's warning, or its sale with INSIDER_EXIT=true), at what price against the entry."""
+        rows = await self.db.fetchall("SELECT ts, side, price, cum_supply_pct FROM insider_trades WHERE position_id=? "
+                                      "ORDER BY ts, id", [pos["id"]])
+        first = next((r for r in rows if r["side"] == "sell"
+                      and float(r["cum_supply_pct"] or 0) >= self.s.INSIDER_EXIT_SUPPLY_PCT), None)
+        if first is None:
+            return None
+        entry = float(pos["entry_price"] or 0)
+        when = datetime.fromtimestamp(float(first["ts"] or 0), timezone.utc).strftime("%H:%M:%S")
+        x = f" (x{float(first['price']) / entry:,.4g} entry)" if entry > 0 and first["price"] else ""
+        most = max(float(r["cum_supply_pct"] or 0) for r in rows)
+        sells = sum(1 for r in rows if r["side"] == "sell")
+        return float(first["ts"] or 0), (
+            f"  {when}Z insider warning: insiders' net sales since the buy reached {float(first['cum_supply_pct']):.1f}% "
+            f"of the supply{x}; at most {most:.1f}% while watched, {sells} insider sells")
 
     # --- polling -----------------------------------------------------------------------
     def _authorized(self, chat: str, cmd: str, who: str) -> bool:

@@ -694,3 +694,65 @@ def test_an_insider_sale_that_could_not_be_queued_is_retried_at_the_next_refresh
     real, waiting, w = asyncio.run(go())
     assert waiting is None and real.pending_exit == "emergency_insider_sell"
     assert w.stats["warnings"] == 2 and w.stats["exits"] == 2          # each position counted once
+
+
+def test_why_finds_a_coin_by_its_address_and_shows_when_the_insider_warning_fired(tmp_path):
+    """10 Oct: the INSIDER WARNING lines number positions (#1781), and /why 1781 opens decision #1781,
+    another coin. /why also takes the coin's address or its first letters (case-sensitive, as
+    addresses are), and shows the warning among the position's fills at the time it fired."""
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+    mint, lower = "AgHydcPwLYjSxqJfENQ2UpSmv6XhNEyNneaojNyVpump", "aghydc" + "1" * 38
+    t0 = 1_760_000_000.0                                              # 09 Oct 2025 08:53:20 UTC
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            for m, sym in ((lower, "LOW"), (mint, "AGH")):
+                await db.insert("mints", {"mint": m, "symbol": sym, "created_at": t0 - 600})
+            await db.insert("candidates", {"mint": lower, "ts": t0 - 100, "metrics": "{}", "status": "evaluated",
+                                           "decision": "PASS", "mean_confidence": 0.5, "gate_reason": "low"})
+            cid = await db.insert("candidates", {"mint": mint, "ts": t0 - 10, "metrics": "{}", "status": "evaluated",
+                                                 "decision": "BUY", "mean_confidence": 0.7, "gate_reason": "ok"})
+            ids = {}
+            for kind in ("shadow", "real"):
+                ids[kind] = await db.insert("positions", {
+                    "kind": kind, "mode": "live", "mint": mint, "candidate_id": cid, "status": "closed",
+                    "size_usd": 10.0, "cost_sol": 0.05, "entry_price": 1e-7, "tokens_initial": 5e5,
+                    "proceeds_sol": 0.03, "pnl_usd": -4.0, "pnl_sol": -0.02, "exit_reason": "stop_loss",
+                    "opened_at": t0, "closed_at": t0 + 300})
+                await db.insert("fills", {"position_id": ids[kind], "ts": t0, "side": "buy", "reason": "entry",
+                                          "price": 1e-7, "tokens": 5e5, "sol": 0.05})
+                await db.insert("fills", {"position_id": ids[kind], "ts": t0 + 300, "side": "sell",
+                                          "reason": "stop_loss", "price": 6e-8, "tokens": 5e5, "sol": 0.03})
+                for dt, side, price, pct in ((60, "sell", 9e-8, 0.8), (120, "sell", 8.1e-8, 2.4),
+                                             (150, "buy", 8.4e-8, 2.0), (200, "sell", 7e-8, 4.6)):
+                    await db.insert("insider_trades", {"position_id": ids[kind], "mint": mint, "ts": t0 + dt,
+                                                       "side": side, "wallet": "W", "roles": "top", "tokens": 1e7,
+                                                       "sol": 0.3, "price": price, "cum_supply_pct": pct})
+            tc = TelegramCommands(Telegram(FakeHttp([]), s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            out = {}
+            for arg in ("AgHydc", mint, f"#{cid}", "aghydc", "AgHyd", "AgHydz", "AgHyd0", str(ids["shadow"])):
+                out[arg], _ = await tc.answer("why", arg)
+            return cid, ids, out
+        finally:
+            await db.close()
+    cid, ids, out = asyncio.run(go())
+    assert ids["shadow"] == 1 and cid == 2                    # the shadow's number is the other coin's decision
+    assert out[str(ids["shadow"])].startswith("#1 LOW aghydc")
+    text = out["AgHydc"]
+    assert text.startswith(f"#{cid} AGH {mint}") and out[mint] == text and out[f"#{cid}"] == text
+    warning = ("  08:55:20Z insider warning: insiders' net sales since the buy reached 2.4% of the supply "
+               "(x0.81 entry); at most 4.6% while watched, 3 insider sells")
+    real_head = next(i for i, ln in enumerate(text.splitlines()) if ln.startswith("real $10.00 [live]: closed"))
+    assert text.splitlines()[real_head + 1] == warning
+    shadow = text.split("shadow $10: ")[1].splitlines()
+    assert shadow[1].startswith("  08:53:20Z entry") and shadow[2] == warning
+    assert shadow[3].startswith("  08:58:20Z stop loss @ 6.000e-08 (x0.6 entry)")
+    assert out["aghydc"].startswith("#1 LOW")                      # addresses are case-sensitive
+    assert out["AgHyd"].startswith("/why takes a decision number") and out["AgHyd0"] == out["AgHyd"]
+    assert out["AgHydz"] == "no evaluated coin's address starts with AgHydz (addresses are case-sensitive)"
+    from bot.commands import COMMANDS
+    assert all(1 <= len(d) <= 256 for _, d in COMMANDS)            # setMyCommands refuses the menu otherwise
