@@ -210,3 +210,25 @@ def test_the_report_says_how_deep_winners_dipped_and_what_wider_or_later_stops_c
             "1 sold at 12h; against the time stop's sale: median +30%, 1 better, measured change $+1.50") in text
     assert ("  to 24h (2 old enough): 1 doubled after the sale (not valued), 1 fell through -40% first (sold there), "
             "0 sold at 24h; against the time stop's sale: median -30%, 0 better, measured change $-1.50") in text
+
+
+def _rec(ref_at, **dips):
+    base = dict.fromkeys(("low", "low_6h", "low_before_peak", "peak_after_s", "low_before_2x", "x2_after_s",
+                          "time_stop_sale", "p6h", "p12h", "p24h", "low_0h_6h", "low_6h_12h", "low_12h_24h"))
+    return {"ref_at": ref_at, "multiple": 1.0, "dips": {**base, **dips}}
+
+
+def test_the_dip_section_says_what_it_cannot_judge_yet_and_follows_the_time_stop(s):
+    from bot.moonshots import dip_lines, dip_summary
+    s.STOP_LOSS_PCT, s.TIME_STOP_HOURS = 40.0, 6.0
+    young = [_rec(T0 - H, low=-0.3, low_6h=-0.3), _rec(T0 - 2 * H, low=-0.5, low_6h=-0.5)]
+    text = "\n".join(dip_lines(dip_summary(young, s, T0)))
+    assert "a wider stop: judged once a coin's first 6h are over (none yet)" in text and "-50% keeps" not in text
+    assert "a later time stop: the time stop has sold none of these coins yet" in text and "to 12h" not in text
+    # a 3 h time stop: the fall to -45% at 4 h, after its sale at -10%, counts toward holding it to 12 h
+    s.TIME_STOP_HOURS = 3.0
+    sold = [_rec(T0 - 30 * H, low=-0.45, low_6h=-0.45, low_0h_6h=-0.45, time_stop_sale=-0.1, p12h=0.5,
+                 low_6h_12h=-0.2)]
+    d = dip_summary(sold, s, T0)
+    assert (d["later"][0]["hours"], d["later"][0]["stopped"], d["later"][0]["sold"]) == (12, 1, 0)
+    assert "judged with a 6h time stop, today's is 3h" in "\n".join(dip_lines(d))

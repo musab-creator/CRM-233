@@ -252,7 +252,7 @@ def dip_record(r: dict, sh: dict | None) -> dict | None:
             "low_before_peak": vs_seen(low_peak), "peak_after_s": peak_at - seen if peak_at is not None else None,
             "low_before_2x": vs_seen(low_2x), "x2_after_s": x2_at - seen if x2_at is not None else None,
             **{f"p{h}h": vs_seen(r.get(col)) for h, col in SNAPSHOTS},
-            **{col: vs_seen(r.get(col)) for _, _, col in WINDOWS[1:]}}
+            **{col: vs_seen(r.get(col)) for _, _, col in WINDOWS}}
 
 
 def _lowest(*values) -> float | None:
@@ -334,9 +334,10 @@ def dip_summary(rows: list[dict], s: Settings, now: float) -> dict | None:
     # a later time stop, on the coins the time stop sold: what they did over the next hours
     timed = [it for it in recs if dip(it, "time_stop_sale") is not None]
     later = []
-    for hours, windows in ((12, ("low_6h_12h",)), (24, ("low_6h_12h", "low_12h_24h"))):
+    for hours in (12, 24):
         if hours <= s.TIME_STOP_HOURS:
             continue
+        windows = [col for start, end, col in WINDOWS if end > s.TIME_STOP_HOURS and start < hours]
         ready = [it for it in timed if now - it["ref_at"] >= hours * 3600 + SNAPSHOT_LATE_S]
         doubled = stopped = unread = 0
         moves = []
@@ -391,10 +392,14 @@ def dip_lines(d: dict | None) -> list[str]:
             ("under 6h", "6-24h", "1-3 days", "over 3 days"), d["time_to_peak"]))
             + (f"  (median low before the peak {d['median_dip_before_peak']:+.0%})"
                if d["median_dip_before_peak"] is not None else ""))
-    if d["wider"]:
+    other = (f"; judged with a {STOP_WINDOW_H}h time stop, today's is {d['time_stop_hours']:g}h"
+             if d["time_stop_hours"] != STOP_WINDOW_H else "")
+    if d["wider"] and not d["judged"]:
+        lines.append(f"a wider stop: judged once a coin's first {STOP_WINDOW_H}h are over (none yet)")
+    elif d["wider"]:
         lines.append(f"a wider stop, on the {d['judged']} coins whose first {STOP_WINDOW_H}h are over "
-                     f"({d['doubled_in_window']} doubled inside them; not replayed, shares of a ${stake:g} stake):")
-    for w in d["wider"]:
+                     f"({d['doubled_in_window']} doubled inside them; not replayed, shares of a ${stake:g} stake{other}):")
+    for w in d["wider"] if d["judged"] else []:
         extra, band = w["stop"] - stop, f"-{stop:.0%} to -{w['stop']:.0%}"
         peak = f", median peak {_x(w['kept_median_peak'])}" if w["kept_median_peak"] is not None else ""
         later = (f"; {w['kept_later']} more doubled after {STOP_WINDOW_H}h and would also need a longer time stop"
@@ -407,10 +412,12 @@ def dip_lines(d: dict | None) -> list[str]:
                 + (f" ({w['held_unread']} unread at {STOP_WINDOW_H}h)" if w["held_unread"] else ""))
         lines.append(f"  -{w['stop']:.0%} costs: {w['fell_through']} fell through -{w['stop']:.0%} without doubling, "
                      f"{extra:.0%} of the stake more each{held}; measured on these ${w['usd']:+.2f}")
-    if d["time_stopped"]:
+    if d["later"] and not d["time_stopped"]:
+        lines.append("a later time stop: the time stop has sold none of these coins yet")
+    elif d["later"]:
         lines.append(f"a later time stop, on the {d['time_stopped']} coins the time stop sold (the stop loss still on; "
                      "the change against the time stop's sale, in shares of the stake):")
-    for x in d["later"]:
+    for x in d["later"] if d["time_stopped"] else []:
         if not x["n"]:
             lines.append(f"  to {x['hours']}h: none old enough yet")
             continue
