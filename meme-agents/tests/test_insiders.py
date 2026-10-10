@@ -237,6 +237,43 @@ def test_the_stream_follows_the_held_curves_and_drops_stale_subscriptions(s, mon
     asyncio.run(go())
 
 
+def test_the_stream_counts_its_helius_credits_and_stops_while_they_are_spent(s, monkeypatch):
+    from bot.engine import Engine
+    monkeypatch.setattr(insiders_mod, "RESUBSCRIBE_S", 0.0)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        helius, spent = SimpleNamespace(credits=10), {"on": False}
+        book = SimpleNamespace(positions={1: SimpleNamespace(id=1, mint="M1", kind="real", status="open",
+                                                             candidate_id=1, opened_at=time.time())})
+        w = InsiderWatch(s, db, book, {"M1": "C1"}.get, helius=helius, paused=lambda: spent["on"])
+        w._meter(connection=True)                                          # opening a connection: 1 credit
+        assert (w.credits, helius.credits) == (1, 11)
+        ws, stop = FakeWS(), asyncio.Event()
+        task = asyncio.create_task(w._session(ws, stop))
+        try:
+            ws.nudge()
+            await asyncio.sleep(0.05)
+            ws.answer(1, 5)
+            ws.inbox.put_nowait(json.dumps({"jsonrpc": "2.0", "method": "noop", "pad": "x" * 120_000}))
+            await asyncio.sleep(0.05)
+            assert (w.credits, helius.credits) == (3, 13)                  # 2 credits per 0.1 MB received
+            spent["on"] = True                                             # the month's credits are spent
+            ws.nudge()
+            await asyncio.sleep(0.05)
+            assert ws.sent[-1] == {"jsonrpc": "2.0", "id": 2, "method": "transactionUnsubscribe", "params": [5]}
+            assert w.stats["watching"] == 0
+            eng = SimpleNamespace(insider_watch=w, s=s, _credits_exhausted=True)
+            assert Engine._insider_note(eng) == " | insider watch: paused, the month's Helius credits are spent"
+            eng._credits_exhausted = False
+            assert Engine._insider_note(eng).endswith(", 3 Helius credits since start")
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 3)
+            await db.close()
+    asyncio.run(go())
+
+
 def test_the_watch_does_not_start_without_a_key_or_when_switched_off(s):
     async def go():
         stop = asyncio.Event()

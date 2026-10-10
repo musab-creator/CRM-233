@@ -186,7 +186,8 @@ class Engine:
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
-        self.insider_watch = InsiderWatch(self.s, self.db, self.positions, self._curve_key_of)
+        self.insider_watch = InsiderWatch(self.s, self.db, self.positions, self._curve_key_of, helius=self.helius,
+                                          paused=lambda: self._credits_exhausted)
         if self.live_lock and self.tg.enabled:
             await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
                                + (", exits of open positions still run." if kp is not None
@@ -251,9 +252,12 @@ class Engine:
             return ""
         if w.error:
             return f" | insider watch: {w.error}"
+        if self._credits_exhausted:
+            return " | insider watch: paused, the month's Helius credits are spent"
         st = w.stats
         return (f" | insider watch: {st['watching']} coin(s), {st['insider_sells']} insider sells, "
-                f"{st['warnings']} warnings" + (f", {st['exits']} exits" if self.s.INSIDER_EXIT else ""))
+                f"{st['warnings']} warnings" + (f", {st['exits']} exits" if self.s.INSIDER_EXIT else "")
+                + f", {w.credits} Helius credits since start")
 
     def _pin(self, mint: str, on: bool) -> None:
         """Candidates, positions and shadows: read their curves often; stream their trades if paid for."""

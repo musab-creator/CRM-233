@@ -44,6 +44,7 @@ log = logging.getLogger("bot.insiders")
 CURVE_RENT_SOL = 0.00205      # rent-exempt reserve of a 166-byte bonding-curve account: not real SOL
 RESUBSCRIBE_S = 2.0           # how often the set of watched curves is compared with the subscription
 REFUSED_RETRY_S = 1800.0      # a subscription Helius refuses (plan, method) is retried this much later
+STREAM_BYTES_PER_CREDIT = 50_000   # Helius bills streamed data at 2 credits per 0.1 MB, and 1 per connection
 THRESHOLDS = (0.5, 1.0, 2.0, 3.0, 5.0)   # report: % of the supply sold by insiders since entry
 
 
@@ -117,10 +118,16 @@ class SubscriptionRefused(Exception):
 
 
 class InsiderWatch:
-    def __init__(self, s: Settings, db: Database, positions, curve_key_of, connect=None):
+    def __init__(self, s: Settings, db: Database, positions, curve_key_of, connect=None, helius=None,
+                 paused=None):
         self.s, self.db, self.positions = s, db, positions
         self.curve_key_of = curve_key_of            # mint -> bonding-curve key, None once graduated or unknown
         self._connect = connect or websockets.connect
+        self.helius = helius                        # its `credits` counter: the engine's monthly pacing reads it
+        self.paused = paused or (lambda: False)     # true while the month's Helius credits are spent
+        self.credits = 0                            # what the stream cost this run, in Helius credits
+        self._bytes = 0
+        self._connections = 0
         self._insiders: dict[int, dict[str, dict]] = {}   # candidate id -> insider set
         self._sold: dict[int, float] = {}                  # position id -> insider tokens sold since entry
         self._warned: set[int] = set()
@@ -133,9 +140,22 @@ class InsiderWatch:
     def _url(self) -> str:
         return self.s.HELIUS_WS_URL.format(key=self.s.HELIUS_API_KEY)
 
+    def _meter(self, n_bytes: int = 0, connection: bool = False) -> None:
+        """Add what the stream costs to the Helius client's credits, which the engine records and paces
+        with the RPC calls: 1 credit per connection and 2 per 0.1 MB received."""
+        self._bytes += n_bytes
+        self._connections += int(connection)
+        due = self._connections + self._bytes // STREAM_BYTES_PER_CREDIT
+        if due > self.credits:
+            if self.helius is not None and hasattr(self.helius, "credits"):
+                self.helius.credits += due - self.credits
+            self.credits = due
+
     def targets(self) -> dict[str, list[Watched]]:
         """Open positions on a bonding curve, real ones first, then the newest shadows, at most
-        INSIDER_WATCH_MAX curves."""
+        INSIDER_WATCH_MAX curves. None while the month's Helius credits are spent."""
+        if self.paused():
+            return {}
         held = [p for p in self.positions.positions.values() if p.status == "open" and p.candidate_id]
         held.sort(key=lambda p: (p.kind != "real", -(p.opened_at or 0)))
         out: dict[str, list[Watched]] = {}
@@ -268,6 +288,7 @@ class InsiderWatch:
                 raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            self._meter(len(raw) if isinstance(raw, (str, bytes)) else 0)
             try:
                 msg = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
@@ -300,6 +321,7 @@ class InsiderWatch:
                 async with self._connect(self._url(), ping_interval=20, ping_timeout=20, max_size=2 ** 23,
                                          open_timeout=20) as ws:
                     attempt = 0
+                    self._meter(connection=True)
                     await self._session(ws, stop)
             except SubscriptionRefused as e:
                 self.error = f"Helius refused the trade subscription: {e}"
