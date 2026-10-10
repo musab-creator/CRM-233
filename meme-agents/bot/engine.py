@@ -780,11 +780,18 @@ class Engine:
         await self._refresh_regime()
         await self._hourly_digest()
         if utc_day() != day:
-            text, path = await write_daily(self.db, self.s, day)
-            log.info("wrote %s", path)
-            await self.tg.send(f"Daily summary {day}\n" + text[:3500])
+            await self._send_daily(day)
             day = utc_day()
         return day
+
+    async def _send_daily(self, day: str) -> None:
+        """The day's report, to its file and to Telegram whole. 10 Oct: the summary was cut at
+        3,500 characters and stopped in the middle of the signal check, so the exit reasons, the
+        best and worst shadows and the moonshots never arrived. It now comes in as many messages
+        as it needs, in order."""
+        text, path = await write_daily(self.db, self.s, day)
+        log.info("wrote %s", path)
+        await self.tg.send_long(f"Daily summary {day}\n" + text)
 
     async def _refresh_regime(self) -> None:
         """Every REGIME_REFRESH_MIN: rebuild the market snapshot and ask the regime agent (or the

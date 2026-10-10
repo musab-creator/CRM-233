@@ -322,3 +322,33 @@ def test_report_shows_the_shape_of_shadow_returns(s):
     assert ex["top_pnl_share"] == pytest.approx((1.2 + 0.004) * 200 / ((1.2 - 0.015 - 0.012 + 0.004 - 0.02 - 0.011) * 200))
     assert "shadow returns: median" in text and "1 shadows at +1000% or more" in text
     assert "+4800%  RUN        cand 100   trailing stop            held 1.1h   $+240.00  1e-08 -> 4.9e-07" in text
+
+
+def test_the_daily_summary_arrives_whole(s, monkeypatch):
+    """10 Oct: the daily summary was cut at 3,500 characters, in the middle of the signal check;
+    everything after it (exit reasons, best and worst shadows, moonshots) never reached the phone."""
+    import bot.engine as engine_mod
+    from bot.engine import Engine
+    from bot.telegram import MAX_MESSAGE, Telegram
+    from tests.test_commands import FakeHttp
+
+    lines = [f"line {i:04d} " + "x" * 60 for i in range(400)]          # about 28,000 characters
+
+    async def long_report(db, settings, day):
+        return "\n".join(lines), "data/reports/daily.md"
+
+    monkeypatch.setattr(engine_mod, "write_daily", long_report)
+
+    async def go():
+        eng = Engine(s)
+        http = FakeHttp([])
+        eng.tg = Telegram(http, "123:abc", "42")
+        try:
+            await eng._send_daily("2026-10-09")
+        finally:
+            await eng.http.aclose()
+        return [body["text"] for method, body in http.posts if method == "sendMessage"]
+    sent = asyncio.run(go())
+    assert len(sent) > 1 and all(len(t) <= MAX_MESSAGE for t in sent)
+    assert sent[0].startswith("Daily summary 2026-10-09\nline 0000")
+    assert "\n".join(sent).split("\n")[1:] == lines                     # every line, in order, none cut
