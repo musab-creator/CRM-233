@@ -91,7 +91,8 @@ fi
 mkdir -p data logs reports
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "created .env from .env.example: add your keys (KEYS.md says where to get each one)"
+  # an update's staged build (update.sh sets MEME_AGENTS_VENV_DIR) gets a throwaway copy: no keys belong there
+  [ -n "${MEME_AGENTS_VENV_DIR:-}" ] || echo "created .env from .env.example: add your keys (KEYS.md says where to get each one)"
 fi
 chmod 600 .env
 # the suite checks update.sh in both modes itself; a deploy from the phone must not leak the ops service's flag into it
@@ -143,7 +144,8 @@ if [ "$CRON" = 1 ]; then
   echo "health check added to crontab (every 5 minutes, results in logs/health.log)"
 fi
 
-if [ "$UNITS_ONLY" = 0 ]; then
+# the keys hint is for a first install: not for an update's staged build, nor a .env that has its keys
+if [ "$UNITS_ONLY" = 0 ] && [ -z "${MEME_AGENTS_VENV_DIR:-}" ] && ! grep -Eq '^ANTHROPIC_API_KEY=[^[:space:]#]' .env; then
   echo
   echo "next: put your keys in .env, then run: .venv/bin/python -m bot preflight"
 fi

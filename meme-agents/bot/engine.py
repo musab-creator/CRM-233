@@ -18,7 +18,7 @@ from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs, build_veto_specs
 from .agents.triage import run_triage, triage_first_call_usd, triage_skips, verify_triage
 from .budget import Budget, utc_day, utc_month
-from .commands import TelegramCommands
+from .commands import LOSS_CAP_PREFIX, TelegramCommands
 from .ops import consume_keep_pause
 from .config import Settings, validate_settings
 from .consensus import VETO_AGENTS, apply_vetoes, gate
@@ -1003,8 +1003,8 @@ class Engine:
             if clean_stop and consume_keep_pause(self.s):
                 # a restart queued from Telegram (not /restart reset): the day's loss window survives it,
                 # and so does a daily-loss pause
-                log.warning("restart from Telegram keeps the daily loss window%s",
-                            " and the daily-loss pause" if self.risk.paused_reason else "")
+                log.warning("restart from Telegram keeps the daily loss window%s", " and the daily-loss pause"
+                            if str(self.risk.paused_reason or "").startswith(LOSS_CAP_PREFIX) else "")
                 clean_stop = False
             await self.shutdown(clean_stop=clean_stop)
 
