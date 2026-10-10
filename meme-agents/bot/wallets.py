@@ -64,7 +64,7 @@ BACKFILL_DAYS = 14.0          # coins evaluated this far back are read back from
 BACKFILL_PAGES = 100          # signature pages to reach a busy (often graduated) coin's launch
 BACKFILL_CONCURRENCY = 3      # transaction reads in flight for one read-back
 BACKFILL_ATTEMPTS = 3
-BURN_IN_S = 86400.0           # the walk-forward scores coins this long after its covered data starts
+BURN_IN_S = 86400.0           # the walk-forward scores coins this long after its first replayed coin
 HORIZON_S = 86400.0           # the walk-forward's outcome: the coin reached 2x within this long
 COVERAGE_MIN = 0.9            # share of a day's evaluated coins with launch buyers for the day to count
 FEATURES = ("wm_creator_launches", "wm_creator_best_x", "wm_launch_known", "wm_launch_serial",
@@ -476,8 +476,10 @@ class WalletMemory:
 
 async def walk_forward(db: Database, s: Settings, now: float | None = None) -> dict:
     """Replays the covered days (covered_since) through a book as the live one would have run, and scores
-    each coin evaluated at least a day after they start and a day before now with the six numbers it
-    would have had and what it did: its shadow's result and whether it reached 2x within HORIZON_S."""
+    each coin evaluated at least a day after the replay's first coin and a day before now with the six
+    numbers it would have had and what it did: its shadow's result and whether it reached 2x within
+    HORIZON_S. The day of warm-up runs from that first coin, not from its day's midnight: the first day
+    is often partial (the 14-day window cuts it, or the bot started mid-day)."""
     now = now or now_s()
     since = now - BACKFILL_DAYS * 86400
     outcomes = await coin_outcomes(db, since)
@@ -501,8 +503,9 @@ async def walk_forward(db: Database, s: Settings, now: float | None = None) -> d
     for ts in creator_times.values():
         ts.sort()
     book = WalletBook(s.LAUNCH_MEMORY_DAYS)
+    scored_from = coins[0]["t"] + BURN_IN_S if coins else None
     for i, o in enumerate(coins):
-        if start + BURN_IN_S <= o["t"] <= now - HORIZON_S and o["ret"] is not None:
+        if scored_from <= o["t"] <= now - HORIZON_S and o["ret"] is not None:
             launches_n = None
             if o["creator"]:                          # as _creator_launches counts them: the coin itself left out
                 ts = creator_times.get(o["creator"], [])

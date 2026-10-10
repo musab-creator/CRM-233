@@ -198,29 +198,33 @@ def test_past_coins_are_read_back_newest_first_and_failures_stop_after_three_tri
     assert {"WIN", "TOPONLY"} <= set(mem.book.coins) and mem._queue == []
 
 
-def test_the_walk_forward_scores_each_coin_on_what_was_known_then(s):
+@pytest.mark.parametrize("hour", [0.5, 12.5, 23.5])
+def test_the_walk_forward_scores_each_coin_on_what_was_known_then(s, monkeypatch, hour):
     """Wallets that bought early into coins that ran come back in more winners: the walk-forward
-    shows it, without a coin's own outcome ever reaching its numbers."""
+    shows it, without a coin's own outcome ever reaching its numbers. The same at any hour: the
+    replay's first day is partial, and its day of warm-up runs from its first coin, not from midnight."""
     from bot.wallets import BURN_IN_S, HORIZON_S
+
+    now = (time.time() // 86400 - 1) * 86400 + hour * H            # yesterday at this hour (UTC)
+    monkeypatch.setattr("bot.wallets.now_s", lambda: now)
+    t0 = now - 6 * 24 * H
 
     async def go():
         db = await Database(s.DB_PATH).open()
         try:
-            now = time.time()
-            t0 = now - 6 * 24 * H
             for i in range(120):
                 t = t0 + i * H
                 good = i % 4 == 0
                 await _coin(db, f"M{i}", t, creator=f"D{i}", peak=(6e-7 if good else 1.1e-7), peak_at=t + H,
                             pnl=0.03 if good else -0.02,
                             wallets=(("S1", "S2", f"F{i}") if good else (f"F{i}", f"G{i}")))
-            return now, t0, await walk_forward(db, s, now), await wallet_summary(db, s)
+            return await walk_forward(db, s, now), await wallet_summary(db, s)
         finally:
             await db.close()
-    now, t0, wf, m = asyncio.run(go())
+    wf, m = asyncio.run(go())
     start = (t0 // 86400) * 86400
-    want = [i for i in range(120) if start + BURN_IN_S <= t0 + i * H <= now - HORIZON_S]
-    assert wf["covered_from"] == start and len(wf["rows"]) == len(want) > 40 and m["scored"] == len(want)
+    want = [i for i in range(120) if t0 + BURN_IN_S <= t0 + i * H <= now - HORIZON_S]
+    assert wf["covered_from"] == start and len(wf["rows"]) == len(want) == 96 and m["scored"] == 96
     smart = next(c for c in feature_check(wf["rows"]) if c["feature"] == "wm_launch_smart")
     assert smart["split"] == "above" and smart["hi"]["x2_rate"] == 1.0 and smart["lo"]["x2_rate"] == 0.0
     assert smart["hi"]["win_rate"] == 1.0 and smart["lo"]["win_rate"] == 0.0
