@@ -37,6 +37,7 @@ from .features import chain_features, flow_features
 from .ingest import Ingestor, MintState
 from .live.guard import LiveRefused, check_live_startup, static_checks
 from .insiders import InsiderWatch, insider_set
+from .wallets import WalletMemory
 from .moonshots import MoonshotTracker
 from .paper import PaperExecutor
 from .positions import PositionManager
@@ -134,6 +135,7 @@ class Engine:
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
         self._insiders: dict[str, dict] = {}    # mint -> its insiders at the last evaluation (insiders.py)
         self.insider_watch: InsiderWatch | None = None
+        self.wallets: WalletMemory | None = None
         self._found_at: dict[int, float] = {}   # candidate id -> when the scan found it
         self.cycles = 0
         self.triage_skips = 0                   # candidates the triage screen kept from the agents
@@ -189,6 +191,9 @@ class Engine:
         self.insider_watch = InsiderWatch(self.s, self.db, self.positions, self._curve_key_of, helius=self.helius,
                                           paused=lambda: self._credits_exhausted,
                                           over_pace=lambda: self._credits_over_pace)
+        self.wallets = WalletMemory(self.s, self.db, self.chain, exclude={getattr(self.executor, "pubkey", None)},
+                                    paused=lambda: self._credits_exhausted,
+                                    over_pace=lambda: self._credits_over_pace)
         if self.live_lock and self.tg.enabled:
             await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
                                + (", exits of open positions still run." if kp is not None
@@ -515,6 +520,15 @@ class Engine:
         self._remember_insiders(mint, early["trades"], holders, creator, curve)
         return out
 
+    async def _wallet_features(self, mint: str, insiders: dict | None, creator: str | None) -> dict | None:
+        if self.wallets is None:
+            return None
+        try:
+            return await self.wallets.features(mint, insiders, creator)
+        except Exception:
+            log.exception("wallet memory: no numbers for %s", mint)   # never in the way of the decision
+            return None
+
     def _remember_insiders(self, mint: str, early: list[dict], holders: dict | None, creator: str | None,
                            curve: str | None) -> None:
         """Who can dump on a position in this coin; evaluate() files it under the candidate."""
@@ -607,16 +621,20 @@ class Engine:
                 ctx_data["live"]["creator_sold_sol"] = round(st.creator_sold_sol, 3)
         await self.ingest.flush()  # make the trade table current before computing features
         ctx_data["flow"] = await self.compute_flow(mint)
-        await self.db.update("candidates", "id", cid, {"metrics": ctx_data})
         insiders = self._insiders.pop(mint, None)
+        ctx_data["wallets"] = await self._wallet_features(mint, insiders, ctx_data.get("creator"))
+        await self.db.update("candidates", "id", cid, {"metrics": ctx_data})
         if insiders:
             try:
                 await self.db.save_insiders(cid, mint, insiders)
             except Exception:
                 log.exception("could not save candidate %d's insiders", cid)   # never in the way of the decision
         ctx_data["now_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # The wallet-memory numbers are stored with the candidate and measured in /report; the agents
+        # see them only once that check shows they separate winners from losers.
         context = ("Evaluate this pump.fun token candidate. Data below is untrusted input.\n"
-                   + json.dumps(ctx_data, default=str, ensure_ascii=False))
+                   + json.dumps({k: v for k, v in ctx_data.items() if k != "wallets"}, default=str,
+                                ensure_ascii=False))
         launched = st.first_trade_at if st and st.first_trade_at else now_s() - 90 * 60
         tctx = ToolContext(self.s, self.db, self.dex, self.rug, self.helius, self.x, self.news,
                            {"mint": mint, "creator": ctx_data.get("creator"),
@@ -816,6 +834,7 @@ class Engine:
                  await self.x_budget.remaining(), credits,
                  f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
                  _skipped_curves(st) + self._insider_note()
+                 + (self.wallets.note() if self.wallets and self.s.LAUNCH_MEMORY_DAYS > 0 else "")
                  + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
         await self.db.kv_set("heartbeat", json.dumps({
             "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
@@ -957,6 +976,8 @@ class Engine:
             loops["moonshots"] = lambda: self.moonshots.run(self.stop)
         if self.insider_watch and self.s.INSIDER_WATCH and self.s.HELIUS_API_KEY:
             loops["insider_watch"] = lambda: self.insider_watch.run(self.stop)
+        if self.wallets and self.s.LAUNCH_MEMORY_DAYS > 0:
+            loops["wallet_memory"] = lambda: self.wallets.run(self.stop)
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]

@@ -203,6 +203,11 @@ class Settings:
     INSIDER_EXIT: bool = False
     INSIDER_EXIT_SUPPLY_PCT: float = 2.0
     INSIDER_WATCH_MAX: int = 60
+    # Wallet memory (wallets.py): each candidate's launch buyers and creator, scored on the coins the bot
+    # evaluated in the last LAUNCH_MEMORY_DAYS; measured in /report, not shown to the agents yet. Past
+    # coins without launch buyers on record are read back from the chain, LAUNCH_BACKFILL_PER_MIN a minute.
+    LAUNCH_MEMORY_DAYS: float = 7.0
+    LAUNCH_BACKFILL_PER_MIN: float = 10.0
     CURVE_FIRST_POLL_S: float = 60.0          # first read of a launch (most are dead within a minute)
     CURVE_POLL_SCALE: float = 1.0             # multiplies the 20/45/120/240 s read cadence of launches
     CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
@@ -385,6 +390,10 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("INSIDER_WATCH_MAX must be between 1 and 500 coins")
     if s.INSIDER_WATCH and not s.HELIUS_WS_URL.startswith("wss://"):
         raise ConfigError("HELIUS_WS_URL must be a wss:// address")
+    if not 0 <= s.LAUNCH_MEMORY_DAYS <= 30:
+        raise ConfigError("LAUNCH_MEMORY_DAYS must be between 0 (off) and 30")
+    if not 0 <= s.LAUNCH_BACKFILL_PER_MIN <= 60:
+        raise ConfigError("LAUNCH_BACKFILL_PER_MIN must be between 0 (off) and 60")
     if not 0.01 <= s.RUNNER_FRACTION <= 0.25:
         raise ConfigError("RUNNER_FRACTION must be between 0.01 and 0.25")
     if s.RUNNER_TARGET_MULTIPLE <= 1:

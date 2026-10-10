@@ -152,6 +152,9 @@ CREATE TABLE IF NOT EXISTS insider_trades (
 CREATE INDEX IF NOT EXISTS ix_insider_trades_pos ON insider_trades(position_id, ts);
 CREATE INDEX IF NOT EXISTS ix_insider_trades_sig ON insider_trades(position_id, signature, wallet);
 CREATE INDEX IF NOT EXISTS ix_fills_pos ON fills(position_id, side, ts);
+CREATE INDEX IF NOT EXISTS ix_insiders_mint ON insiders(mint);
+-- wallets.py: past coins whose launch buyers were read back from the chain (ok, empty, error)
+CREATE TABLE IF NOT EXISTS wallet_backfill (mint TEXT PRIMARY KEY, status TEXT, attempts INTEGER, at REAL, detail TEXT);
 """
 
 # Columns added after the first release: (table, column, type). Applied with ALTER TABLE when

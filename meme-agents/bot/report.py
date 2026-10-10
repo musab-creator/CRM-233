@@ -12,6 +12,8 @@ from .budget import utc_day
 from .config import Settings
 from .db import SPIKE_FACTOR, SPIKED_SHADOWS_SQL, Database
 from .insiders import insider_lines, insider_summary
+from .wallets import FEATURES as WALLET_FEATURES
+from .wallets import wallet_lines, wallet_summary
 from .moonshots import render_lines as moonshot_lines
 from .moonshots import summary as moonshot_summary
 from .paper import mark_to_market
@@ -193,7 +195,7 @@ def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 
 SIGNALS = ("sniper_top3_share", "bundle_like_buy_share", "early_buyer_retention", "effective_buyers",
            "top5_buyer_share", "dev_sold_pct_of_bought", "net_flow_sol_5m", "drawdown_from_peak_pct",
            "same_slot_as_launch_buyers", "bundle_like_share_of_launch_minute", "max_same_size_cluster_wallets",
-           "sniper_top3_share_of_launch_minute")
+           "sniper_top3_share_of_launch_minute", *WALLET_FEATURES)
 
 # Triage's bundling red flags (agents/prompts.py TRIAGE), checked against what flagged tokens did
 TRIAGE_FLAGS = (("same_slot_as_launch_buyers", ">=", 3), ("bundle_like_buy_share", ">", 0.2),
@@ -242,8 +244,10 @@ async def _flow_outcomes(db: Database) -> list[dict]:
         except (json.JSONDecodeError, TypeError):
             metrics = {}
         flow = metrics.get("flow") if isinstance(metrics, dict) else None
+        wallets = metrics.get("wallets") if isinstance(metrics, dict) else None
         out.append({"ret": r["pnl_sol"] / r["cost_sol"], "pnl_usd": r["pnl_usd"], "win": r["pnl_sol"] > 0,
-                    "flow": flow if isinstance(flow, dict) else {}})
+                    "flow": {**(flow if isinstance(flow, dict) else {}),
+                             **(wallets if isinstance(wallets, dict) else {})}})
     return out
 
 
@@ -378,6 +382,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "open_banked": _open_banked(open_rows),
         "moonshots": await moonshot_summary(db, s),
         "insiders": await insider_summary(db, s),
+        "wallets": await wallet_summary(db, s),
         "trades": [{"id": p["id"], "mint": p["mint"], "opened": _iso(p["opened_at"]), "closed": _iso(p["closed_at"]),
                     "size_usd": p["size_usd"], "exit": p["exit_reason"], "pnl_sol": p["pnl_sol"],
                     "pnl_usd": p["pnl_usd"]} for p in closed],
@@ -548,6 +553,7 @@ def render_text(r: dict) -> str:
         lines.append("real trades' exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
     lines += moonshot_lines(r.get("moonshots"))
     lines += insider_lines(r.get("insiders"))
+    lines += wallet_lines(r.get("wallets"))
     if r["open_positions"]:
         lines += ["", "== Open =="]
         for p in r["open_positions"]:

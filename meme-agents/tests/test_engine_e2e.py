@@ -80,6 +80,10 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
         assert all(v["error"] is None and v["tool_calls_ok"] >= 1 for v in vs)
         assert c["decision"] in ("BUY", "PASS") and c["gate_reason"]
         flow = json.loads(c["metrics"])["flow"]
+        # the wallet-memory numbers are stored with the candidate (None until the book has loaded)
+        wm = json.loads(c["metrics"])["wallets"]
+        assert wm is None or set(wm) == {"wm_creator_launches", "wm_creator_best_x", "wm_launch_known",
+                                         "wm_launch_serial", "wm_launch_smart", "wm_launch_2x_rate"}
         if stream == "off":
             # per-token state came from the chain: curve reads, holder counts, launch-minute trades
             assert flow["source"] == "chain" and flow["launch_minute_trades"] > 0 and "error" not in flow
@@ -100,6 +104,9 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
     else:
         assert r["trades"] > 100 and eng.ingest.stats["stream_trades"] > 100
     assert {sh["candidate_id"] for sh in r["shadows"]} >= {c["id"] for c in r["evaluated"]}
+    assert any(json.loads(c["metrics"])["wallets"] for c in r["evaluated"])      # the book loaded and answered
+    # ... and kept from the agents until /report shows they separate winners from losers
+    assert eng.llm.contexts and not any('"wallets"' in ctx or "wm_launch" in ctx for ctx in eng.llm.contexts)
     assert any("DECISION" in rec.getMessage() for rec in caplog.records)
     # grounded BUYs must survive the guard (a guard that rejects everything would pass silently otherwise)
     assert any(v["raw_vote"] == "BUY" and v["vote"] == "BUY" and v["guard"] is None for v in r["votes"])
