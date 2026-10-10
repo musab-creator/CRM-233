@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import asdict, dataclass, fields
 from math import isfinite
 from typing import Awaitable, Callable
@@ -34,6 +35,7 @@ def urgent_exit(reason: str, attempts: int = 0) -> bool:
     return reason in ("stop_loss", "kill_switch") or reason.startswith("emergency") or attempts > 0
 
 TICK_CONFIRM_S = 300.0   # a held mark is confirmed by a second one near it within this long
+RISK_NOTE_EVERY_S = 900.0   # one NO ENTRY notice per kind of risk refusal per 15 minutes; the rest are logged
 
 
 @dataclass
@@ -76,6 +78,14 @@ class Position:
     runner_max_hold_hours: float | None = None
     runner_active: int = 0              # the core is sold and the runner is held
     liq_source: str | None = None       # what entry_liq_usd was measured on: "curve" or "pool:<address>"
+    # every mark from the entry on (None for a position opened before these were recorded): its lowest,
+    # when its peak came, and its lowest before that peak and before its first 2x of the entry price
+    trough_price: float | None = None
+    trough_at: float | None = None
+    peak_at: float | None = None
+    trough_before_peak: float | None = None
+    first_2x_at: float | None = None
+    trough_before_2x: float | None = None
 
     def row(self) -> dict:
         d = asdict(self)
@@ -160,6 +170,8 @@ class PositionManager:
         self._sender: asyncio.Task | None = None
         self._persisted: dict[int, tuple] = {}             # position id -> the marks last written
         self._kill_handled = False
+        self._risk_told: dict[str, float] = {}             # kind of risk refusal -> when it was last told
+        self._risk_quiet: dict[str, int] = {}              # ... and how many refusals went untold since
 
     # --- queries ---------------------------------------------------------------
     def active(self, kind: str | None = "real") -> list[Position]:
@@ -270,6 +282,7 @@ class PositionManager:
                 if not ok:
                     log.info("risk blocked entry %s: %s", mint, why)
                     await self.db.event("risk_block", {"mint": mint, "reason": why}, now_s())
+                    await self._tell_risk_block(mint, size_usd, why)
                     return None
             p = Position(id=None, mint=mint, candidate_id=candidate_id, kind=kind,
                          mode=self.executor.mode if kind == "real" else "paper", creator=creator,
@@ -282,6 +295,24 @@ class PositionManager:
             await self.watch_account(creator, True)
         log.info("%s entry queued #%d %s $%.2f (%.4f SOL)", kind, p.id, mint, size_usd, sol_in)
         return p
+
+    async def _tell_risk_block(self, mint: str, size_usd: float, why: str) -> None:
+        """A gate BUY the risk check refused is news, like an entry that never filled (10 Oct: refusals
+        were only logged). The same kind of refusal, its numbers aside, is told once per
+        RISK_NOTE_EVERY_S, with the count of those refused in between."""
+        if not self.notify:
+            return
+        kind, now = re.sub(r"\d+(?:\.\d+)?", "#", why), now_s()
+        last = self._risk_told.get(kind)
+        if last is not None and now - last < RISK_NOTE_EVERY_S:
+            self._risk_quiet[kind] = self._risk_quiet.get(kind, 0) + 1
+            return
+        quiet = self._risk_quiet.pop(kind, 0)
+        self._risk_told[kind] = now
+        since = (f"\n{quiet} more gate BUY{'s' if quiet != 1 else ''} refused for this since the last notice"
+                 if quiet else "")
+        self._say(f"⚪ NO ENTRY {await self._symbol(mint)} [{self.executor.mode}] ${size_usd:.2f}: risk check: "
+                  f"{why}{since}\n{mint}")
 
     def _is_live(self, p: Position) -> bool:
         return p.kind == "real" and getattr(self.executor, "mode", "paper") == "live"
@@ -411,8 +442,8 @@ class PositionManager:
             self.positions[p.id] = p
         p.status, p.opened_at = "open", ts
         p.entry_price = price
-        p.peak_price = p.last_price = price
-        p.last_tick_at = ts
+        p.peak_price = p.last_price = p.trough_price = p.trough_before_peak = price
+        p.last_tick_at = p.trough_at = p.peak_at = ts
         p.tokens_initial = p.tokens_remaining = f.tokens
         p.cost_sol = f.sol
         p.exit_reason = None
@@ -660,7 +691,15 @@ class PositionManager:
         if self._implausible(p, price, ts, source, detail):
             return
         p.last_price, p.last_tick_at = price, ts
-        p.peak_price = max(p.peak_price or price, price)
+        tracked = p.trough_price is not None           # marked from its entry, not from a restart into new code
+        if tracked and price < p.trough_price:
+            p.trough_price, p.trough_at = price, ts
+        if p.peak_price is None or price > p.peak_price:
+            p.peak_price = price
+            if tracked:
+                p.peak_at, p.trough_before_peak = ts, p.trough_price
+        if tracked and p.first_2x_at is None and p.entry_price and price >= 2 * p.entry_price:
+            p.first_2x_at, p.trough_before_2x = ts, p.trough_price
         if p.pending_exit:
             if not urgent_exit(p.pending_exit):
                 # a planned sale still queued when the price reaches the stop loss: the stop loss takes
@@ -788,12 +827,15 @@ class PositionManager:
         rows = []
         for p in list(self.positions.values()):
             if p.status == "open" and p.id:
-                marks = (p.last_price, p.peak_price, p.last_tick_at, p.last_liq_usd, p.entry_liq_usd, p.liq_source)
+                marks = (p.last_price, p.peak_price, p.last_tick_at, p.last_liq_usd, p.entry_liq_usd, p.liq_source,
+                         p.trough_price, p.trough_at, p.peak_at, p.trough_before_peak, p.first_2x_at,
+                         p.trough_before_2x)
                 if self._persisted.get(p.id) != marks:
                     self._persisted[p.id] = marks
                     rows.append((*marks, p.id))
         await self.db.executemany("UPDATE positions SET last_price=?, peak_price=?, last_tick_at=?, last_liq_usd=?, "
-                                  "entry_liq_usd=?, liq_source=? WHERE id=?", rows)
+                                  "entry_liq_usd=?, liq_source=?, trough_price=?, trough_at=?, peak_at=?, "
+                                  "trough_before_peak=?, first_2x_at=?, trough_before_2x=? WHERE id=?", rows)
         for pid in [k for k in self._persisted if (q := self.positions.get(k)) is None or q.status != "open"]:
             del self._persisted[pid]
 

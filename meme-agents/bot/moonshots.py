@@ -8,7 +8,12 @@ bought, passed, were vetoed or skipped them at triage, and what the bot's trade 
 
 A confirmed peak is the lower of two consecutive reads: one bad quote, or a spike that lasts a
 single poll, never counts, at the cost of understating a peak by what the price moved between two
-reads. The tracker measures; it never trades."""
+reads. A confirmed low is the higher of two, for the same reason. The tracker measures; it never trades.
+
+Dips and timing (10 Oct: 14 of the 36 bought coins doubled, yet only 9 of 33 closed trades won):
+for each coin it also keeps its lowest price before its peak and before its first 2x of the price
+the bot saw, when that 2x came, and its price 6, 12 and 24 hours after the bot saw it. Its shadow's
+own marks cover the time the shadow was open, trade by trade."""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +27,7 @@ from .config import Settings
 from .db import SPIKED_SHADOWS_SQL, Database
 from .feeds.dexscreener import sol_price_native
 from .feeds.http import HttpError
+from .paper import open_result
 from .util import now_s
 
 log = logging.getLogger("bot.moonshots")
@@ -35,7 +41,12 @@ OLD_EVERY = 4
 NEVER_LISTED_MISSES = 24   # a coin DexScreener never priced in SOL is dropped after this many empty reads
 LATE_FIRST_READ_S = 86400.0
 COLS = ("peak_price", "peak_at", "peak_mcap_usd", "prev_price", "last_price", "last_mcap_usd", "last_at",
-        "first_at", "supply", "polls", "readings", "misses", "alerted_at", "done")
+        "first_at", "supply", "polls", "readings", "misses", "alerted_at", "done", "low_price", "low_at",
+        "low_before_peak", "first_2x_at", "low_before_2x", "price_6h", "price_12h", "price_24h", "low_0h_6h",
+        "low_6h_12h", "low_12h_24h")
+SNAPSHOTS = ((6, "price_6h"), (12, "price_12h"), (24, "price_24h"))
+WINDOWS = ((0, 6, "low_0h_6h"), (6, 12, "low_6h_12h"), (12, 24, "low_12h_24h"))
+SNAPSHOT_LATE_S = 7200.0   # a first read this long after the hour is no picture of the price at that hour
 FETCH_ERRORS = (HttpError, httpx.HTTPError, asyncio.TimeoutError)
 
 
@@ -63,7 +74,10 @@ def reading(pairs: list[dict] | None) -> dict | None:
 
 
 def advance(row: dict, r: dict | None, now: float) -> dict:
-    """The row after one read: a new peak only when this read and the one before both reached it."""
+    """The row after one read: a new peak only when this read and the one before both reached it, a new
+    low only when both fell to it. A row with `dips` also keeps its low before the peak and before the
+    first 2x of the price the bot saw (the low as it stood before the read that confirmed it), when
+    that 2x came, its price 6, 12 and 24 hours after the bot saw it and its lowest in between."""
     out = {**row, "polls": (row["polls"] or 0) + 1, "last_at": now}
     if r is None:
         out["misses"] = (row["misses"] or 0) + 1
@@ -74,12 +88,29 @@ def advance(row: dict, r: dict | None, now: float) -> dict:
     out.update(readings=(row["readings"] or 0) + 1, misses=0, last_price=price, prev_price=price,
                last_mcap_usd=r["mcap_usd"], first_at=row["first_at"] or now, supply=r["supply"] or row["supply"])
     prev = row["prev_price"]
+    dips, ref, seen = row.get("dips"), row.get("ref_price"), row.get("ref_at")
+    if dips and seen:
+        age = now - seen
+        for hours, col in SNAPSHOTS:
+            if row.get(col) is None and hours * 3600 <= age <= hours * 3600 + SNAPSHOT_LATE_S:
+                out[col] = price
     if prev and prev > 0:
         confirmed = min(prev, price)
         if confirmed > (row["peak_price"] or 0):
             out.update(peak_price=confirmed, peak_at=now,
                        peak_mcap_usd=confirmed * r["sol_usd"] * out["supply"] if r["sol_usd"] and out["supply"]
                        else None)
+            if dips:
+                out["low_before_peak"] = row.get("low_price")
+        if dips and ref and ref > 0 and row.get("first_2x_at") is None and confirmed >= 2 * ref:
+            out.update(first_2x_at=now, low_before_2x=row.get("low_price"))
+        low = max(prev, price)
+        if dips and low < (row.get("low_price") or math.inf):
+            out.update(low_price=low, low_at=now)
+        if dips and seen:
+            for start, end, col in WINDOWS:
+                if start * 3600 < now - seen <= end * 3600 and low < (row.get(col) or math.inf):
+                    out[col] = low
     return out
 
 
@@ -98,7 +129,8 @@ class MoonshotTracker:
             "AND NOT EXISTS (SELECT 1 FROM moonshots m WHERE m.mint=p.mint) ORDER BY p.opened_at, p.id",
             [now - self.s.MOONSHOT_TRACK_DAYS * 86400])
         await self.db.executemany(
-            "INSERT OR IGNORE INTO moonshots (mint, candidate_id, ref_price, ref_at, ref_sol_usd) VALUES (?,?,?,?,?)",
+            "INSERT OR IGNORE INTO moonshots (mint, candidate_id, ref_price, ref_at, ref_sol_usd, dips) "
+            "VALUES (?,?,?,?,?,1)",
             [(r["mint"], r["candidate_id"], r["entry_price"], r["opened_at"], r["sol_usd_entry"]) for r in rows])
         return len({r["mint"] for r in rows})
 
@@ -176,6 +208,220 @@ class MoonshotTracker:
 
 # --- what the report and the alert show -------------------------------------------------------
 
+def dip_record(r: dict, sh: dict | None) -> dict | None:
+    """A coin's dips and timing, as a change from the price the bot saw and seconds after it saw it: its
+    lowest so far and in its first 6 h, its lowest before its peak and before its first 2x, when each
+    came, and its price 6, 12 and 24 h on with its lowest in between. The first shadow's marks cover the
+    time it was open, trade by trade; the tracker's confirmed reads the rest. None for a coin tracked
+    before these were recorded."""
+    ref, seen = _num(r.get("ref_price")), _num(r.get("ref_at"))
+    if not r.get("dips") or not ref or ref <= 0 or seen is None:
+        return None
+    sh_trough, sh_trough_at = (_num(sh.get("trough_price")), _num(sh.get("trough_at"))) if sh else (None, None)
+    if sh_trough is None or sh_trough_at is None:
+        sh, sh_trough = None, None                  # a shadow opened before its marks were kept
+    sh_2x, tr_2x = _num(sh.get("first_2x_at")) if sh else None, _num(r.get("first_2x_at"))
+    if sh_2x is not None and (tr_2x is None or sh_2x <= tr_2x):
+        x2_at, low_2x = sh_2x, _num(sh.get("trough_before_2x"))
+    elif tr_2x is not None:
+        x2_at = tr_2x
+        low_2x = _lowest(r.get("low_before_2x"), sh_trough if sh and sh_trough_at <= tr_2x else None)
+    else:
+        x2_at = low_2x = None
+    sh_peak, sh_peak_at = (_num(sh.get("peak_price")) or 0, _num(sh.get("peak_at"))) if sh else (0, None)
+    tr_peak, tr_peak_at = _num(r.get("peak_price")) or 0, _num(r.get("peak_at"))
+    if sh_peak_at is not None and sh_peak >= tr_peak:
+        peak_at, low_peak = sh_peak_at, _num(sh.get("trough_before_peak"))
+    elif tr_peak > 0 and tr_peak_at is not None:
+        peak_at = tr_peak_at
+        before = (sh_trough if sh and sh_trough_at <= tr_peak_at else
+                  sh.get("trough_before_peak") if sh_peak_at is not None and sh_peak_at <= tr_peak_at else None)
+        low_peak = _lowest(r.get("low_before_peak"), before)
+    else:
+        peak_at = low_peak = None
+
+    timed = sh is not None and sh.get("status") == "closed" and sh.get("exit_reason") == "time_stop"
+
+    def vs_seen(v):
+        v = _num(v)
+        return v / ref - 1 if v and v > 0 else None
+    return {"low": vs_seen(_lowest(r.get("low_price"), sh_trough)),
+            "time_stop_sale": vs_seen(sh.get("last_price")) if timed else None,
+            "low_6h": vs_seen(_lowest(r.get("low_0h_6h"), sh_trough if sh and sh_trough_at <= seen + 6 * 3600
+                                      else None)),
+            "low_before_peak": vs_seen(low_peak), "peak_after_s": peak_at - seen if peak_at is not None else None,
+            "low_before_2x": vs_seen(low_2x), "x2_after_s": x2_at - seen if x2_at is not None else None,
+            **{f"p{h}h": vs_seen(r.get(col)) for h, col in SNAPSHOTS},
+            **{col: vs_seen(r.get(col)) for _, _, col in WINDOWS[1:]}}
+
+
+def _lowest(*values) -> float | None:
+    return min((v for v in map(_num, values) if v and v > 0), default=None)
+
+
+DIP_BUCKETS = ((-0.2, "above -20%"), (-0.4, "-20 to -40%"), (-0.5, "-40 to -50%"), (-0.6, "-50 to -60%"),
+               (-math.inf, "-60% or lower"))
+WIDER_STOPS = (0.5, 0.6)
+STOP_WINDOW_H = 6          # the what-ifs judge a stop inside the first 6 h: the time stop's default
+
+
+def _bucket_of(low: float) -> str:
+    """The dip bucket of a low (a change from the price seen): a stop at -X% fires at -X% or lower."""
+    for edge, label in DIP_BUCKETS:
+        if low > edge:
+            return label
+    return DIP_BUCKETS[-1][1]
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    n = len(xs)
+    return None if not n else xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def _between(low: float | None, stop: float, level: float) -> bool:
+    """A low through today's stop (-stop or lower) that a wider one at -level would have survived."""
+    return low is not None and -level < low <= -stop
+
+
+def _span(seconds: float, edges: tuple[float, ...]) -> int:
+    """Which of the hour ranges (up to each edge, then longer) `seconds` falls in."""
+    return next((i for i, e in enumerate(edges) if seconds <= e * 3600), len(edges))
+
+
+def dip_summary(rows: list[dict], s: Settings, now: float) -> dict | None:
+    """How deep the coins that later doubled dipped first, and what a wider stop or a later time stop
+    would have kept against what it would have cost. Counted from the recorded prices, not replayed:
+    a take-profit or trailing stop a longer-held coin would then have hit is not simulated, and each
+    change is in shares of the stake, as if the whole stake were still held."""
+    recs = [it for it in rows if it.get("dips")]
+    if not recs:
+        return None
+    stop, stake, window = s.STOP_LOSS_PCT / 100, s.POSITION_MIN_USD, STOP_WINDOW_H * 3600
+
+    def dip(it, key):
+        return it["dips"][key]
+    won = [it for it in recs if dip(it, "x2_after_s") is not None]
+    dips_2x = [dip(it, "low_before_2x") for it in won if dip(it, "low_before_2x") is not None]
+    buckets = {label: 0 for _, label in DIP_BUCKETS}
+    for low in dips_2x:
+        buckets[_bucket_of(low)] += 1
+    ten = [dip(it, "low_before_2x") for it in won if it["multiple"] >= 10 and dip(it, "low_before_2x") is not None]
+    to_2x = [0] * 5
+    for it in won:
+        to_2x[_span(dip(it, "x2_after_s"), (1, 6, 12, 24))] += 1
+    peaked = [it for it in won if dip(it, "peak_after_s") is not None]
+    to_peak = [0] * 4
+    for it in peaked:
+        to_peak[_span(dip(it, "peak_after_s"), (6, 24, 72))] += 1
+    # a wider stop, judged on coins whose first 6 h are over: the ones that doubled inside them after a dip
+    # through today's stop are kept; the rest of the dips through it run on to the wider stop, or to 6 h
+    done = [it for it in recs if it["ref_at"] and now - it["ref_at"] >= window]
+    quick = [it for it in done if dip(it, "x2_after_s") is not None and dip(it, "x2_after_s") <= window]
+    slow = [it for it in done if it not in quick]
+    wider = []
+    for level in (x for x in WIDER_STOPS if x > stop + 1e-9):
+        kept = [it for it in quick if _between(dip(it, "low_before_2x"), stop, level)]
+        through = [it for it in slow if dip(it, "low_6h") is not None and dip(it, "low_6h") <= -level]
+        held = [it for it in slow if _between(dip(it, "low_6h"), stop, level)]
+        at_6h = [dip(it, "p6h") + stop for it in held if dip(it, "p6h") is not None]
+        wider.append({"stop": level, "kept": len(kept), "kept_median_peak": _median([it["multiple"] for it in kept]),
+                      "kept_later": sum(1 for it in won if _between(dip(it, "low_before_2x"), stop, level)
+                                        and dip(it, "x2_after_s") > window),
+                      "fell_through": len(through), "held": len(held), "held_unread": len(held) - len(at_6h),
+                      "held_median": _median(at_6h),
+                      "usd": stake * (math.fsum(at_6h) - (level - stop) * len(through))})
+    # a later time stop, on the coins the time stop sold: what they did over the next hours
+    timed = [it for it in recs if dip(it, "time_stop_sale") is not None]
+    later = []
+    for hours, windows in ((12, ("low_6h_12h",)), (24, ("low_6h_12h", "low_12h_24h"))):
+        if hours <= s.TIME_STOP_HOURS:
+            continue
+        ready = [it for it in timed if now - it["ref_at"] >= hours * 3600 + SNAPSHOT_LATE_S]
+        doubled = stopped = unread = 0
+        moves = []
+        for it in ready:
+            sold, x2 = dip(it, "time_stop_sale"), dip(it, "x2_after_s")
+            if x2 is not None and s.TIME_STOP_HOURS * 3600 < x2 <= hours * 3600 and not (
+                    dip(it, "low_before_2x") is not None and dip(it, "low_before_2x") <= -stop):
+                doubled += 1
+            elif any(dip(it, w) is not None and dip(it, w) <= -stop for w in windows):
+                stopped += 1
+                moves.append(-stop - sold)
+            elif dip(it, f"p{hours}h") is not None:
+                moves.append(dip(it, f"p{hours}h") - sold)
+            else:
+                unread += 1
+        later.append({"hours": hours, "n": len(ready), "doubled": doubled, "stopped": stopped, "unread": unread,
+                      "sold": len(moves) - stopped, "median_move": _median(moves), "better": sum(m > 0 for m in moves),
+                      "usd": stake * math.fsum(moves)})
+    return {"n": len(recs), "since": min((it["ref_at"] for it in recs if it["ref_at"]), default=None),
+            "stop": stop, "time_stop_hours": s.TIME_STOP_HOURS, "stake_usd": stake,
+            "doubled": len(won), "dip_before_2x": buckets, "dip_unknown": len(won) - len(dips_2x),
+            "median_dip_before_2x": _median(dips_2x), "ten_x": len(ten),
+            "ten_x_through_stop": sum(low <= -stop for low in ten),
+            "time_to_2x": to_2x, "time_to_peak": to_peak,
+            "median_dip_before_peak": _median([dip(it, "low_before_peak") for it in peaked
+                                               if dip(it, "low_before_peak") is not None]),
+            "judged": len(done), "doubled_in_window": len(quick), "wider": wider,
+            "time_stopped": len(timed), "later": later}
+
+
+def dip_lines(d: dict | None) -> list[str]:
+    if not d:
+        return []
+    stop, stake = d["stop"], d["stake_usd"]
+    lines = ["", f"== Dips before the run: {d['n']} coins seen since {_when(d['since'])} UTC, from the price the "
+                 f"bot saw (today's stop -{stop:.0%}, time stop {d['time_stop_hours']:g}h) ==",
+             "lows: the shadow's own trades while it was open, then DexScreener every 15 min (hourly after a day); "
+             "a low or a 2x counts when two reads in a row reach it, so a dip between two reads is missed"]
+    n2 = d["doubled"]
+    lines.append(f"reached 2x: {n2} of {d['n']}" + (" (none yet)" if not n2 else
+                 "; their lowest price before the 2x: " + " | ".join(f"{k} {v}" for k, v in d["dip_before_2x"].items())
+                 + (f" | unknown {d['dip_unknown']}" if d["dip_unknown"] else "")
+                 + (f"  (median {d['median_dip_before_2x']:+.0%})" if d["median_dip_before_2x"] is not None else "")))
+    if d["ten_x"]:
+        lines.append(f"  of them reached 10x: {d['ten_x']}; {d['ten_x_through_stop']} of those fell through "
+                     f"-{stop:.0%} before their 2x")
+    if n2:
+        lines.append("time to 2x: " + " | ".join(f"{label} {v}" for label, v in zip(
+            ("under 1h", "1-6h", "6-12h", "12-24h", "over 24h"), d["time_to_2x"])))
+    if sum(d["time_to_peak"]):
+        lines.append("time to the peak, coins that reached 2x: " + " | ".join(f"{label} {v}" for label, v in zip(
+            ("under 6h", "6-24h", "1-3 days", "over 3 days"), d["time_to_peak"]))
+            + (f"  (median low before the peak {d['median_dip_before_peak']:+.0%})"
+               if d["median_dip_before_peak"] is not None else ""))
+    if d["wider"]:
+        lines.append(f"a wider stop, on the {d['judged']} coins whose first {STOP_WINDOW_H}h are over "
+                     f"({d['doubled_in_window']} doubled inside them; not replayed, shares of a ${stake:g} stake):")
+    for w in d["wider"]:
+        extra, band = w["stop"] - stop, f"-{stop:.0%} to -{w['stop']:.0%}"
+        peak = f", median peak {_x(w['kept_median_peak'])}" if w["kept_median_peak"] is not None else ""
+        later = (f"; {w['kept_later']} more doubled after {STOP_WINDOW_H}h and would also need a longer time stop"
+                 if w["kept_later"] else "")
+        lines.append(f"  -{w['stop']:.0%} keeps {w['kept']} that dipped {band} and then doubled within "
+                     f"{STOP_WINDOW_H}h{peak} (not valued){later}")
+        held = (f"; {w['held']} dipped {band} without doubling and would be held to {STOP_WINDOW_H}h"
+                + (f", selling a median {w['held_median']:+.0%} of the stake better than at -{stop:.0%}"
+                   if w["held_median"] is not None else "")
+                + (f" ({w['held_unread']} unread at {STOP_WINDOW_H}h)" if w["held_unread"] else ""))
+        lines.append(f"  -{w['stop']:.0%} costs: {w['fell_through']} fell through -{w['stop']:.0%} without doubling, "
+                     f"{extra:.0%} of the stake more each{held}; measured on these ${w['usd']:+.2f}")
+    if d["time_stopped"]:
+        lines.append(f"a later time stop, on the {d['time_stopped']} coins the time stop sold (the stop loss still on; "
+                     "the change against the time stop's sale, in shares of the stake):")
+    for x in d["later"]:
+        if not x["n"]:
+            lines.append(f"  to {x['hours']}h: none old enough yet")
+            continue
+        lines.append(f"  to {x['hours']}h ({x['n']} old enough): {x['doubled']} doubled after the sale (not valued), "
+                     f"{x['stopped']} fell through -{stop:.0%} first (sold there), {x['sold']} sold at {x['hours']}h"
+                     + (f"; against the time stop's sale: median {x['median_move']:+.0%}, {x['better']} better, "
+                        f"measured change ${x['usd']:+.2f}" if x["median_move"] is not None else "")
+                     + (f"; {x['unread']} unread" if x["unread"] else ""))
+    return lines
+
+
 def group_of(cand: dict | None, bought: bool) -> str:
     if bought:
         return "bought"
@@ -201,8 +447,10 @@ async def items(db: Database, s: Settings, mint: str | None = None) -> list[dict
     tracked = "mint IN (SELECT mint FROM moonshots)" + only
     shadows: dict[str, list[dict]] = {}
     for p in await db.fetchall("SELECT id, mint, peak_price, status, pnl_sol, cost_sol, exit_reason, opened_at, "
-                               "closed_at FROM positions WHERE kind='shadow' AND " + tracked + " ORDER BY opened_at, id",
-                               args):
+                               "closed_at, entry_price, last_price, runner_active, proceeds_sol, tokens_remaining, "
+                               "sol_usd_entry, trough_price, trough_at, peak_at, trough_before_peak, first_2x_at, "
+                               "trough_before_2x FROM positions WHERE kind='shadow' AND " + tracked
+                               + " ORDER BY opened_at, id", args):
         shadows.setdefault(p["mint"], []).append(p)
     trades: dict[str, list[dict]] = {}
     for p in await db.fetchall("SELECT id, mint, status, entry_price, size_usd, pnl_usd, exit_reason, runner_active "
@@ -224,6 +472,8 @@ async def items(db: Database, s: Settings, mint: str | None = None) -> list[dict
         from_tracker = tracker_peak is not None and tracker_peak >= (shadow_peak or 0) and tracker_peak >= ref
         supply, rate = _num(r["supply"]), _num(r["ref_sol_usd"])
         first = (shadows.get(r["mint"]) or [None])[0]
+        # the shadow the reference price came from: the first one that bought (sync skips a cancelled one)
+        filled = next((p for p in shadows.get(r["mint"], []) if (_num(p["entry_price"]) or 0) > 0), None)
         trade = (trades.get(r["mint"]) or [None])[0]
         cand = cands.get(r["mint"])
         out.append({
@@ -243,7 +493,11 @@ async def items(db: Database, s: Settings, mint: str | None = None) -> list[dict
             "shadow": None if not first else {
                 "status": first["status"], "exit": first["exit_reason"],
                 "ret": first["pnl_sol"] / first["cost_sol"] if first["status"] == "closed"
-                and _num(first["pnl_sol"]) is not None and (_num(first["cost_sol"]) or 0) > 0 else None},
+                and _num(first["pnl_sol"]) is not None and (_num(first["cost_sol"]) or 0) > 0 else None,
+                # an open runner at today's price (report.py counts it the same way)
+                "runner_ret": (open_result(first, s) or {}).get("ret") if first["status"] == "open"
+                and first["runner_active"] else None},
+            "dips": dip_record(r, filled if filled and filled["id"] not in spiked else None),
             "trade": None if not trade else {
                 "id": trade["id"], "status": trade["status"], "size_usd": trade["size_usd"],
                 "exit": trade["exit_reason"], "pnl_usd": _num(trade["pnl_usd"]), "runner": bool(trade["runner_active"]),
@@ -270,6 +524,7 @@ async def summary(db: Database, s: Settings, top: int = 8) -> dict | None:
             "over_10x": len(ten),
             "over_10x_shadow_sold_under_2x": sum(1 for it in ten if it["shadow"] and it["shadow"]["ret"] is not None
                                                  and it["shadow"]["ret"] < 1.0),
+            "dips": dip_summary(rows, s, now_s()),
             "top": sorted((it for it in rows if it["multiple"] >= 2), key=lambda it: -it["multiple"])[:top]}
 
 
@@ -296,6 +551,8 @@ def _when(ts: float | None) -> str:
 def _shadow_text(sh: dict | None) -> str:
     if not sh:
         return "none"
+    if sh.get("runner_ret") is not None:
+        return f"open runner {sh['runner_ret'] * 100:+.0f}% at today's price"
     if sh["status"] != "closed":
         return sh["status"]
     return f"{sh['exit'] or '?'} {sh['ret'] * 100:+.0f}%" if sh["ret"] is not None else (sh["exit"] or "?")
@@ -356,4 +613,4 @@ def render_lines(m: dict | None) -> list[str]:
             lines.append(f"  {_x(it['multiple']):>7} {it['symbol']} seen {_when(it['ref_at'])}{_peak_text(it)}{now}"
                          f" | #{it['candidate_id']} {it['group']}{reason} | shadow {_shadow_text(it['shadow'])}"
                          f" | trade {_trade_text(it['trade'])}")
-    return lines
+    return lines + dip_lines(m.get("dips"))

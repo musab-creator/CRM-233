@@ -167,3 +167,68 @@ def test_triage_bundling_flags_are_checked_on_every_shadow_including_skipped_one
     text = render_text(r)
     assert "== Triage's bundling flags on shadow outcomes" in text
     assert "same_slot_as_launch_buyers >= 3" in text and "triage-skipped ones included" in text
+
+
+def test_open_runners_count_at_todays_price_in_the_shadow_totals(s):
+    """10 Oct: 7 of the 15 best moonshots were runners still open, and every shadow figure counted
+    closed shadows only, so the book's best coins were missing from it for up to a week."""
+    from bot.paper import mark_to_market
+    from bot.report import shadow_extremes
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "M3", "symbol": "QI"})
+            for cid in (1, 2, 3, 4, 5):
+                await db.insert("candidates", {"id": cid, "mint": f"M{cid}", "ts": 1.0, "status": "evaluated",
+                                               "metrics": {"flow": {"sniper_top3_share": cid / 10}},
+                                               "decision": "BUY" if cid == 5 else "PASS"})
+                for agent in ("scout", "hunter", "analyst"):
+                    await db.insert("votes", {"candidate_id": cid, "agent": agent, "vote": "BUY", "confidence": 0.8})
+            for cid, pnl in ((1, -0.02), (2, 0.01)):
+                await db.insert("positions", {"mint": f"M{cid}", "candidate_id": cid, "kind": "shadow",
+                                              "status": "closed", "pnl_sol": pnl, "pnl_usd": pnl * 150,
+                                              "cost_sol": 0.05, "closed_at": 2.0})
+            runner = {"status": "open", "runner_active": 1, "cost_sol": 0.05, "proceeds_sol": 0.12,
+                      "tokens_initial": 1e6, "tokens_remaining": 1e5, "entry_price": 5e-8, "last_price": 5e-6,
+                      "sol_usd_entry": 150.0, "tp_done": 1, "opened_at": 1.0}
+            await db.insert("positions", {"mint": "M3", "candidate_id": 3, "kind": "shadow", **runner})
+            # an open shadow that is not a runner is still inside its normal exits: it waits
+            await db.insert("positions", {"mint": "M4", "candidate_id": 4, "kind": "shadow", **runner,
+                                          "runner_active": 0})
+            # a bought coin: the agents are judged on the real runner, the shadow book on the shadow
+            await db.insert("positions", {"mint": "M5", "candidate_id": 5, "kind": "real", "mode": s.MODE,
+                                          "size_usd": 7.5, **runner, "last_price": 1e-8})
+            await db.insert("positions", {"mint": "M5", "candidate_id": 5, "kind": "shadow", **runner,
+                                          "last_price": 1e-8})
+            plain = await agent_accuracy(db)
+            ex = await shadow_extremes(db, s=s)
+            return plain, ex, await build_report(db, s)
+        finally:
+            await db.close()
+    plain, ex, r = asyncio.run(go())
+    up = 0.12 + mark_to_market(1e5, 5e-6, s) - 0.05                # banked sales + the runner at its mark - cost
+    down = 0.12 + mark_to_market(1e5, 1e-8, s) - 0.05               # the runner is near worthless: still +0.07
+    assert up == pytest.approx(0.5369, abs=1e-4) and down == pytest.approx(0.0699, abs=1e-4)
+    assert r["shadow"]["closed_trades"] == 2                         # the closed book is unchanged
+    assert r["shadow_runners"] == {"n": 2, "wins": 2, "pnl_sol": pytest.approx(up + down),
+                                   "pnl_usd": pytest.approx((up + down) * 150)}
+    both = r["shadow_with_runners"]
+    assert both["closed_trades"] == 4 and both["win_rate"] == 0.75
+    assert both["pnl_usd"] == pytest.approx((-0.02 + 0.01 + up + down) * 150)
+    base = r["gate_sweep"][0]
+    assert base["n"] == 4 and base["open"] == 2 and r["gate_sweep_open"] == 2
+    assert r["signals_open"] == 2
+    assert r["scored_candidates"] == 4 and r["scored_open_runners"] == 2
+    scout = r["agents"]["scout"]
+    assert scout["runner_scored"] == 2 and scout["real_scored"] == 1 and scout["buy_winners"] == 3
+    assert plain["scored_candidates"] == 2 and plain["open_runners"] == 0   # without settings: closed only
+    assert ex["open"] == 2 and ex["over_10x"] == 1 and ex["best"][0]["exit"] == "open runner"
+    assert ex["best"][0]["symbol"] == "QI" and ex["best"][0]["ret"] == pytest.approx(up / 0.05)
+    text = render_text(r)
+    assert f"+ 2 open runners at today's price: 2 up, PnL ${(up + down) * 150:+.2f}" in text
+    assert "= together 4: win rate 75.0%" in text and "minus the cost; dollars at the buy's SOL price)" in text
+    assert "(includes 2 open runners at today's price, counted in the 'open' column; today's price = the sales" in text
+    assert "over 4 (2 of them open runners at today's price)" in text
+    assert "(2 of these coins are open runners at today's price; today's price = " in text
+    assert "open runner" in text and "; the 2 open runners count at today's price" in text

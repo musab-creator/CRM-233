@@ -73,6 +73,21 @@ def _ago(ts: float | None, now: float) -> str:
     return f"{d:.0f}s ago" if d < 120 else f"{d / 60:.0f}m ago" if d < 7200 else f"{d / 3600:.1f}h ago"
 
 
+def _wallet_line(hb: dict, s: Settings, now: float) -> str:
+    """The live wallet as the bot last read it (every 5 minutes), and a warning when it holds more than
+    the startup limit: the next restart or /update would come up with live entries locked."""
+    raw, at = hb.get("wallet_sol"), _positive(hb.get("wallet_at"))
+    sol = (float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+           and raw >= 0 else None)
+    if sol is None or at is None:
+        return "wallet: not read yet (the bot reads it every 5 minutes in live mode)"
+    rate = _positive(hb.get("sol_usd"))
+    usd = f" (~${sol * rate:,.2f})" if rate else ""
+    over = (f"; above the {s.LIVE_MAX_WALLET_SOL:g} SOL startup limit (LIVE_MAX_WALLET_SOL): the next restart or "
+            "/update starts with live entries locked until SOL is moved out" if sol > s.LIVE_MAX_WALLET_SOL else "")
+    return f"wallet: {sol:.4f} SOL{usd}, read {_ago(at, now)}{over}"
+
+
 async def health(db: Database, s: Settings, now: float | None = None) -> tuple[str, str]:
     """(state, one line) for monitoring: OK, PAUSED (alive, needs a human), DEGRADED (alive, but
     the agents fail, for example an expired key), DOWN or BLIND."""
@@ -157,6 +172,8 @@ async def build_status(db: Database, s: Settings) -> str:
     lines.append(f"budgets: LLM ${llm:.2f} of ${s.LLM_DAILY_BUDGET_USD:.2f} today{paced}, X ${xs:.2f} of "
                  f"${s.X_MONTHLY_BUDGET_USD:.2f} this month, Helius credits {hb.get('helius_credits_month') or 0} of "
                  f"{s.HELIUS_MONTHLY_CREDITS} this month{helius}")
+    if running_mode == "live":
+        lines.append(_wallet_line(hb, s, now))
 
     start = utc_midnight(now)
     f = {}

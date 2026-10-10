@@ -16,7 +16,7 @@ from .wallets import FEATURES as WALLET_FEATURES
 from .wallets import wallet_lines, wallet_summary
 from .moonshots import render_lines as moonshot_lines
 from .moonshots import summary as moonshot_summary
-from .paper import mark_to_market
+from .paper import mark_to_market, open_result
 from .util import now_s
 
 
@@ -62,10 +62,37 @@ async def spiked_shadow_count(db: Database) -> int:
     return int(row["c"] or 0) if row else 0
 
 
-async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
+# A runner holds its last tokens for up to RUNNER_MAX_HOLD_HOURS (a week) after its take-profit and core
+# sales, so its result stays out of every closed-trade figure for days (10 Oct: 7 of the 15 best
+# moonshots were open runners). The report values each one at its last mark instead: the sales so far
+# plus what the runner would fetch if sold now, minus the cost, in dollars at the buy's SOL price.
+RUNNER_NOTE = ("today's price = the sales so far plus what the runner would fetch at its last mark, minus "
+               "the cost; dollars at the buy's SOL price")
+
+
+async def _open_runners(db: Database, s: Settings, kind: str = "shadow", mode: str | None = None) -> list[dict]:
+    """Open runners valued at their last mark, oldest first: shadows (one booked at a price spike stays
+    out, as it does from the closed book) or the given mode's real positions."""
+    where, args = (("p.kind='shadow' AND p.id NOT IN (" + SPIKED_SHADOWS_SQL + ")", []) if kind == "shadow"
+                   else ("p.kind='real' AND (? IS NULL OR p.mode=? OR p.mode IS NULL)", [mode, mode]))
+    rows = await db.fetchall(
+        "SELECT p.id, p.mint, p.candidate_id, m.symbol, p.cost_sol, p.proceeds_sol, p.tokens_remaining, "
+        "p.last_price, p.sol_usd_entry, p.entry_price, p.opened_at FROM positions p LEFT JOIN mints m ON m.mint=p.mint "
+        "WHERE " + where + " AND p.status='open' AND p.runner_active=1 AND p.last_price>0 ORDER BY p.opened_at, p.id",
+        args)
+    out = []
+    for p in rows:
+        v = open_result(p, s)
+        if v is not None:
+            out.append({**p, **v})
+    return out
+
+
+async def agent_accuracy(db: Database, mode: str | None = None, s: Settings | None = None) -> dict:
     """Per agent: how often its BUY vote preceded a winner (real outcome if traded, else shadow),
     how often PASS avoided a loser, the lift of its BUYs over the base win rate, and its Brier
-    score (P(win) = confidence for BUY, 1 - confidence for PASS; 0.25 = coin flip, lower = better)."""
+    score (P(win) = confidence for BUY, 1 - confidence for PASS; 0.25 = coin flip, lower = better).
+    With settings, an open runner (the real one if traded, else the shadow) scores at today's price."""
     rows = await db.fetchall("""
         SELECT v.agent, v.vote, v.confidence, v.error, v.guard, v.candidate_id,
                (SELECT pnl_sol FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
@@ -84,12 +111,21 @@ async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
             OR EXISTS (SELECT 1 FROM positions p WHERE p.candidate_id=v.candidate_id AND p.kind='real'
                        AND (p.mode=? OR p.mode IS NULL)))
         """, [mode, mode, mode, mode, mode, mode])
+    runners: dict[str, dict[int, float]] = {"real": {}, "shadow": {}}
+    if s is not None:
+        closed_shadow = {r["candidate_id"] for r in await db.fetchall(
+            "SELECT DISTINCT candidate_id FROM positions WHERE kind='shadow' AND status='closed'")}
+        for kind, by_candidate in runners.items():
+            for p in await _open_runners(db, s, kind, mode):
+                if p["candidate_id"] is not None and not (kind == "shadow" and p["candidate_id"] in closed_shadow):
+                    by_candidate[p["candidate_id"]] = p["pnl_sol"]           # the latest one per candidate
     out: dict[str, dict] = {}
     outcomes: dict[int, bool] = {}
+    from_runner: set[int] = set()
     for r in rows:
         a = out.setdefault(r["agent"], {"votes": 0, "buy_votes": 0, "buy_scored": 0, "buy_winners": 0,
                                         "pass_scored": 0, "pass_losers": 0, "errors": 0, "guarded": 0,
-                                        "real_scored": 0, "shadow_scored": 0,
+                                        "real_scored": 0, "shadow_scored": 0, "runner_scored": 0,
                                         "_brier": [], })
         a["votes"] += 1
         a["guarded"] += int(bool(r.get("guard")))
@@ -98,13 +134,20 @@ async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
                 or not math.isfinite(confidence) or not 0 <= confidence <= 1):
             a["errors"] += 1
             continue
-        # A closed shadow cannot substitute for a real trade whose result is still open.
+        # A closed shadow cannot substitute for a real trade whose result is still open; an open
+        # runner (the real one if traded) scores at today's price
         pnl = r["real_pnl"] if r["traded"] else r["shadow_pnl"]
+        runner = pnl is None and r["candidate_id"] in runners["real" if r["traded"] else "shadow"]
+        if runner:
+            pnl = runners["real" if r["traded"] else "shadow"][r["candidate_id"]]
         if pnl is not None and not math.isfinite(pnl):
             pnl = None
         if pnl is not None:
             a["real_scored" if r["traded"] else "shadow_scored"] += 1
+            a["runner_scored"] += runner
             outcomes[r["candidate_id"]] = pnl > 0
+            if runner:
+                from_runner.add(r["candidate_id"])
             p_win = confidence if r["vote"] == "BUY" else 1 - confidence
             a["_brier"].append((p_win - (1.0 if pnl > 0 else 0.0)) ** 2)
         if r["vote"] == "BUY":
@@ -123,18 +166,35 @@ async def agent_accuracy(db: Database, mode: str | None = None) -> dict:
         a["buy_accuracy"] = a["buy_winners"] / a["buy_scored"] if a["buy_scored"] else None
         a["pass_accuracy"] = a["pass_losers"] / a["pass_scored"] if a["pass_scored"] else None
         a["buy_lift"] = a["buy_accuracy"] / base if a["buy_accuracy"] is not None and base else None
-    return {"agents": out, "base_win_rate": base, "scored_candidates": len(outcomes)}
+    return {"agents": out, "base_win_rate": base, "scored_candidates": len(outcomes), "open_runners": len(from_runner)}
 
 
-async def _scored_candidates(db: Database) -> list[dict]:
-    """Evaluated candidates with a closed shadow position, their final votes, and stored metrics."""
-    cands = await db.fetchall("""
-        SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
+async def _shadow_outcomes(db: Database, s: Settings | None = None) -> list[dict]:
+    """Each evaluated candidate's shadow result: its latest closed shadow, else (given the settings to
+    value it) its open runner at today's price, flagged `open`. Shadows booked at a spike stay out."""
+    rows = await db.fetchall("""
+        SELECT c.id, c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol, 0 AS open
         FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
         WHERE c.decision IS NOT NULL AND p.id NOT IN (""" + SPIKED_SHADOWS_SQL + """)
           AND p.id=(SELECT q.id FROM positions q WHERE q.candidate_id=c.id
                     AND q.kind='shadow' AND q.status='closed' ORDER BY q.closed_at DESC, q.id DESC LIMIT 1)
         ORDER BY p.closed_at, p.id""")
+    if s is None:
+        return rows
+    seen = {r["id"] for r in await db.fetchall(
+        "SELECT DISTINCT candidate_id id FROM positions WHERE kind='shadow' AND status='closed'")}
+    metrics = {c["id"]: c["metrics"] for c in await db.fetchall(
+        "SELECT id, metrics FROM candidates WHERE decision IS NOT NULL AND id IN (SELECT candidate_id FROM positions "
+        "WHERE kind='shadow' AND status='open' AND runner_active=1)")}
+    latest = {p["candidate_id"]: p for p in await _open_runners(db, s) if p["candidate_id"] in metrics}
+    rows += [{"id": cid, "metrics": metrics[cid], "pnl_sol": p["pnl_sol"], "pnl_usd": p["pnl_usd"],
+              "cost_sol": p["cost_sol"], "open": 1} for cid, p in latest.items() if cid not in seen]
+    return rows
+
+
+async def _scored_candidates(db: Database, s: Settings | None = None) -> list[dict]:
+    """Evaluated candidates with a shadow result (see _shadow_outcomes), their final votes, and stored metrics."""
+    cands = await _shadow_outcomes(db, s)
     votes = await db.fetchall("SELECT candidate_id, agent, vote, confidence, error FROM votes v "
                               "WHERE agent IN ('scout', 'hunter', 'analyst') AND NOT EXISTS "
                               "(SELECT 1 FROM votes newer WHERE newer.candidate_id=v.candidate_id "
@@ -164,7 +224,7 @@ async def _scored_candidates(db: Database) -> list[dict]:
                     "mean_conf": sum(v["confidence"] for v in vs) / 3,
                     "analyst_buy": analyst["vote"] == "BUY", "analyst_conf": analyst["confidence"],
                     "ret": c["pnl_sol"] / c["cost_sol"], "pnl_usd": c["pnl_usd"] or 0.0,
-                    "win": c["pnl_sol"] > 0,
+                    "win": c["pnl_sol"] > 0, "open": bool(c.get("open")),
                     "flow": metrics["flow"] if isinstance(metrics.get("flow"), dict) else {}})
     return out
 
@@ -173,7 +233,7 @@ def _bucket(rows: list[dict]) -> dict:
     n = len(rows)
     return {"n": n, "win_rate": sum(r["win"] for r in rows) / n if n else None,
             "avg_return": sum(r["ret"] for r in rows) / n if n else None,
-            "pnl_usd": sum(r["pnl_usd"] for r in rows)}
+            "pnl_usd": sum(r["pnl_usd"] for r in rows), "open": sum(bool(r.get("open")) for r in rows)}
 
 
 def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9)) -> list[dict]:
@@ -225,15 +285,10 @@ def signal_check(scored: list[dict]) -> list[dict]:
     return out
 
 
-async def _flow_outcomes(db: Database) -> list[dict]:
-    """Every evaluated candidate with a closed shadow, triage-skipped ones included (they have no
-    committee votes, so _scored_candidates leaves them out): its flow features and what it did."""
-    rows = await db.fetchall("""
-        SELECT c.metrics, p.pnl_sol, p.pnl_usd, p.cost_sol
-        FROM candidates c JOIN positions p ON p.candidate_id=c.id AND p.kind='shadow' AND p.status='closed'
-        WHERE c.decision IS NOT NULL AND p.id NOT IN (""" + SPIKED_SHADOWS_SQL + """)
-          AND p.id=(SELECT q.id FROM positions q WHERE q.candidate_id=c.id
-                    AND q.kind='shadow' AND q.status='closed' ORDER BY q.closed_at DESC, q.id DESC LIMIT 1)""")
+async def _flow_outcomes(db: Database, s: Settings | None = None) -> list[dict]:
+    """Every evaluated candidate with a shadow result (see _shadow_outcomes), triage-skipped ones included
+    (they have no committee votes, so _scored_candidates leaves them out): its flow features and what it did."""
+    rows = await _shadow_outcomes(db, s)
     out = []
     for r in rows:
         if not all(isinstance(r[k], (int, float)) and math.isfinite(r[k]) for k in ("pnl_sol", "pnl_usd", "cost_sol")) \
@@ -246,6 +301,7 @@ async def _flow_outcomes(db: Database) -> list[dict]:
         flow = metrics.get("flow") if isinstance(metrics, dict) else None
         wallets = metrics.get("wallets") if isinstance(metrics, dict) else None
         out.append({"ret": r["pnl_sol"] / r["cost_sol"], "pnl_usd": r["pnl_usd"], "win": r["pnl_sol"] > 0,
+                    "open": bool(r.get("open")),
                     "flow": {**(flow if isinstance(flow, dict) else {}),
                              **(wallets if isinstance(wallets, dict) else {})}})
     return out
@@ -345,8 +401,9 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "llm_budget_day": s.LLM_DAILY_BUDGET_USD,
         "x_budget_month": s.X_MONTHLY_BUDGET_USD,
     }
-    scored = await _scored_candidates(db)
-    flows = await _flow_outcomes(db)
+    runners = await _open_runners(db, s)
+    scored = await _scored_candidates(db, s)
+    flows = await _flow_outcomes(db, s)
     exit_reasons: dict[str, int] = {}
     for p in closed:
         exit_reasons[p["exit_reason"] or "?"] = exit_reasons.get(p["exit_reason"] or "?", 0) + 1
@@ -368,11 +425,19 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
                                      [p["pnl_sol"] or 0 for p in closed_day], opening_equity),
         "shadow": trade_metrics([p["pnl_usd"] or 0 for p in shadows], [p["pnl_sol"] or 0 for p in shadows],
                                 s.BANKROLL_USD),
-        **_agent_section(await agent_accuracy(db, s.MODE)),
+        "shadow_runners": {"n": len(runners), "wins": sum(p["pnl_sol"] > 0 for p in runners),
+                           "pnl_sol": math.fsum(p["pnl_sol"] for p in runners),
+                           "pnl_usd": math.fsum(p["pnl_usd"] for p in runners)},
+        "shadow_with_runners": trade_metrics([p["pnl_usd"] or 0 for p in shadows] + [p["pnl_usd"] for p in runners],
+                                             [p["pnl_sol"] or 0 for p in shadows] + [p["pnl_sol"] for p in runners],
+                                             s.BANKROLL_USD),
+        **_agent_section(await agent_accuracy(db, s.MODE, s)),
         "gate_sweep": gate_sweep(scored),
+        "gate_sweep_open": sum(r["open"] for r in scored),
         "signals": signal_check(flows),
+        "signals_open": sum(r["open"] for r in flows),
         "triage_flags": flag_check(flows),
-        "shadow_extremes": await shadow_extremes(db),
+        "shadow_extremes": await shadow_extremes(db, s=s),
         "shadow_spiked": await spiked_shadow_count(db),
         "funnel_day": funnel,
         "spend": spend,
@@ -393,10 +458,11 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     }
 
 
-async def shadow_extremes(db: Database, top: int = 5) -> dict:
+async def shadow_extremes(db: Database, top: int = 5, s: Settings | None = None) -> dict:
     """The shape of the shadow book's returns: median, the best and worst shadows with their exit,
     hold time and prices, and how much of the total PnL the best few carry. A mean return in the
-    hundreds of percent is either a few real runners or a few bad marks; this is how to tell."""
+    hundreds of percent is either a few real runners or a few bad marks; this is how to tell. With
+    settings, open runners count at today's price (exit "open runner", held so far)."""
     rows = await db.fetchall(
         "SELECT p.id, p.mint, p.candidate_id, m.symbol, p.cost_sol, p.pnl_sol, p.pnl_usd, p.exit_reason, "
         "p.opened_at, p.closed_at, p.entry_price, p.last_price FROM positions p LEFT JOIN mints m ON m.mint=p.mint "
@@ -410,8 +476,15 @@ async def shadow_extremes(db: Database, top: int = 5) -> dict:
                        "ret": p["pnl_sol"] / p["cost_sol"], "pnl_usd": p["pnl_usd"], "exit": p["exit_reason"] or "?",
                        "held_s": max(0.0, (p["closed_at"] or 0) - (p["opened_at"] or p["closed_at"] or 0)),
                        "entry_price": p["entry_price"], "last_price": p["last_price"]})
+    now, runners = now_s(), (await _open_runners(db, s) if s is not None else [])
+    for p in runners:
+        scored.append({"id": p["id"], "candidate_id": p["candidate_id"], "symbol": p["symbol"] or (p["mint"] or "?")[:8],
+                       "ret": p["ret"], "pnl_usd": p["pnl_usd"], "exit": "open runner", "open": True,
+                       "held_s": max(0.0, now - (p["opened_at"] or now)),
+                       "entry_price": p["entry_price"], "last_price": p["last_price"]})
     if not scored:
-        return {"n": 0, "median_return": None, "best": [], "worst": [], "top_pnl_share": None, "over_10x": 0}
+        return {"n": 0, "median_return": None, "best": [], "worst": [], "top_pnl_share": None, "over_10x": 0,
+                "open": 0}
     scored.sort(key=lambda r: r["ret"])
     n = len(scored)
     median = scored[n // 2]["ret"] if n % 2 else (scored[n // 2 - 1]["ret"] + scored[n // 2]["ret"]) / 2
@@ -420,12 +493,12 @@ async def shadow_extremes(db: Database, top: int = 5) -> dict:
     top_pnl = math.fsum(r["pnl_usd"] for r in best)
     return {"n": n, "median_return": median, "best": best, "worst": scored[:top],
             "top_pnl_share": (top_pnl / total) if total > 0 else None, "top_pnl_usd": top_pnl,
-            "over_10x": sum(r["ret"] >= 10 for r in scored)}
+            "over_10x": sum(r["ret"] >= 10 for r in scored), "open": len(runners)}
 
 
 def _agent_section(acc: dict) -> dict:
     return {"agents": acc["agents"], "base_win_rate": acc["base_win_rate"],
-            "scored_candidates": acc["scored_candidates"]}
+            "scored_candidates": acc["scored_candidates"], "scored_open_runners": acc.get("open_runners", 0)}
 
 
 def _iso(ts):
@@ -492,21 +565,34 @@ def render_text(r: dict) -> str:
                      f"Brier {_f(a['brier'], '{:.3f}')}  guarded {a['guarded']}  errors {a['errors']}  "
                      f"scored real {a.get('real_scored', 0)}, shadow {a.get('shadow_scored', 0)}")
     if r["agents"]:
+        runners = r.get("scored_open_runners") or 0
         lines.append(f"base win rate of scored candidates: {_f(r['base_win_rate'], '{:.0%}')} "
-                     f"over {r['scored_candidates']}  (lift > 1 = agent's BUYs beat the base rate; "
-                     "Brier 0.25 = coin flip, lower is better)")
+                     f"over {r['scored_candidates']}"
+                     + (f" ({runners} of them open runners at today's price)" if runners else "")
+                     + "  (lift > 1 = agent's BUYs beat the base rate; Brier 0.25 = coin flip, lower is better)")
     small = "  (small sample: n < 30, treat as noise)" if r["scored_candidates"] < 30 else ""
+    gate_open = r.get("gate_sweep_open") or 0
     lines += ["", "== Gate what-if on recorded votes (shadow outcomes, $5 each) ==" + small,
-              "(analyst BUY alone = what the neutral gate selects before Scout or Hunter remove anything)",
-              f"{'rule':28s} {'thresh':>6s} {'n':>4s} {'win':>6s} {'avg ret':>8s} {'PnL $':>8s}"]
+              "(analyst BUY alone = what the neutral gate selects before Scout or Hunter remove anything)"]
+    if gate_open:
+        lines.append(f"(includes {gate_open} open runner{'s' if gate_open != 1 else ''} at today's price, counted in "
+                     f"the 'open' column; {RUNNER_NOTE})")
+    lines.append(f"{'rule':28s} {'thresh':>6s} {'n':>4s} {'win':>6s} {'avg ret':>8s} {'PnL $':>8s}"
+                 + (f" {'open':>4s}" if gate_open else ""))
     for g in r["gate_sweep"]:
         if g["rule"] != "pre-filter only (no agents)" and g["n"] == 0:
             continue
         lines.append(f"{g['rule']:28s} {_f(g['threshold'], '{:.2f}', '-'):>6s} {g['n']:>4d} "
-                     f"{_f(g['win_rate'], '{:.0%}'):>6s} {_f(g['avg_return'], '{:+.1%}'):>8s} {g['pnl_usd']:>+8.2f}")
+                     f"{_f(g['win_rate'], '{:.0%}'):>6s} {_f(g['avg_return'], '{:+.1%}'):>8s} {g['pnl_usd']:>+8.2f}"
+                     + (f" {g.get('open', 0):>4d}" if gate_open else ""))
+    flows_open = r.get("signals_open") or 0
+    flows_note = f"({flows_open} of these coins {'are open runners' if flows_open != 1 else 'is an open runner'} " \
+                 "at today's price" if flows_open else None
     if r["signals"]:
         lines += ["", "== Signal check: shadow outcomes above vs at/below each feature's median ==",
                   "(every evaluated candidate, triage-skipped ones included)"]
+        if flows_note:
+            lines.append(f"{flows_note}; {RUNNER_NOTE})")
         if any(sg.get("split") == "at" for sg in r["signals"]):
             lines.append("(\"at\" where the median is also the top value: the tokens at it vs the ones below)")
         for sg in r["signals"]:
@@ -519,6 +605,8 @@ def render_text(r: dict) -> str:
     flags = [f for f in r.get("triage_flags") or [] if f["flagged"]["n"] or f["clear"]["n"]]
     if flags:
         lines += ["", "== Triage's bundling flags on shadow outcomes (flagged tokens are skipped) =="]
+        if flows_note:
+            lines.append(flows_note + ")")
         for f in flags:
             a, b = f["flagged"], f["clear"]
             lines.append(f"{f['flag']:40s} flagged: n {a['n']:>3d} win {_f(a['win_rate'], '{:.0%}'):>4s} "
@@ -527,6 +615,12 @@ def render_text(r: dict) -> str:
     sh = r["shadow"]
     lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
               f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]
+    run, both = r.get("shadow_runners") or {}, r.get("shadow_with_runners") or {}
+    if run.get("n"):
+        lines += [f"+ {run['n']} open runner{'s' if run['n'] != 1 else ''} at today's price: {run['wins']} up, "
+                  f"PnL ${run['pnl_usd']:+.2f} ({run['pnl_sol']:+.4f} SOL)",
+                  f"= together {both['closed_trades']}: win rate {_f(both['win_rate'], '{:.1%}')}, "
+                  f"PnL ${both['pnl_usd']:+.2f}  ({RUNNER_NOTE})"]
     if r.get("shadow_spiked"):
         lines.append(f"excluded {r['shadow_spiked']} shadows whose exit was booked at a price spike "
                      f"(a sell above {SPIKE_FACTOR:g}x the final mark); their returns are not real")
@@ -534,7 +628,9 @@ def render_text(r: dict) -> str:
     if ex.get("n"):
         share = f", the best {len(ex['best'])} carry ${ex['top_pnl_usd']:+,.0f}" + (
             f" ({ex['top_pnl_share']:.0%} of it)" if ex.get("top_pnl_share") is not None else "")
-        lines.append(f"shadow returns: median {ex['median_return']:+.1%}, {ex['over_10x']} shadows at +1000% or more{share}")
+        lines.append(f"shadow returns: median {ex['median_return']:+.1%}, {ex['over_10x']} shadows at +1000% or more{share}"
+                     + (f"; the {ex['open']} open runner{'s count' if ex['open'] != 1 else ' counts'} at today's price"
+                        if ex.get("open") else ""))
         def _row(x):
             held = x["held_s"]
             held_txt = f"{held / 3600:.1f}h" if held >= 3600 else f"{held / 60:.0f}m"

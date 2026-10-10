@@ -95,7 +95,9 @@ CREATE TABLE IF NOT EXISTS positions (
     pending_exit TEXT, pending_exit_fraction REAL, pending_exit_at REAL,
     exit_attempts INTEGER DEFAULT 0, next_exit_at REAL,
     runner_fraction REAL DEFAULT 0, runner_target_multiple REAL, runner_max_hold_hours REAL,
-    runner_active INTEGER DEFAULT 0, liq_source TEXT
+    runner_active INTEGER DEFAULT 0, liq_source TEXT,
+    trough_price REAL, trough_at REAL, peak_at REAL, trough_before_peak REAL,
+    first_2x_at REAL, trough_before_2x REAL
 );
 CREATE INDEX IF NOT EXISTS ix_pos_status ON positions(status, kind);
 CREATE INDEX IF NOT EXISTS ix_pos_candidate ON positions(candidate_id,kind,status);
@@ -131,7 +133,9 @@ CREATE TABLE IF NOT EXISTS moonshots (
     peak_price REAL, peak_at REAL, peak_mcap_usd REAL, prev_price REAL,
     last_price REAL, last_mcap_usd REAL, last_at REAL, first_at REAL, supply REAL,
     polls INTEGER DEFAULT 0, readings INTEGER DEFAULT 0, misses INTEGER DEFAULT 0,
-    alerted_at REAL, done INTEGER DEFAULT 0
+    alerted_at REAL, done INTEGER DEFAULT 0,
+    dips INTEGER, low_price REAL, low_at REAL, low_before_peak REAL, first_2x_at REAL, low_before_2x REAL,
+    price_6h REAL, price_12h REAL, price_24h REAL, low_0h_6h REAL, low_6h_12h REAL, low_12h_24h REAL
 );
 CREATE INDEX IF NOT EXISTS ix_moonshots_done ON moonshots(done, ref_at);
 
@@ -179,6 +183,25 @@ MIGRATIONS = [
     ("mints", "holders_at", "REAL"),
     ("mints", "mayhem", "INTEGER DEFAULT 0"),
     ("insiders", "source", "TEXT"),          # NULL: recorded at evaluation; 'read_back': wallets.py, from the chain
+    # dips and timing (positions.py marks them from the entry, moonshots.py from the first read)
+    ("positions", "trough_price", "REAL"),
+    ("positions", "trough_at", "REAL"),
+    ("positions", "peak_at", "REAL"),
+    ("positions", "trough_before_peak", "REAL"),
+    ("positions", "first_2x_at", "REAL"),
+    ("positions", "trough_before_2x", "REAL"),
+    ("moonshots", "dips", "INTEGER"),        # NULL: tracked before dips were recorded, left out of them
+    ("moonshots", "low_price", "REAL"),
+    ("moonshots", "low_at", "REAL"),
+    ("moonshots", "low_before_peak", "REAL"),
+    ("moonshots", "first_2x_at", "REAL"),
+    ("moonshots", "low_before_2x", "REAL"),
+    ("moonshots", "price_6h", "REAL"),
+    ("moonshots", "price_12h", "REAL"),
+    ("moonshots", "price_24h", "REAL"),
+    ("moonshots", "low_0h_6h", "REAL"),
+    ("moonshots", "low_6h_12h", "REAL"),
+    ("moonshots", "low_12h_24h", "REAL"),
 ]
 
 MINT_COLS = (

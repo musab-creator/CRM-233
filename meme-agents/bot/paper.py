@@ -74,6 +74,22 @@ def mark_to_market(tokens: float, price: float, s: Settings) -> float:
     return exit_fill(tokens, price, s).sol
 
 
+def _finite(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and isfinite(v) else None
+
+
+def open_result(p: dict, s: Settings) -> dict | None:
+    """An open position row (a runner holding its last tokens for days) valued at its last mark: the
+    sales so far plus what the tokens still held would fetch now, minus the cost; dollars at the buy's
+    SOL price. None when it lacks a positive cost, holdings, price or SOL rate."""
+    cost, rem, last = _finite(p.get("cost_sol")), _finite(p.get("tokens_remaining")), _finite(p.get("last_price"))
+    rate = _finite(p.get("sol_usd_entry"))
+    if not cost or cost <= 0 or rem is None or rem < 0 or not last or last <= 0 or not rate or rate <= 0:
+        return None
+    pnl = (_finite(p.get("proceeds_sol")) or 0.0) + mark_to_market(rem, last, s) - cost
+    return {"pnl_sol": pnl, "pnl_usd": pnl * rate, "ret": pnl / cost}
+
+
 class PaperExecutor:
     mode = "paper"
 

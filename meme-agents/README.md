@@ -51,7 +51,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot report [--day YYYY-MM-DD]` | Print closed trades, win rate, expectancy, profit factor, max drawdown, PnL in SOL and USD, and per-agent accuracy. Writes the daily markdown file. |
 | `python -m bot simulate [--minutes N]` | Offline end-to-end run with synthetic launches and fake APIs. Uses `data/sim.db`. |
 | `python -m bot report --sim` | Report on the simulation database |
-| `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
+| `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, in live mode the wallet's SOL balance (read every 5 minutes, with a warning when it is above the `LIVE_MAX_WALLET_SOL` startup limit, so the next restart would lock live entries), today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
 | `python -m bot status --check [--alert]` | One line for monitoring (OK, PAUSED, DEGRADED, DOWN or BLIND); exits 1 if degraded, down or blind. `--alert` sends a Telegram message when the state changes. |
 | `python -m bot preflight [--probe]` | Checks every API and key with free calls. `--probe` also records what the live APIs return and tests this build's assumptions against it (about 3 minutes). |
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
@@ -212,6 +212,9 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
      from UTC midnight or the day's last reset, and a restart from the phone (`/update`, `/restart`,
      a `/set`) keeps both the count and the pause; `/restart reset` ends the pause and starts over
    - entries are refused when the bankroll can't fund them
+   - a gate BUY the risk check refuses sends `⚪ NO ENTRY` with the reason to Telegram, once per
+     kind of refusal (its numbers aside) per 15 minutes, with a count of the ones refused in
+     between; every refusal is logged
 
 Every evaluated candidate also gets a **shadow position**: a $5 paper position with no bankroll
 that runs through the same exit rules. This gives every vote an outcome, even when the token
@@ -236,6 +239,23 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
 - **Signal check.** For each flow feature, it compares the outcomes of candidates above and
   below the median, which shows which signals actually separate winners from losers in your
   data.
+- **Open runners at today's price.** A runner keeps its last tokens for up to
+  `RUNNER_MAX_HOLD_HOURS` (a week), so its result stays out of every closed-trade figure for
+  days. The report values each open runner at its last mark: its sales so far plus what the
+  runner would fetch now, minus the cost, in dollars at the buy's SOL price. They are added to
+  the shadow book (as their own `+` line, then a total), the gate what-if (an `open` column
+  counts them), the signal check, the agent scores (the real runner when the coin was bought)
+  and the best and worst shadows, each labeled.
+- **Dips before the run.** For each coin seen since this was added: its lowest price before its
+  first 2x and before its peak (as a change from the price the bot saw), when each came, and
+  its price 6, 12 and 24 hours on with its lowest in between. The shadow's own trades cover the
+  time it was open; then the moonshot tracker's reads, every 15 minutes in the first day and
+  hourly after, where a low counts when two reads in a row reach it, so a dip between two reads
+  is missed. The report shows how deep the coins that doubled fell first, how long the 2x and
+  the peak took, what a -50% or -60% stop would have kept against what it would have cost on
+  the coins that kept falling (inside the first 6 hours), and what holding the coins the time
+  stop sold to 12 or 24 hours would have done. These are counts from recorded prices, not a
+  replay, and no exit rule reads them.
 
 Any sample under 30 is flagged as noise. Don't tune on it.
 
@@ -253,8 +273,8 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   - PAUSED: the daily loss cap was hit;
   - DEGRADED: the last 6 agent votes all failed, for example because the Anthropic key expired.
 - **Telegram control panel.** With Telegram set up, the bot long-polls its own messages (no open
-  port). `/panel` shows buttons; the commands behind them are `/status`, `/digest` (this hour so
-  far), `/report`, `/moonshots` (which evaluated coins went 10x/100x/500x), `/trades`,
+  port). `/panel` shows buttons; the commands behind them are `/status` (in live mode with the
+  wallet's balance), `/digest` (this hour so far), `/report`, `/moonshots` (which evaluated coins went 10x/100x/500x), `/trades`,
   `/why [id or address]`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
   positions keep their exits), `/resume` (clears a Telegram pause and the STOP file, never the
   bot's own loss-cap pause), `/stop` (writes the STOP file) and `/help`, only from

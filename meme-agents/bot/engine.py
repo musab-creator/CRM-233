@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 import anthropic
@@ -53,6 +54,7 @@ log = logging.getLogger("bot.engine")
 STAGE2_RECHECK_S = 300
 CANDIDATE_MAX_WAIT_S = 600
 INSIDER_KEEP_DAYS = 60       # insiders of evaluated coins are deleted after this many days
+WALLET_READ_S = 300.0        # the live wallet's balance for /status: one 1-credit Helius call per 5 minutes
 EXTERNAL_ERRORS = (HttpError, RpcError, httpx.HTTPError, asyncio.TimeoutError)
 
 
@@ -148,6 +150,7 @@ class Engine:
         self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
         self._credits_headroom = False    # well inside the month's pace: background read-backs may run
+        self._wallet: tuple[float, float] | None = None   # the live wallet's last SOL balance and when it was read
         self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
         self.regime = Regime()                   # market regime: sizes entries down or pauses them
         self.live_lock: str | None = None        # a failed live check: entries locked, phone commands alive
@@ -841,8 +844,11 @@ class Engine:
                  _skipped_curves(st) + self._insider_note()
                  + (self.wallets.note() if self.wallets and self.s.LAUNCH_MEMORY_DAYS > 0 else "")
                  + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
+        await self._read_wallet()
         await self.db.kv_set("heartbeat", json.dumps({
             "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
+            "wallet_sol": self._wallet[0] if self._wallet else None,
+            "wallet_at": self._wallet[1] if self._wallet else None, "sol_usd": self.sol_price.get(),
             "tracked": len(self.ingest.mints),
             "simulated": bool(getattr(self, "simulated", False)),
             "launches": st["creates"], "trades": st["trades"], "curve_reads": st["curve_reads"],
@@ -861,6 +867,23 @@ class Engine:
             day = utc_day()                  # set before the pruning: a failed delete must not resend the summary
             await self._prune_insiders()
         return day
+
+    async def _read_wallet(self) -> None:
+        """The live wallet's SOL balance for /status, at most every WALLET_READ_S. A failed read keeps the
+        last one (/status shows how old it is); none is made while the month's Helius credits are spent."""
+        pubkey = getattr(self.executor, "pubkey", None)
+        if getattr(self.executor, "mode", "paper") != "live" or not pubkey or self._credits_exhausted:
+            return
+        if self._wallet and now_s() - self._wallet[1] < WALLET_READ_S:
+            return
+        try:
+            # capped: it runs inside the heartbeat, whose timestamp /status and the health check read
+            balance = await asyncio.wait_for(self.helius.balance_sol(pubkey), timeout=15)
+        except Exception as e:
+            log.warning("wallet balance read failed: %s", e or type(e).__name__)
+            return
+        if isinstance(balance, (int, float)) and math.isfinite(balance) and balance >= 0:
+            self._wallet = (float(balance), now_s())
 
     async def _prune_insiders(self) -> None:
         """About 35 insider rows per evaluated coin: keep two months for the insider watch and its report."""
