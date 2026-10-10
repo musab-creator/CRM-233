@@ -88,6 +88,7 @@ class Settings:
     RUGCHECK_URL: str = "https://api.rugcheck.xyz/v1"
     HELIUS_RPC_URL: str = "https://mainnet.helius-rpc.com/?api-key={key}"
     HELIUS_API_URL: str = "https://api-mainnet.helius-rpc.com/v0"
+    HELIUS_WS_URL: str = "wss://mainnet.helius-rpc.com/?api-key={key}"   # insider watch (transactionSubscribe)
     JUPITER_URL: str = "https://api.jup.ag/swap/v2"
     X_API_URL: str = "https://api.x.com/2"
     CRYPTOPANIC_URL: str = "https://cryptopanic.com/api/developer/v2/posts/"
@@ -193,6 +194,15 @@ class Settings:
     # After graduation DexScreener's pool price every POSITION_DEX_POLL_S. 0 turns either off.
     POSITION_POLL_S: float = 2.0
     POSITION_DEX_POLL_S: float = 10.0
+    # Insider sales on held coins (insiders.py): stream every trade on the curve of each open position
+    # (real ones first, then the newest shadows, at most INSIDER_WATCH_MAX coins) and record each sale
+    # by the coin's creator, launch-minute buyers, snipers, bundle wallets or top holders after the buy.
+    # INSIDER_EXIT=false only records (/report shows what acting would have done); true sells as an
+    # emergency once the insiders' sales since the buy reach INSIDER_EXIT_SUPPLY_PCT of the supply.
+    INSIDER_WATCH: bool = True
+    INSIDER_EXIT: bool = False
+    INSIDER_EXIT_SUPPLY_PCT: float = 2.0
+    INSIDER_WATCH_MAX: int = 60
     CURVE_FIRST_POLL_S: float = 60.0          # first read of a launch (most are dead within a minute)
     CURVE_POLL_SCALE: float = 1.0             # multiplies the 20/45/120/240 s read cadence of launches
     CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
@@ -369,6 +379,12 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("MOONSHOT_POLL_MIN must be at least 1")
     if 0 < s.MOONSHOT_ALERT_MULTIPLE < 2:
         raise ConfigError("MOONSHOT_ALERT_MULTIPLE must be 0 (off) or at least 2")
+    if not 0.1 <= s.INSIDER_EXIT_SUPPLY_PCT <= 50:
+        raise ConfigError("INSIDER_EXIT_SUPPLY_PCT must be between 0.1 and 50 (% of the supply)")
+    if not 1 <= s.INSIDER_WATCH_MAX <= 500:
+        raise ConfigError("INSIDER_WATCH_MAX must be between 1 and 500 coins")
+    if s.INSIDER_WATCH and not s.HELIUS_WS_URL.startswith("wss://"):
+        raise ConfigError("HELIUS_WS_URL must be a wss:// address")
     if not 0.01 <= s.RUNNER_FRACTION <= 0.25:
         raise ConfigError("RUNNER_FRACTION must be between 0.01 and 0.25")
     if s.RUNNER_TARGET_MULTIPLE <= 1:

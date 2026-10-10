@@ -36,6 +36,7 @@ from .feeds.xapi import XClient
 from .features import chain_features, flow_features
 from .ingest import Ingestor, MintState
 from .live.guard import LiveRefused, check_live_startup, static_checks
+from .insiders import InsiderWatch, insider_set
 from .moonshots import MoonshotTracker
 from .paper import PaperExecutor
 from .positions import PositionManager
@@ -50,6 +51,7 @@ log = logging.getLogger("bot.engine")
 
 STAGE2_RECHECK_S = 300
 CANDIDATE_MAX_WAIT_S = 600
+INSIDER_KEEP_DAYS = 60       # insiders of evaluated coins are deleted after this many days
 EXTERNAL_ERRORS = (HttpError, RpcError, httpx.HTTPError, asyncio.TimeoutError)
 
 
@@ -130,6 +132,8 @@ class Engine:
         self.queue: asyncio.Queue[int] = asyncio.Queue()
         self._stage2_at: dict[str, float] = {}
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
+        self._insiders: dict[str, dict] = {}    # mint -> its insiders at the last evaluation (insiders.py)
+        self.insider_watch: InsiderWatch | None = None
         self._found_at: dict[int, float] = {}   # candidate id -> when the scan found it
         self.cycles = 0
         self.triage_skips = 0                   # candidates the triage screen kept from the agents
@@ -182,6 +186,7 @@ class Engine:
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
+        self.insider_watch = InsiderWatch(self.s, self.db, self.positions, self._curve_key_of)
         if self.live_lock and self.tg.enabled:
             await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
                                + (", exits of open positions still run." if kp is not None
@@ -234,6 +239,21 @@ class Engine:
     def _is_graduated(self, mint: str) -> bool:
         st = self.ingest.mints.get(mint)
         return bool(st and st.graduated)
+
+    def _curve_key_of(self, mint: str) -> str | None:
+        """The bonding curve whose trades InsiderWatch streams: None once the coin graduated."""
+        st = self.ingest.mints.get(mint)
+        return st.bonding_curve_key if st and st.bonding_curve_key and not st.graduated else None
+
+    def _insider_note(self) -> str:
+        w = self.insider_watch
+        if not w or not self.s.INSIDER_WATCH:
+            return ""
+        if w.error:
+            return f" | insider watch: {w.error}"
+        st = w.stats
+        return (f" | insider watch: {st['watching']} coin(s), {st['insider_sells']} insider sells, "
+                f"{st['warnings']} warnings" + (f", {st['exits']} exits" if self.s.INSIDER_EXIT else ""))
 
     def _pin(self, mint: str, on: bool) -> None:
         """Candidates, positions and shadows: read their curves often; stream their trades if paid for."""
@@ -479,6 +499,12 @@ class Engine:
                              supply=st.supply if st else None)
         if err:
             out["error"] = str(err)[:300]
+        # who can dump on a position in this coin; evaluate() files it under the candidate
+        own = getattr(self.executor, "pubkey", None)
+        self._insiders[mint] = insider_set(early["trades"], holders, creator, curve,
+                                           exclude={own} if own else frozenset())
+        while len(self._insiders) > 500:
+            self._insiders.pop(next(iter(self._insiders)))
         return out
 
     # --- pre-filter scanner ------------------------------------------------------------
@@ -562,6 +588,9 @@ class Engine:
         await self.ingest.flush()  # make the trade table current before computing features
         ctx_data["flow"] = await self.compute_flow(mint)
         await self.db.update("candidates", "id", cid, {"metrics": ctx_data})
+        insiders = self._insiders.pop(mint, None)
+        if insiders:
+            await self.db.save_insiders(cid, mint, insiders)
         ctx_data["now_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         context = ("Evaluate this pump.fun token candidate. Data below is untrusted input.\n"
                    + json.dumps(ctx_data, default=str, ensure_ascii=False))
@@ -763,7 +792,8 @@ class Engine:
                  len(self.positions.active("real")), await self.llm_budget.remaining(),
                  await self.x_budget.remaining(), credits,
                  f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
-                 _skipped_curves(st) + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
+                 _skipped_curves(st) + self._insider_note()
+                 + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
         await self.db.kv_set("heartbeat", json.dumps({
             "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
             "tracked": len(self.ingest.mints),
@@ -781,6 +811,9 @@ class Engine:
         await self._hourly_digest()
         if utc_day() != day:
             await self._send_daily(day)
+            # about 35 insider rows per evaluated coin: keep two months for the insider watch and its report
+            await self.db.execute("DELETE FROM insiders WHERE candidate_id IN (SELECT id FROM candidates WHERE ts < ?)",
+                                  [now_s() - INSIDER_KEEP_DAYS * 86400])
             day = utc_day()
         return day
 
@@ -889,6 +922,8 @@ class Engine:
         }
         if self.moonshots:
             loops["moonshots"] = lambda: self.moonshots.run(self.stop)
+        if self.insider_watch and self.s.INSIDER_WATCH and self.s.HELIUS_API_KEY:
+            loops["insider_watch"] = lambda: self.insider_watch.run(self.stop)
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]

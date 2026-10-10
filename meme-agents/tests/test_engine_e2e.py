@@ -42,6 +42,7 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
                                        "grounding, guard, error FROM votes"),
             "shadows": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='shadow'"),
             "reals": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='real'"),
+            "insiders": await db.fetchall("SELECT candidate_id, roles FROM insiders"),
             "blocks": (await db.fetchone("SELECT COUNT(*) c FROM events WHERE kind='risk_block'"))["c"],
             "trades": (await db.fetchone("SELECT COUNT(*) c FROM trades"))["c"],
             "credits": await db.kv_get(next(iter([k["k"] for k in await db.fetchall(
@@ -84,6 +85,10 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
             assert flow["source"] == "chain" and flow["launch_minute_trades"] > 0 and "error" not in flow
             assert flow["wallets_ex_dev"] >= 5 and flow["curve_reads"] >= 1
             assert json.loads(c["metrics"])["prefilter"]["inflow_source"] == "curve"
+            # its insiders were filed for the insider watch: the creator, launch buyers, top holders
+            mine = [i["roles"] for i in r["insiders"] if i["candidate_id"] == c["id"]]
+            assert len(mine) >= 5 and any("creator" in roles for roles in mine)
+            assert any("early" in roles for roles in mine) and any("top" in roles for roles in mine)
         else:
             assert "distinct_buyers_ex_dev" in flow and flow["trades"] > 0
     if stream == "off":

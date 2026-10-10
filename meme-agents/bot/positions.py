@@ -675,6 +675,22 @@ class PositionManager:
         if sig:
             await self._exit(p, sig.fraction, price, ts, sig.reason)
 
+    async def insider_exit(self, position_id: int, note: str) -> bool:
+        """InsiderWatch with INSIDER_EXIT=true: the coin's insiders have sold enough since the buy, so
+        the position sells as an emergency. A runner (its cost already covered) keeps riding, as it
+        does through a stop loss; an emergency or kill switch already queued is left alone."""
+        async with self.lock:
+            p = self.positions.get(position_id)
+            if (p is None or p.status != "open" or p.runner_active
+                    or (p.pending_exit or "").startswith("emergency") or p.pending_exit == "kill_switch"):
+                return False
+            log.warning("INSIDER EXIT #%d %s: %s", p.id, p.mint, note)
+            await self.db.event("insider_exit", {"position": p.id, "mint": p.mint, "note": note}, now_s())
+            await self.queue_exit(p, "emergency_insider_sell")
+        if p.kind == "real" and self.notify:
+            self._say(f"🚨 INSIDER SELL {await self._symbol(p.mint)} #{p.id}: {note}. Selling now\n{p.mint}")
+        return True
+
     async def queue_exit(self, p: Position, reason: str, fraction: float = 1.0) -> None:
         if p.id in self._entry_uncertain:
             return  # keep the durable intent until its original signature has a known outcome

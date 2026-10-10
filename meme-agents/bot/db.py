@@ -134,6 +134,21 @@ CREATE TABLE IF NOT EXISTS moonshots (
     alerted_at REAL, done INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_moonshots_done ON moonshots(done, ref_at);
+
+-- each evaluated coin's insiders as the bot saw them (insiders.py): creator, launch-minute buyers,
+-- snipers, same-slot bundle buyers, top holders; tokens = what the wallet held at evaluation
+CREATE TABLE IF NOT EXISTS insiders (
+    candidate_id INTEGER, mint TEXT, wallet TEXT, roles TEXT, tokens REAL,
+    PRIMARY KEY (candidate_id, wallet)
+);
+CREATE INDEX IF NOT EXISTS ix_insiders_wallet ON insiders(wallet);
+-- positions whose coin's trades were streamed, and every insider sale after their entry
+CREATE TABLE IF NOT EXISTS insider_watch (position_id INTEGER PRIMARY KEY, mint TEXT, kind TEXT, started_at REAL);
+CREATE TABLE IF NOT EXISTS insider_sells (
+    id INTEGER PRIMARY KEY, position_id INTEGER, mint TEXT, ts REAL, wallet TEXT, roles TEXT,
+    tokens REAL, sol REAL, price REAL, cum_supply_pct REAL, signature TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_insider_sells_pos ON insider_sells(position_id, ts);
 """
 
 # Columns added after the first release: (table, column, type). Applied with ALTER TABLE when
@@ -321,6 +336,12 @@ class Database:
         qs = ",".join("?" * len(row))
         vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in row.values()]
         return await self.execute(f"INSERT INTO {table} ({cols}) VALUES ({qs})", vals)
+
+    async def save_insiders(self, candidate_id: int, mint: str, insiders: dict[str, dict]) -> None:
+        """A candidate's insider set (insiders.insider_set) at evaluation."""
+        await self.executemany(
+            "INSERT OR REPLACE INTO insiders (candidate_id, mint, wallet, roles, tokens) VALUES (?,?,?,?,?)",
+            [(candidate_id, mint, w, ",".join(e.get("roles") or []), e.get("tokens")) for w, e in insiders.items()])
 
     async def update(self, table: str, key: str, key_val: Any, row: dict) -> None:
         sets = ",".join(f"{c}=?" for c in row)
