@@ -262,6 +262,7 @@ def _lowest(*values) -> float | None:
 DIP_BUCKETS = ((-0.2, "above -20%"), (-0.4, "-20 to -40%"), (-0.5, "-40 to -50%"), (-0.6, "-50 to -60%"),
                (-math.inf, "-60% or lower"))
 WIDER_STOPS = (0.5, 0.6)
+TIGHTER_STOPS = (0.2, 0.25, 0.3)   # judged when below today's stop
 STOP_WINDOW_H = 6          # the what-ifs judge a stop inside the first 6 h: the time stop's default
 
 
@@ -331,6 +332,19 @@ def dip_summary(rows: list[dict], s: Settings, now: float) -> dict | None:
                       "fell_through": len(through), "held": len(held), "held_unread": len(held) - len(at_6h),
                       "held_median": _median(at_6h),
                       "usd": stake * (math.fsum(at_6h) - (level - stop) * len(through))})
+    # a tighter stop, on the same coins: the ones that dipped through it and then doubled inside 6 h are cut;
+    # the ones that fell through today's stop anyway lose less; the ones that dipped between the two stops
+    # without doubling are sold at the tighter one instead of held to 6 h
+    tighter = []
+    for level in (x for x in TIGHTER_STOPS if x < stop - 1e-9):
+        cut = [it for it in quick if _between(dip(it, "low_before_2x"), level, stop)]
+        through = [it for it in slow if dip(it, "low_6h") is not None and dip(it, "low_6h") <= -stop]
+        early = [it for it in slow if _between(dip(it, "low_6h"), level, stop)]
+        at_6h = [dip(it, "p6h") for it in early if dip(it, "p6h") is not None]
+        tighter.append({"stop": level, "cut": len(cut), "cut_median_peak": _median([it["multiple"] for it in cut]),
+                        "through": len(through), "early": len(early), "early_unread": len(early) - len(at_6h),
+                        "early_median_6h": _median(at_6h),
+                        "usd": stake * ((stop - level) * len(through) + math.fsum(-level - v for v in at_6h))})
     # a later time stop, on the coins the time stop sold: what they did over the next hours
     timed = [it for it in recs if dip(it, "time_stop_sale") is not None]
     later = []
@@ -364,7 +378,7 @@ def dip_summary(rows: list[dict], s: Settings, now: float) -> dict | None:
             "time_to_2x": to_2x, "time_to_peak": to_peak,
             "median_dip_before_peak": _median([dip(it, "low_before_peak") for it in peaked
                                                if dip(it, "low_before_peak") is not None]),
-            "judged": len(done), "doubled_in_window": len(quick), "wider": wider,
+            "judged": len(done), "doubled_in_window": len(quick), "wider": wider, "tighter": tighter,
             "time_stopped": len(timed), "later": later}
 
 
@@ -394,9 +408,9 @@ def dip_lines(d: dict | None) -> list[str]:
                if d["median_dip_before_peak"] is not None else ""))
     other = (f"; judged with a {STOP_WINDOW_H}h time stop, today's is {d['time_stop_hours']:g}h"
              if d["time_stop_hours"] != STOP_WINDOW_H else "")
-    if d["wider"] and not d["judged"]:
-        lines.append(f"a wider stop: judged once a coin's first {STOP_WINDOW_H}h are over (none yet)")
-    elif d["wider"]:
+    if (d["wider"] or d["tighter"]) and not d["judged"]:
+        lines.append(f"a wider or tighter stop: judged once a coin's first {STOP_WINDOW_H}h are over (none yet)")
+    if d["wider"] and d["judged"]:
         lines.append(f"a wider stop, on the {d['judged']} coins whose first {STOP_WINDOW_H}h are over "
                      f"({d['doubled_in_window']} doubled inside them; not replayed, shares of a ${stake:g} stake{other}):")
     for w in d["wider"] if d["judged"] else []:
@@ -412,6 +426,20 @@ def dip_lines(d: dict | None) -> list[str]:
                 + (f" ({w['held_unread']} unread at {STOP_WINDOW_H}h)" if w["held_unread"] else ""))
         lines.append(f"  -{w['stop']:.0%} costs: {w['fell_through']} fell through -{w['stop']:.0%} without doubling, "
                      f"{extra:.0%} of the stake more each{held}; measured on these ${w['usd']:+.2f}")
+    if d["tighter"] and d["judged"]:
+        lines.append(f"a tighter stop, on the same {d['judged']} coins (not replayed, shares of a ${stake:g} stake{other}):")
+    for w in d["tighter"] if d["judged"] else []:
+        band = f"-{w['stop']:.0%} to -{stop:.0%}"
+        peak = f"; median peak {_x(w['cut_median_peak'])}" if w["cut_median_peak"] is not None else ""
+        lines.append(f"  -{w['stop']:.0%} cuts {w['cut']} that dipped {band} and then doubled within {STOP_WINDOW_H}h"
+                     f"{peak} (not valued)")
+        early = (f"; sells {w['early']} more that dipped {band} without doubling instead of holding them to "
+                 f"{STOP_WINDOW_H}h" + (f", where they stood at a median {w['early_median_6h']:+.0%}"
+                                         if w["early_median_6h"] is not None else "")
+                 + (f" ({w['early_unread']} unread at {STOP_WINDOW_H}h)" if w["early_unread"] else "")
+                 if w["early"] else "")
+        lines.append(f"  -{w['stop']:.0%} saves {stop - w['stop']:.0%} of the stake on the {w['through']} that fell "
+                     f"through -{stop:.0%} anyway{early}; measured on these ${w['usd']:+.2f}")
     if d["later"] and not d["time_stopped"]:
         lines.append("a later time stop: the time stop has sold none of these coins yet")
     elif d["later"]:
@@ -531,8 +559,34 @@ async def summary(db: Database, s: Settings, top: int = 8) -> dict | None:
             "over_10x": len(ten),
             "over_10x_shadow_sold_under_2x": sum(1 for it in ten if it["shadow"] and it["shadow"]["ret"] is not None
                                                  and it["shadow"]["ret"] < 1.0),
+            "two_x_exits": exits_of([it for it in rows if it["multiple"] >= 2]),
             "dips": dip_summary(rows, s, now_s()),
             "top": sorted((it for it in rows if it["multiple"] >= 2), key=lambda it: -it["multiple"])[:top]}
+
+
+def exits_of(coins: list[dict]) -> dict[str, dict]:
+    """How the shadows of these coins left, by exit reason (an open runner at today's price counts as
+    "open runner"), with the median return of each: the forward measure of what an exit rule costs on the
+    coins that run. 11 Oct: the exits had sold 15 of the 35 coins that reached 10x for under +100%; a tighter
+    stop or the trailing stop armed early shows up here as 2x coins sold at a loss."""
+    groups: dict[str, list[float | None]] = {}
+    for it in coins:
+        sh = it["shadow"]
+        if not sh:
+            key, ret = "no shadow", None
+        elif sh.get("runner_ret") is not None:
+            key, ret = "open runner", sh["runner_ret"]
+        elif sh["status"] != "closed":
+            key, ret = sh["status"], None
+        else:
+            key, ret = sh["exit"] or "?", sh["ret"]
+        groups.setdefault(key, []).append(ret)
+    out = {}
+    for key, rets in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        known = [r for r in rets if r is not None]
+        out[key] = {"n": len(rets), "median_ret": _median(known) if known else None,
+                    "lost": sum(1 for r in known if r < 0)}
+    return out
 
 
 def _x(m: float) -> str:
@@ -612,6 +666,13 @@ def render_lines(m: dict | None) -> list[str]:
     if m["over_10x"]:
         lines.append(f"exits: {m['over_10x']} coin{'s' if m['over_10x'] != 1 else ''} reached 10x or more; the bot's "
                      f"exits (on the shadow) had sold {m['over_10x_shadow_sold_under_2x']} of them for under +100%")
+    two = m.get("two_x_exits") or {}
+    if two:
+        n = sum(v["n"] for v in two.values())
+        lines.append(f"the shadows of the {n} coin{'s' if n != 1 else ''} that reached 2x left by (count, median "
+                     "return, sold at a loss): " + ", ".join(
+                         f"{k} {v['n']}" + (f" ({v['median_ret']:+.0%}, {v['lost']} at a loss)"
+                                            if v["median_ret"] is not None else "") for k, v in two.items()))
     if m["top"]:
         lines.append("top coins by peak (decision; shadow; the bot's trade):")
         for it in m["top"]:

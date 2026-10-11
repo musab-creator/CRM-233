@@ -199,8 +199,12 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    near it, so one bad price cannot fill a take-profit or a stop; the report leaves out shadows
    that were booked that way before this check existed.
 6. **Exits.** These are rules only:
-   - stop loss at -40%
+   - stop loss at -30% (`STOP_LOSS_PCT`; 11 Oct: a -40% stop filled near -47% after costs, and the
+     coins that doubled had never dipped below -20% first)
    - at +60%, sell half, then put a 30% trailing stop on the rest
+   - the trailing stop also runs before the take-profit once the price has been 30% above the entry
+     (`TRAILING_ARM_PCT`, 0 turns it off): a coin that ran and gives it back sells 30% under its peak
+     as `early_trailing_stop`, with the urgent fee, instead of riding down to the stop loss
    - time stop at 6 hours
    - emergency exit if liquidity falls 50% (checked every 60 s) or Rugcheck turns to danger
      (checked every 5 minutes). On the bonding curve, liquidity is the curve's own depth, the
@@ -257,6 +261,12 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
   the shadow book (as their own `+` line, then a total), the gate what-if (an `open` column
   counts them), the signal check, the agent scores (the real runner when the coin was bought)
   and the best and worst shadows, each labeled.
+- **Exit reasons with their outcomes, and round trips.** Each exit reason's count, median return and
+  dollars, for the shadows and the real trades. Then the losing shadows that had first been up
+  `TRAILING_ARM_PCT` or more, and what the trailing stop armed early would have sold them for at
+  `TRAILING_STOP_PCT` under their peak (the trail level, not replayed). What that rule and a tighter stop
+  cost on the coins that run is in the moonshot section: how the shadows of the coins that reached 2x
+  left, by exit reason, with how many were sold at a loss.
 - **Dips before the run.** For each coin seen since this was added: its lowest price before its
   first 2x and before its peak (as a change from the price the bot saw), when each came, and
   its price 6, 12 and 24 hours on with its lowest in between. The shadow's own trades cover the

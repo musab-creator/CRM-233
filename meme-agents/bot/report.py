@@ -16,7 +16,7 @@ from .wallets import FEATURES as WALLET_FEATURES
 from .wallets import wallet_lines, wallet_summary
 from .moonshots import render_lines as moonshot_lines
 from .moonshots import summary as moonshot_summary
-from .paper import mark_to_market, open_result
+from .paper import exit_fill, mark_to_market, open_result
 from .util import now_s
 
 
@@ -323,6 +323,53 @@ def _finite(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and math.isfinite(v) else None
 
 
+def exit_outcomes(rows: list[dict], order: dict[str, int]) -> dict[str, dict]:
+    """Per exit reason, in the order given: how many positions, the median return and the dollars. A count
+    alone hid that the stop-type exits carried the whole loss (11 Oct: 1,276 of 1,836 shadows)."""
+    by_reason: dict[str, list[dict]] = {}
+    for p in rows:
+        by_reason.setdefault(p["exit_reason"] or "?", []).append(p)
+    out = {}
+    for reason in order:
+        group = by_reason.get(reason, [])
+        rets = [p["pnl_sol"] / p["cost_sol"] for p in group
+                if _finite(p.get("cost_sol")) and p["cost_sol"] > 0 and _finite(p.get("pnl_sol")) is not None]
+        out[reason] = {"n": len(group), "median_ret": _median(rets),
+                       "pnl_usd": math.fsum(p["pnl_usd"] or 0 for p in group)}
+    return out
+
+
+def round_trip_check(shadows: list[dict], s: Settings) -> dict | None:
+    """The losing shadows that had first been up TRAILING_ARM_PCT or more (30% when the rule is off), and
+    what the trailing stop armed early (exits.py early_trailing_stop) would have sold them for: everything
+    at TRAILING_STOP_PCT under the peak, with the urgent fee, against what they lost. Counted at the trail
+    level, not replayed, so a gap through it is not seen. A shadow that took its profit first is out
+    (the planned trailing stop had it), as is one whose price never fell back to the trail. What the
+    rule costs among the coins that go on to run is measured forward: the moonshot section says how the
+    shadows of the coins that reached 2x left."""
+    arm, trail = (s.TRAILING_ARM_PCT or 30.0) / 100, s.TRAILING_STOP_PCT / 100
+    losers = [p for p in shadows if (_finite(p.get("pnl_sol")) or 0) < 0 and not p.get("tp_done")
+              and (_finite(p.get("cost_sol")) or 0) > 0 and (_finite(p.get("entry_price")) or 0) > 0
+              and (_finite(p.get("tokens_initial")) or 0) > 0]
+    if not losers:
+        return None
+    trips = []
+    for p in losers:
+        entry, peak, last = p["entry_price"], _finite(p.get("peak_price")) or 0.0, _finite(p.get("last_price"))
+        level = peak * (1 - trail)
+        if peak < entry * (1 + arm) or (last is not None and last > level):
+            continue
+        sale = exit_fill(p["tokens_initial"], level, s, urgent=True).sol
+        cost = p["cost_sol"]
+        saved = sale - (cost + p["pnl_sol"])                     # against the proceeds it actually got
+        trips.append({"peak": peak / entry - 1, "ret": p["pnl_sol"] / cost, "trail_ret": sale / cost - 1,
+                      "saved_sol": saved, "saved_usd": saved * (_finite(p.get("sol_usd_entry")) or 0.0)})
+    return {"arm": arm, "trail": trail, "on": s.TRAILING_ARM_PCT > 0, "losers": len(losers), "n": len(trips),
+            "median_peak": _median([x["peak"] for x in trips]), "median_ret": _median([x["ret"] for x in trips]),
+            "median_trail_ret": _median([x["trail_ret"] for x in trips]),
+            "saved_sol": math.fsum(x["saved_sol"] for x in trips), "saved_usd": math.fsum(x["saved_usd"] for x in trips)}
+
+
 def _median(xs: list[float]) -> float | None:
     xs = sorted(xs)
     n = len(xs)
@@ -427,8 +474,9 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     closed_day = [p for p in closed if day_start <= (p["closed_at"] or 0) < day_end]
     opening_equity = s.BANKROLL_USD + math.fsum(p["pnl_usd"] for p in closed
                                                if p["closed_at"] is not None and p["closed_at"] < day_start)
-    shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd, exit_reason FROM positions WHERE kind='shadow' "
-                                        "AND status='closed' AND id NOT IN (" + SPIKED_SHADOWS_SQL + ") "
+    shadows_recorded = await db.fetchall("SELECT pnl_sol, pnl_usd, exit_reason, cost_sol, entry_price, peak_price, "
+                                        "last_price, tokens_initial, tp_done, sol_usd_entry FROM positions WHERE "
+                                        "kind='shadow' AND status='closed' AND id NOT IN (" + SPIKED_SHADOWS_SQL + ") "
                                         "ORDER BY closed_at, id")
     shadows = [p for p in shadows_recorded if all(isinstance(p[k], (int, float)) and math.isfinite(p[k])
                                                 for k in ("pnl_usd", "pnl_sol"))]
@@ -473,6 +521,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     for p in shadows:
         shadow_exits[p["exit_reason"] or "?"] = shadow_exits.get(p["exit_reason"] or "?", 0) + 1
     open_rows = [_open_row(p, s) for p in open_pos]
+    shadow_exits = dict(sorted(shadow_exits.items(), key=lambda kv: -kv[1]))
     return {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
         "mode": s.MODE,
@@ -506,7 +555,10 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "funnel_day": funnel,
         "spend": spend,
         "exit_reasons": exit_reasons,
-        "shadow_exit_reasons": dict(sorted(shadow_exits.items(), key=lambda kv: -kv[1])),
+        "exit_outcomes": exit_outcomes(closed, exit_reasons),
+        "shadow_exit_reasons": shadow_exits,
+        "shadow_exit_outcomes": exit_outcomes(shadows, shadow_exits),
+        "round_trips": round_trip_check(shadows, s),
         "open_positions": open_rows,
         "open_banked": _open_banked(open_rows),
         "moonshots": await moonshot_summary(db, s),
@@ -711,9 +763,12 @@ def render_text(r: dict) -> str:
         lines.append("  worst:")
         lines += [_row(x) for x in ex["worst"]]
     if r.get("shadow_exit_reasons"):
-        lines.append("shadow exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["shadow_exit_reasons"].items()))
+        lines.append("shadow exit reasons (count, median return, PnL $): "
+                     + _exit_text(r["shadow_exit_reasons"], r.get("shadow_exit_outcomes")))
+    lines += _round_trip_lines(r.get("round_trips"))
     if r["exit_reasons"]:
-        lines.append("real trades' exit reasons: " + ", ".join(f"{k} {v}" for k, v in r["exit_reasons"].items()))
+        lines.append("real trades' exit reasons (count, median return, PnL $): "
+                     + _exit_text(r["exit_reasons"], r.get("exit_outcomes")))
     lines += moonshot_lines(r.get("moonshots"))
     lines += insider_lines(r.get("insiders"))
     lines += wallet_lines(r.get("wallets"))
@@ -740,6 +795,31 @@ def render_text(r: dict) -> str:
             lines.append(f"cand {d['id']:<4} {(d['symbol'] or '')[:10]:<10} {d['decision']:<4} "
                          f"mean conf {_f(d['mean_confidence'], '{:.2f}')}  {d['gate_reason']}")
     return "\n".join(lines)
+
+
+def _exit_text(counts: dict[str, int], outcomes: dict[str, dict] | None) -> str:
+    parts = []
+    for reason, n in counts.items():
+        o = (outcomes or {}).get(reason)
+        if o and o.get("median_ret") is not None:
+            parts.append(f"{reason} {n} ({o['median_ret']:+.0%}, ${o['pnl_usd']:+,.0f})")
+        else:
+            parts.append(f"{reason} {n}")
+    return ", ".join(parts)
+
+
+def _round_trip_lines(x: dict | None) -> list[str]:
+    if not x:
+        return []
+    rule = (f"the trailing stop armed at +{x['arm']:.0%} (on: {x['trail']:.0%} under the peak)" if x["on"]
+            else f"a trailing stop armed at +{x['arm']:.0%} ({x['trail']:.0%} under the peak; TRAILING_ARM_PCT is 0, off)")
+    if not x["n"]:
+        return [f"round trips: none of the {x['losers']} losing shadows had first been up {x['arm']:.0%} or more"]
+    return [f"round trips: of the {x['losers']} losing shadows, {x['n']} had first been up {x['arm']:.0%} or more "
+            f"(median peak {x['median_peak']:+.0%}) and lost a median {x['median_ret']:+.0%}; {rule} would have sold "
+            f"them at a median {x['median_trail_ret']:+.0%}: about ${x['saved_usd']:+,.2f} ({x['saved_sol']:+.4f} SOL) on "
+            "the book (sold at the trail level, not replayed; what the rule costs among the coins that go on to run "
+            "is in the moonshot section: how the shadows of the coins that reached 2x left)"]
 
 
 def _execution_lines(r: dict) -> list[str]:

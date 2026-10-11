@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from bot.agents.base import NEUTRAL_MAX_CONFIDENCE, AgentSpec, Vote, apply_grounding_guard, run_agent
 from bot.agents.grounding import Corpus
-from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, role_prompt
+from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, TRIAGE, role_prompt
 from bot.agents.triage import run_triage
 from bot.budget import Budget
 from bot.config import Settings, load_settings
@@ -135,14 +135,21 @@ def test_triage_no_longer_skips_on_the_creator_selling_alone():
 
 
 def test_the_analyst_weighs_the_flow_fields_by_the_recorded_outcomes():
-    """10 Oct signal check (909 tokens): launch buyers still holding (retention above the 0.1 median) won
-    24% against 19%; a bigger 5-minute inflow did not help (18% against 19%, -37% against -33%)."""
+    """11 Oct signal check (1,857 coins): retention above its median wins a little more often (25% against
+    21%) with no edge in the return; four or more same-slot buyers (-29% against -22%) and a drawdown past
+    13% (-27% against -22%) are the two clearest marks; the launch-minute sniper share runs the other way."""
     for prompt in (ROLE_PROMPTS["analyst"], NEUTRAL_PROMPTS["analyst"]):
-        assert "(909 tokens) those above 0.1 were winners 24% of the time with an average return of -31%" in prompt
-        assert "26%" not in prompt and "better than any other flow field" not in prompt   # the 9 Oct overstatement
+        assert "(1,733 tokens) those above the median were winners 25% of the time against 21%" in prompt
+        assert "909 tokens" not in prompt and "better than any other flow field" not in prompt   # stale figures
         assert "Low retention alone is not a red flag." in prompt
         assert "a large inflow is not positive evidence by itself" in prompt
         assert "below 0.4 means most early buyers already exited" not in prompt
+        assert "tokens with 4 or more same-slot buyers returned -29% against -22%" in prompt
+        assert "`same_slot_as_launch_buyers` of 4 or more (3, the median token, is routine)" in prompt
+        assert "more than about 13% under their peak" in prompt and "one of the two clearest signals" in prompt
+        assert "`sniper_top3_share_of_launch_minute`) is not a warning by itself" in prompt
+        assert "same-size clusters of 5 or more showed no edge either way" in prompt
+    assert "(-25% against -25%, 22% winners against 26%)" in TRIAGE and "-33% against -34%" not in TRIAGE
     neutral = NEUTRAL_PROMPTS["analyst"].split("Your vote carries the decision", 1)[1]
     assert "launch buyers still holding" in neutral and "creator still in" not in neutral
     assert "0.75 or more" in neutral                                                  # the gate is unchanged
@@ -214,3 +221,17 @@ def test_the_analyst_proposes_sizes_inside_the_configured_range(s):
     # the defaults keep the text as it was (and the cached prefix with it)
     assert role_prompt("analyst", True) == NEUTRAL_PROMPTS["analyst"]
     assert role_prompt("analyst", False, (5.0, 10.0)) == ROLE_PROMPTS["analyst"]
+
+
+def test_the_prompts_state_the_exit_rules_the_bot_runs(s):
+    """The agents were told '-40% stop' whatever STOP_LOSS_PCT was; they now read the bot's own stop,
+    take-profit and time stop, so they weigh the risk the bot takes."""
+    from bot.agents.tools import ToolContext, analyst_spec, forensics_spec, scout_spec
+    s.STOP_LOSS_PCT, s.TAKE_PROFIT_PCT, s.TIME_STOP_HOURS = 25.0, 80.0, 4.0
+    ctx = ToolContext(s, None, None, None, None, None, None, {"mint": "m"})
+    for spec in (analyst_spec(ctx), scout_spec(ctx)):
+        assert "4-hour max hold, -25% stop, +80% take-profit" in spec.system and "-30% stop" not in spec.system
+    assert "($5-$10 positions, 4-hour max hold)" in forensics_spec(ctx).system
+    for prompt in (*ROLE_PROMPTS.values(), *NEUTRAL_PROMPTS.values()):
+        assert "-40% stop" not in prompt                            # the defaults read the current rules
+    assert "6-hour max hold, -30% stop, +60% take-profit" in ROLE_PROMPTS["analyst"]

@@ -83,6 +83,8 @@ def test_the_tracker_marks_new_coins_for_dips(s):
 
 
 def test_the_shadow_marks_its_trough_peak_time_and_first_2x_trade_by_trade(s):
+    s.STOP_LOSS_PCT, s.TRAILING_ARM_PCT = 40.0, 0.0          # the marks are the subject, not the exits
+
     async def go():
         db = await Database(s.DB_PATH).open()
         try:
@@ -161,12 +163,12 @@ def test_the_report_says_how_deep_winners_dipped_and_what_wider_or_later_stops_c
                         tracker={"low_0h_6h": 0.52e-6, "price_6h": 0.75e-6})
             # the time stop sold at -10%; +20% at 12 h, but through -40% by 24 h
             await _coin(db, "TIMED", exit_reason="time_stop", exit_price=0.9e-6,
-                        shadow={"trough_price": 0.8e-6, "trough_at": SEEN + 2 * H, "peak_price": 1.3e-6},
+                        shadow={"trough_price": 0.78e-6, "trough_at": SEEN + 2 * H, "peak_price": 1.3e-6},
                         tracker={"low_0h_6h": 0.85e-6, "low_6h_12h": 0.85e-6, "price_12h": 1.2e-6,
                                  "low_12h_24h": 0.5e-6, "price_24h": 0.55e-6})
             # the time stop sold at -5%; it doubled 9 h in, never below -30% first
             await _coin(db, "LATE", exit_reason="time_stop", exit_price=0.95e-6,
-                        shadow={"trough_price": 0.8e-6, "trough_at": SEEN + 2 * H},
+                        shadow={"trough_price": 0.78e-6, "trough_at": SEEN + 2 * H},
                         tracker={"first_2x_at": SEEN + 9 * H, "low_before_2x": 0.7e-6, "peak_price": 2.2e-6,
                                  "peak_at": SEEN + 10 * H, "low_before_peak": 0.7e-6, "low_6h_12h": 0.7e-6})
             # tracked before dips were recorded: left out of every count below
@@ -191,6 +193,19 @@ def test_the_report_says_how_deep_winners_dipped_and_what_wider_or_later_stops_c
     assert w50["held_median"] == pytest.approx(0.15) and w50["usd"] == pytest.approx(5 * (0.15 - 0.10))
     assert (w60["kept"], w60["fell_through"], w60["held"]) == (1, 1, 1)
     assert w60["usd"] == pytest.approx(5 * (0.15 - 0.20))
+    # a tighter stop: FALL and BETWEEN fell through -40% anyway (sold earlier, 20/15/10% of the stake saved);
+    # TIMED and LATE dipped -22% but not -25%, so only -20% sells them early (unread at 6 h: not valued);
+    # DEEP dipped through -40% itself and TEN only -10%: no coin that doubled is cut
+    t20, t25, t30 = d["tighter"]
+    assert (t20["stop"], t20["cut"], t20["through"], t20["early"], t20["early_unread"]) == (0.2, 0, 2, 2, 2)
+    assert t20["usd"] == pytest.approx(5 * 0.2 * 2) and t20["early_median_6h"] is None
+    assert (t25["stop"], t25["cut"], t25["through"], t25["early"]) == (0.25, 0, 2, 0)
+    assert (t30["stop"], t30["through"], t30["usd"]) == (0.3, 2, pytest.approx(5 * 0.1 * 2))
+    assert "a tighter stop, on the same 6 coins (not replayed, shares of a $5 stake):" in text
+    assert "  -20% cuts 0 that dipped -20% to -40% and then doubled within 6h (not valued)" in text
+    assert ("  -20% saves 20% of the stake on the 2 that fell through -40% anyway; sells 2 more that dipped -20% to -40% "
+            "without doubling instead of holding them to 6h (2 unread at 6h); measured on these $+2.00") in text
+    assert "  -30% saves 10% of the stake on the 2 that fell through -40% anyway; measured on these $+1.00" in text
     h12, h24 = d["later"]
     assert (h12["hours"], h12["doubled"], h12["stopped"], h12["sold"]) == (12, 1, 0, 1)
     assert h12["median_move"] == pytest.approx(0.30) and h12["usd"] == pytest.approx(1.5)
@@ -223,7 +238,8 @@ def test_the_dip_section_says_what_it_cannot_judge_yet_and_follows_the_time_stop
     s.STOP_LOSS_PCT, s.TIME_STOP_HOURS = 40.0, 6.0
     young = [_rec(T0 - H, low=-0.3, low_6h=-0.3), _rec(T0 - 2 * H, low=-0.5, low_6h=-0.5)]
     text = "\n".join(dip_lines(dip_summary(young, s, T0)))
-    assert "a wider stop: judged once a coin's first 6h are over (none yet)" in text and "-50% keeps" not in text
+    assert "a wider or tighter stop: judged once a coin's first 6h are over (none yet)" in text
+    assert "-50% keeps" not in text and "-30% saves" not in text
     assert "a later time stop: the time stop has sold none of these coins yet" in text and "to 12h" not in text
     # a 3 h time stop: the fall to -45% at 4 h, after its sale at -10%, counts toward holding it to 12 h
     s.TIME_STOP_HOURS = 3.0

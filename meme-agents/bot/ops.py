@@ -86,6 +86,7 @@ SETTABLE: dict[str, object] = {
     "STOP_LOSS_PCT": (float, 5, 90),
     "TAKE_PROFIT_PCT": (float, 5, 500),
     "TRAILING_STOP_PCT": (float, 5, 90),
+    "TRAILING_ARM_PCT": (float, 0, 500),
     "TIME_STOP_HOURS": (float, 0.25, 48),
     "RUNNER_ENABLED": bool,
     "RUNNER_FRACTION": (float, 0.01, 0.25),

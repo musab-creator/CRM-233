@@ -211,6 +211,10 @@ def test_the_report_counts_peaks_by_what_the_bot_did(s):
     assert "  triage skipped           1       1       1       1       1" in text
     assert "exits: 3 coins reached 10x or more; the bot's exits (on the shadow) had sold 3 of them for under +100%" \
         in text
+    assert m["two_x_exits"] == {"trailing_stop": {"n": 3, "median_ret": pytest.approx(0.2), "lost": 0},
+                                "stop_loss": {"n": 1, "median_ret": pytest.approx(-0.4), "lost": 1}}
+    assert ("the shadows of the 4 coins that reached 2x left by (count, median return, sold at a loss): "
+            "trailing_stop 3 (+20%, 0 at a loss), stop_loss 1 (-40%, 1 at a loss)") in text
     assert ("    600x SKP seen 10-08 08:53 (~$20.0k -> ~$12.00M market cap), 24.0h after it was seen, now 300x | #2 "
             "triage skipped: triage: same_slot_as_launch_buyers 4 | shadow stop_loss -40%") in text
     assert "trade #2 $10, closed by trailing_stop for $+4.00; the peak was 100x its entry" in text

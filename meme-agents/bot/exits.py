@@ -3,6 +3,12 @@
 Triggers compare the raw observed trade price with the raw entry fill price (see PLAN.md,
 assumption 3). Order of precedence: emergency > time stop > stop loss > take profit > trailing.
 
+The trailing stop runs after the take-profit, and before it once the price has been TRAILING_ARM_PCT
+above the entry (0 turns that off). 11 Oct: 69% of 1,836 shadows left by the stop loss or the
+liquidity rule, at a median -41%, and the losing shadows had often been well up first; a coin that
+ran +30% and gives it back now sells about TRAILING_STOP_PCT under its peak, not at the stop loss.
+The seven coins that doubled since the dips were recorded never dipped below -20% first.
+
 A position created with a runner policy (RUNNER_* settings) keeps part of a winner: after its
 take-profit, the core's trailing or time stop sells all but RUNNER_FRACTION of the original
 tokens, provided the sales so far plus that one cover the entry cost. The runner left over has
@@ -81,6 +87,9 @@ def check_exit(p: ExitState, price: float | None, now: float, s: Settings,
     if not p.tp_done:
         if price >= p.entry_price * (1 + s.TAKE_PROFIT_PCT / 100):
             return ExitSignal("take_profit", s.TAKE_PROFIT_SELL_FRACTION)
+        if (s.TRAILING_ARM_PCT > 0 and p.peak_price >= p.entry_price * (1 + s.TRAILING_ARM_PCT / 100)
+                and price <= p.peak_price * (1 - s.TRAILING_STOP_PCT / 100)):
+            return ExitSignal("early_trailing_stop", 1.0)   # armed: the coin ran, then fell back from its peak
         return None
     if p.runner_fraction > 0 and price >= p.entry_price * p.runner_target_multiple:
         return ExitSignal("runner_target", 1.0)       # everything left reached the runner's target

@@ -145,10 +145,16 @@ class Settings:
     LIVE_CONFIRM_TIMEOUT_S: float = 60.0
 
     # --- exits -----------------------------------------------------------------
-    STOP_LOSS_PCT: float = 40.0
+    # 11 Oct: 1,276 of 1,836 shadows left by the stop loss or the liquidity rule, at a median -41% (a -40%
+    # stop filled near -47% with the paper costs); the coins that doubled had not dipped below -20% first.
+    STOP_LOSS_PCT: float = 30.0
     TAKE_PROFIT_PCT: float = 60.0
     TAKE_PROFIT_SELL_FRACTION: float = 0.5
     TRAILING_STOP_PCT: float = 30.0
+    # The trailing stop also runs before the take-profit once the price has been this far above the
+    # entry: a coin that ran and gave it back sells TRAILING_STOP_PCT under its peak (early_trailing_stop,
+    # urgent), not at the stop loss. 0 trails only after the take-profit, as before. Below TAKE_PROFIT_PCT.
+    TRAILING_ARM_PCT: float = 30.0
     TIME_STOP_HOURS: float = 6.0
     # Runner: after a take-profit, the core's trailing or time stop sells all but this share of the
     # original tokens, kept only while the sales so far plus that one cover the entry cost. The
@@ -404,6 +410,8 @@ def validate_settings(s: Settings) -> None:
         raise ConfigError("RUNNER_MAX_HOLD_HOURS must be longer than TIME_STOP_HOURS")
     if s.RUNNER_ENABLED and s.TAKE_PROFIT_SELL_FRACTION + s.RUNNER_FRACTION >= 1:
         raise ConfigError("TAKE_PROFIT_SELL_FRACTION plus RUNNER_FRACTION must stay below 1")
+    if s.TRAILING_ARM_PCT and s.TRAILING_ARM_PCT >= s.TAKE_PROFIT_PCT:
+        raise ConfigError("TRAILING_ARM_PCT must be below TAKE_PROFIT_PCT (0 trails only after the take-profit)")
     if s.PF_MIN_AGE_MIN > s.PF_MAX_AGE_MIN:
         raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
     if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:

@@ -118,8 +118,60 @@ def test_report_counts_what_open_positions_already_banked(s):
     assert "+ open positions' sales +0.1600 SOL  /  $+17.60" in text
     assert "= realized so far   +0.1100 SOL  /  $+12.10" in text
     assert "sold 90% of the tokens for 0.2500 SOL: banked +0.1600 SOL ($+17.60), the 10% still held" in text
-    assert "shadow exit reasons: stop_loss 2, trailing_stop 1" in text
-    assert "real trades' exit reasons: stop_loss 1" in text
+    assert r["shadow_exit_outcomes"] == {"stop_loss": {"n": 2, "median_ret": pytest.approx(-0.2), "pnl_usd": -2.0},
+                                         "trailing_stop": {"n": 1, "median_ret": pytest.approx(-0.2), "pnl_usd": -1.0}}
+    assert ("shadow exit reasons (count, median return, PnL $): stop_loss 2 (-20%, $-2), trailing_stop 1 (-20%, $-1)"
+            in text)
+    assert "real trades' exit reasons (count, median return, PnL $): stop_loss 1 (-50%, $-6)" in text
+    assert "round trips:" not in text                                       # no shadow carries an entry price
+
+
+def test_round_trips_say_what_the_early_trailing_stop_would_have_saved(s):
+    """11 Oct: the losing shadows had often been well up first. For every loser that never took its profit and
+    had been up TRAILING_ARM_PCT or more, the report values a sale at TRAILING_STOP_PCT under the peak (the
+    urgent fee, the trail level itself) against what it got."""
+    from bot.paper import exit_fill
+
+    def shadow(mint, peak, last, pnl_sol, **extra):
+        return {"mint": mint, "kind": "shadow", "status": "closed", "cost_sol": 0.1, "tokens_initial": 1e6,
+                "entry_price": 1e-7, "peak_price": peak, "last_price": last, "pnl_sol": pnl_sol,
+                "pnl_usd": pnl_sol * 100, "sol_usd_entry": 100.0, "closed_at": 2.0, "exit_reason": "stop_loss",
+                **extra}
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("positions", shadow("TRIP", 1.5e-7, 0.7e-7, -0.037))      # up 50%, stopped at -30%
+            await db.insert("positions", shadow("TRIP2", 1.3e-7, 0.68e-7, -0.039))    # up 30%, the same
+            await db.insert("positions", shadow("FLAT", 1.1e-7, 0.7e-7, -0.037))      # never ran: not a round trip
+            await db.insert("positions", shadow("TOOK", 1.8e-7, 0.9e-7, -0.01, tp_done=1))   # the planned trail had it
+            await db.insert("positions", shadow("TIMED", 1.35e-7, 0.96e-7, -0.012, exit_reason="time_stop"))
+            await db.insert("positions", shadow("WON", 2.5e-7, 1.9e-7, 0.06, exit_reason="trailing_stop"))
+            r = await build_report(db, s)
+            return r, render_text(r)
+        finally:
+            await db.close()
+    r, text = asyncio.run(go())
+    x = r["round_trips"]
+    assert (x["arm"], x["trail"], x["on"], x["losers"], x["n"]) == (0.3, 0.3, True, 4, 2)   # TIMED never fell to its trail
+    assert x["median_peak"] == pytest.approx(0.4) and x["median_ret"] == pytest.approx(-0.38)
+    sale = exit_fill(1e6, 1.5e-7 * 0.7, s, urgent=True).sol + exit_fill(1e6, 1.3e-7 * 0.7, s, urgent=True).sol
+    assert x["saved_sol"] == pytest.approx(sale - (0.1 - 0.037) - (0.1 - 0.039))
+    assert x["saved_usd"] == pytest.approx(x["saved_sol"] * 100) and x["saved_usd"] > 0
+    assert ("round trips: of the 4 losing shadows, 2 had first been up 30% or more (median peak +40%) and lost a median "
+            "-38%; the trailing stop armed at +30% (on: 30% under the peak) would have sold them at a median") in text
+    s.TRAILING_ARM_PCT = 0
+    r = asyncio.run(_rebuild(s))
+    assert r["round_trips"]["on"] is False and r["round_trips"]["n"] == 2
+    assert "TRAILING_ARM_PCT is 0, off" in render_text(r)
+
+
+async def _rebuild(s):
+    db = await Database(s.DB_PATH).open()
+    try:
+        return await build_report(db, s)
+    finally:
+        await db.close()
 
 
 def test_report_without_partial_sales_adds_no_banked_lines(s):

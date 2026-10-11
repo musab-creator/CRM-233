@@ -30,9 +30,11 @@ log = logging.getLogger("bot.positions")
 
 
 def urgent_exit(reason: str, attempts: int = 0) -> bool:
-    """A sale that has to land fast: a stop loss, an emergency, the kill switch, or any sale retried
-    after a failure. It pays URGENT_PRIORITY_FEE_SOL; a planned sale pays PRIORITY_FEE_SOL."""
-    return reason in ("stop_loss", "kill_switch") or reason.startswith("emergency") or attempts > 0
+    """A sale that has to land fast: a stop loss, the trailing stop before the take-profit (a coin that
+    ran is falling back), an emergency, the kill switch, or any sale retried after a failure. It pays
+    URGENT_PRIORITY_FEE_SOL; a planned sale pays PRIORITY_FEE_SOL."""
+    return (reason in ("stop_loss", "early_trailing_stop", "kill_switch") or reason.startswith("emergency")
+            or attempts > 0)
 
 TICK_CONFIRM_S = 300.0   # a held mark is confirmed by a second one near it within this long
 RISK_NOTE_EVERY_S = 900.0   # one NO ENTRY notice per kind of risk refusal per 15 minutes; the rest are logged
