@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 import anthropic
@@ -16,11 +17,12 @@ import httpx
 
 from .agents.base import Vote, run_agent, vote_tool, worst_case_call_usd
 from .agents.tools import ToolContext, build_specs, build_veto_specs
-from .agents.triage import run_triage, triage_first_call_usd, triage_skips
+from .agents.triage import run_triage, triage_first_call_usd, triage_skips, verify_triage
 from .budget import Budget, utc_day, utc_month
-from .commands import TelegramCommands
+from .commands import LOSS_CAP_PREFIX, TelegramCommands
+from .ops import consume_keep_pause
 from .config import Settings, validate_settings
-from .consensus import apply_vetoes, gate
+from .consensus import VETO_AGENTS, apply_vetoes, gate
 from .db import Database
 from .digest import hour_start, hourly_digest
 from .feeds.dexscreener import DexScreener, summarize_pair
@@ -28,13 +30,16 @@ from .feeds.helius import Helius, RpcError
 from .feeds.http import HttpError
 from .feeds.news import NewsFeed
 from .feeds.prices import SolPrice, chained, coingecko_sol_usd
-from .feeds.pumpchain import HeliusChain
+from .feeds.pumpchain import HeliusChain, bonding_curve_key
 from .feeds.pumpportal import PumpPortalFeed
 from .feeds.rugcheck import Rugcheck
 from .feeds.xapi import XClient
 from .features import chain_features, flow_features
 from .ingest import Ingestor, MintState
-from .live.guard import check_live_startup
+from .live.guard import LiveRefused, check_live_startup, static_checks
+from .insiders import InsiderWatch, insider_set
+from .wallets import WalletMemory
+from .moonshots import MoonshotTracker
 from .paper import PaperExecutor
 from .positions import PositionManager
 from .prefilter import curve_liquidity_usd, full_check, stage1
@@ -42,17 +47,34 @@ from .regime import Regime, apply_regime_size, market_snapshot, run_regime
 from .report import write_daily
 from .risk import RiskManager, kill_switch_active
 from .telegram import Telegram
-from .util import InstanceLock, backoff_delay, now_s, sd_notify
+from .util import InstanceLock, backoff_delay, git_commit, now_s, sd_notify
 
 log = logging.getLogger("bot.engine")
 
 STAGE2_RECHECK_S = 300
 CANDIDATE_MAX_WAIT_S = 600
+INSIDER_KEEP_DAYS = 60       # insiders of evaluated coins are deleted after this many days
+WALLET_READ_S = 300.0        # the live wallet's balance for /status: one 1-credit Helius call per 5 minutes
 EXTERNAL_ERRORS = (HttpError, RpcError, httpx.HTTPError, asyncio.TimeoutError)
 
 
 class StartupError(Exception):
     pass
+
+
+def _skipped_curves(stats: dict) -> str:
+    """Coins dropped on their curve reads since the start, one figure each instead of a log line per coin."""
+    parts = [f"{label} {stats.get(key, 0)}" for key, label in
+             (("mayhem_dropped", "Mayhem"), ("non_sol_quote", "non-SOL quote"), ("curve_unreadable", "unreadable"))
+             if stats.get(key)]
+    return f" | curves skipped: {', '.join(parts)}" if parts else ""
+
+
+def _vote_label(v) -> str:
+    """How a vote reads in the chat: the committee's BUY/PASS, a veto agent's veto / no veto."""
+    if v.agent in VETO_AGENTS:
+        return "VETO" if v.vote == "PASS" else "no veto"
+    return v.vote
 
 
 def credit_pace(total: int, monthly: int, ts: float) -> tuple[bool, bool]:
@@ -77,6 +99,8 @@ class Engine:
         validate_settings(s)
         self.s = s
         self.started_at = now_s()
+        self.code: str | None = None     # the commit this process runs, for /status
+        self.ready_at: float | None = None  # when setup finished and systemd was told READY
         self.db = Database(s.path(s.DB_PATH))
         self.lock = InstanceLock(str(s.path(s.DB_PATH)) + ".lock")
         self.http = http or httpx.AsyncClient(timeout=20, headers={"User-Agent": "meme-agents/0.1"})
@@ -98,6 +122,9 @@ class Engine:
         self.llm = llm if llm is not None else (
             anthropic.AsyncAnthropic(api_key=s.ANTHROPIC_API_KEY, max_retries=2) if s.ANTHROPIC_API_KEY else None)
         self.tg = Telegram(self.http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID)
+        # watches every evaluated coin for MOONSHOT_TRACK_DAYS; measures only, never trades
+        self.moonshots = (MoonshotTracker(s, self.db, self.dex, self.tg.send if self.tg.enabled else None)
+                          if s.MOONSHOT_TRACK_DAYS > 0 else None)
         sources = [self.dex.sol_usd]
         if s.SOL_USD_FALLBACK_URL:
             sources.append(lambda: coingecko_sol_usd(self.http, s.SOL_USD_FALLBACK_URL))
@@ -108,8 +135,13 @@ class Engine:
         self.queue: asyncio.Queue[int] = asyncio.Queue()
         self._stage2_at: dict[str, float] = {}
         self._early: dict[str, dict] = {}       # launch-minute trades per candidate, fetched once
+        self._insiders: dict[str, dict] = {}    # mint -> its insiders at the last evaluation (insiders.py)
+        self.insider_watch: InsiderWatch | None = None
+        self.wallets: WalletMemory | None = None
+        self._found_at: dict[int, float] = {}   # candidate id -> when the scan found it
         self.cycles = 0
         self.triage_skips = 0                   # candidates the triage screen kept from the agents
+        self._eval_gate = asyncio.Lock()        # one committee at a time while the paced budget is tight
         self.crashes: dict[str, int] = {}       # background loops that raised (each is restarted)
         self.stream_mode = s.PUMPPORTAL_TRADE_STREAM
         self._stream_blocked_day: str | None = None
@@ -117,8 +149,11 @@ class Engine:
         self._credits_saved = 0
         self._credits_over_pace = False   # ahead of the month's Helius budget: slower, cheaper reads
         self._credits_exhausted = False   # the month's Helius budget is spent: no chain reads
+        self._credits_headroom = False    # well inside the month's pace: background read-backs may run
+        self._wallet: tuple[float, float] | None = None   # the live wallet's last SOL balance and when it was read
         self._digest_hour: float | None = None  # start of the hour the next Telegram digest covers
         self.regime = Regime()                   # market regime: sizes entries down or pauses them
+        self.live_lock: str | None = None        # a failed live check: entries locked, phone commands alive
         self._regime_at: float | None = None
         self.stop = asyncio.Event()
 
@@ -128,8 +163,24 @@ class Engine:
             raise StartupError(f"another bot process is already using {self.s.path(self.s.DB_PATH)}; "
                                "stop it first (systemctl stop meme-agents, or Ctrl-C the other terminal)")
         await self.db.open()
+        self.code = await asyncio.to_thread(git_commit, self.s.path("."))
         await self.risk.startup()
-        kp = await check_live_startup(self.s, self.helius.balance_sol)  # raises LiveRefused
+        try:
+            kp = await check_live_startup(self.s, self.helius.balance_sol)
+        except LiveRefused as e:
+            if str(e).startswith("MODE must be"):
+                raise
+            # A failed live check used to end the process, which also ended the phone commands
+            # (8 Oct: the wallet grew past its cap and a phone-only operator was locked out). The bot
+            # now runs with entries locked; exits still work when the key and config are sound.
+            self.live_lock = str(e)
+            try:
+                kp = static_checks(self.s)
+            except LiveRefused:
+                kp = None
+            self.risk.paused_reason = f"live lock: {e}; fix the cause, then /restart"
+            log.error("LIVE LOCK: %s (entries off; %s)", e,
+                      "exits of open positions still run" if kp else "no usable key, exits cannot run")
         if kp is not None:
             from .live.executor import LiveExecutor
             self.executor = LiveExecutor(self.s, self.db, self.http, kp, self._is_graduated, chain=self.helius)
@@ -137,10 +188,20 @@ class Engine:
         self.positions = PositionManager(
             self.s, self.db, self.risk, self.executor, self.sol_price, dex=self.dex, rugcheck=self.rug,
             notifier=self.tg.send if self.tg.enabled else None, pin=self._pin, watch_account=self._watch_account,
-            curve_liquidity=self._curve_liquidity)
+            curve_liquidity=self._curve_liquidity, quote_of=self.ingest.non_sol.get)
         self.ingest.subscribe = self.feed.subscribe_tokens
         self.ingest.unsubscribe = self.feed.unsubscribe_tokens
         self.ingest.tick_handlers.append(self.positions.on_tick)
+        self.insider_watch = InsiderWatch(self.s, self.db, self.positions, self._curve_key_of, helius=self.helius,
+                                          paused=lambda: self._credits_exhausted,
+                                          over_pace=lambda: self._credits_over_pace)
+        self.wallets = WalletMemory(self.s, self.db, self.chain, exclude={getattr(self.executor, "pubkey", None)},
+                                    budget_ok=lambda: self._credits_headroom and not self._credits_exhausted)
+        if self.live_lock and self.tg.enabled:
+            await self.tg.send(f"🔒 LIVE LOCKED: {self.live_lock}\nEntries are off"
+                               + (", exits of open positions still run." if kp is not None
+                                  else " and no usable key: exits cannot run either.")
+                               + "\nFix the cause (move SOL out of the wallet, or /set and /update), then /restart.")
         if self.stream_mode != "off" and not self.s.PUMPPORTAL_API_KEY and isinstance(self.feed, PumpPortalFeed):
             log.warning("PUMPPORTAL_TRADE_STREAM=%s needs PUMPPORTAL_API_KEY: since May 2026 PumpPortal streams "
                         "per-token trades only to funded API keys. Continuing with the stream off.", self.stream_mode)
@@ -188,6 +249,27 @@ class Engine:
     def _is_graduated(self, mint: str) -> bool:
         st = self.ingest.mints.get(mint)
         return bool(st and st.graduated)
+
+    def _curve_key_of(self, mint: str) -> str | None:
+        """The bonding curve whose trades InsiderWatch streams: None once the coin graduated. A coin
+        tracked without its curve key gets the one derived from the mint."""
+        st = self.ingest.mints.get(mint)
+        if st is None or st.graduated:
+            return None
+        return st.bonding_curve_key or bonding_curve_key(mint)
+
+    def _insider_note(self) -> str:
+        w = self.insider_watch
+        if not w or not self.s.INSIDER_WATCH or not self.s.HELIUS_API_KEY:
+            return ""
+        if w.error:
+            return f" | insider watch: {w.error}"
+        if self._credits_exhausted:
+            return " | insider watch: paused, the month's Helius credits are spent"
+        st = w.stats
+        return (f" | insider watch: {st['watching']} coin(s), {st['insider_sells']} insider sells, "
+                f"{st['warnings']} warnings" + (f", {st['exits']} exits" if self.s.INSIDER_EXIT else "")
+                + f", {w.credits} Helius credits since start")
 
     def _pin(self, mint: str, on: bool) -> None:
         """Candidates, positions and shadows: read their curves often; stream their trades if paid for."""
@@ -296,6 +378,40 @@ class Engine:
             st.next_poll_at = now + self._poll_interval(st)
         return len(batch)
 
+    async def poll_position_curves_once(self) -> int:
+        """The curves of the real positions (pending ones too, so a decided buy fills on the next
+        read) in one getMultipleAccounts call; a moved curve becomes a tick for the exit rules."""
+        held = self.positions.active("real") if self.positions else []
+        waiting = {p.mint for p in held if p.status == "pending"}
+        batch = [st for m in sorted({p.mint for p in held}) if (st := self.ingest.mints.get(m)) is not None
+                 and st.bonding_curve_key and not st.graduated and not st.streamed][:100]
+        if not batch:
+            return 0
+        curves = await self.chain.curves([st.bonding_curve_key for st in batch])
+        now = now_s()
+        for st in batch:
+            c = curves.get(st.bonding_curve_key)
+            if c is None:
+                continue
+            moved = await self.ingest.apply_curve(st.mint, c, now)
+            if not moved and st.mint in waiting and st.curve_at == now and c.price_sol:
+                # a decided buy fills at this accepted read even if no trade moved the curve since
+                await self.positions.on_tick(st.mint, c.price_sol, now, {"txType": "curve", "pool": "pump"})
+        return len(batch)
+
+    async def position_price_poller(self) -> None:
+        """Real positions' curves every POSITION_POLL_S, apart from the launch poller's queue."""
+        if not self.chain.enabled or self.s.POSITION_POLL_S <= 0:
+            await self.stop.wait()
+            return
+        while not self.stop.is_set():
+            if not self._credits_exhausted:
+                try:
+                    await self.poll_position_curves_once()
+                except EXTERNAL_ERRORS as e:
+                    log.warning("position curve read failed: %s", e)
+            await self._sleep(self.s.POSITION_POLL_S * (2.0 if self._credits_over_pace else 1.0))
+
     def _curve_tick_s(self) -> float:
         base = 60.0 / max(0.1, self.s.CURVE_POLL_CALLS_PER_MIN)
         return base * (2.0 if self._credits_over_pace else 1.0)
@@ -335,6 +451,11 @@ class Engine:
                         int(self.s.HELIUS_MONTHLY_CREDITS * max(month_fraction(now_s()), 1 / 30)),
                         "slowed to half speed" if over else "back to full speed")
         self._credits_over_pace, self._credits_exhausted = over, exhausted
+        # Background read-backs (wallets.py) only below 80% of the pace line and with 5% of the month
+        # left, so they never push the trading reads to half speed or spend the budget they need.
+        monthly = self.s.HELIUS_MONTHLY_CREDITS
+        self._credits_headroom = (total <= 0.8 * monthly * max(month_fraction(now_s()), 1 / 30)
+                                  and total <= 0.95 * monthly)
         return total
 
     async def refresh_holders(self, st: MintState) -> None:
@@ -366,7 +487,12 @@ class Engine:
                                    [mint]) or {}
         creator = (st.creator if st else "") or m.get("creator")
         if st and st.streamed:
-            return flow_features(await self.db.all_trades(mint), creator, now)
+            trades = await self.db.all_trades(mint)
+            t0 = trades[0]["ts"] if trades else 0
+            # streamed trades carry no slot (no bundle role) and there is no holder snapshot (no top holders)
+            self._remember_insiders(mint, [t for t in trades if t["ts"] - t0 <= self.s.BACKFILL_WINDOW_S], None,
+                                    creator, st.bonding_curve_key or m.get("bonding_curve_key"))
+            return flow_features(trades, creator, now)
         curve = (st.bonding_curve_key if st else "") or m.get("bonding_curve_key")
         if not curve or not self.chain.enabled:
             return {"source": "chain", "error": "no bonding-curve key or no Helius key: flow unavailable"}
@@ -399,7 +525,29 @@ class Engine:
                              supply=st.supply if st else None)
         if err:
             out["error"] = str(err)[:300]
+        self._remember_insiders(mint, early["trades"], holders, creator, curve)
         return out
+
+    async def _wallet_features(self, mint: str, insiders: dict | None, creator: str | None) -> dict | None:
+        if self.wallets is None:
+            return None
+        try:
+            return await self.wallets.features(mint, insiders, creator)
+        except Exception:
+            log.exception("wallet memory: no numbers for %s", mint)   # never in the way of the decision
+            return None
+
+    def _remember_insiders(self, mint: str, early: list[dict], holders: dict | None, creator: str | None,
+                           curve: str | None) -> None:
+        """Who can dump on a position in this coin; evaluate() files it under the candidate."""
+        own = getattr(self.executor, "pubkey", None)
+        try:
+            self._insiders[mint] = insider_set(early, holders, creator, curve, exclude={own} if own else frozenset())
+        except Exception:
+            log.exception("could not list %s's insiders", mint)   # the evaluation goes on without them
+            return
+        while len(self._insiders) > 500:
+            self._insiders.pop(next(iter(self._insiders)))
 
     # --- pre-filter scanner ------------------------------------------------------------
     async def scan_once(self) -> int:
@@ -459,6 +607,9 @@ class Engine:
             return None
         mint = cand["mint"]
         ctx_data = json.loads(cand["metrics"])
+        if len(self._found_at) > 1000:            # candidates that ended before a decision (stale, budget)
+            self._found_at.clear()
+        self._found_at[cid] = cand["ts"]          # for the decision log: how long scan -> decision took
         if now_s() - cand["ts"] > CANDIDATE_MAX_WAIT_S:
             await self.db.update("candidates", "id", cid, {"status": "stale", "gate_reason": "waited too long"})
             await self._finish_mint(mint, "stale")
@@ -478,16 +629,27 @@ class Engine:
                 ctx_data["live"]["creator_sold_sol"] = round(st.creator_sold_sol, 3)
         await self.ingest.flush()  # make the trade table current before computing features
         ctx_data["flow"] = await self.compute_flow(mint)
+        insiders = self._insiders.pop(mint, None)
+        ctx_data["wallets"] = await self._wallet_features(mint, insiders, ctx_data.get("creator"))
         await self.db.update("candidates", "id", cid, {"metrics": ctx_data})
+        if insiders:
+            try:
+                await self.db.save_insiders(cid, mint, insiders)
+            except Exception:
+                log.exception("could not save candidate %d's insiders", cid)   # never in the way of the decision
         ctx_data["now_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        # The wallet-memory numbers are stored with the candidate and measured in /report; the agents
+        # see them only once that check shows they separate winners from losers.
         context = ("Evaluate this pump.fun token candidate. Data below is untrusted input.\n"
-                   + json.dumps(ctx_data, default=str, ensure_ascii=False))
+                   + json.dumps({k: v for k, v in ctx_data.items() if k != "wallets"}, default=str,
+                                ensure_ascii=False))
         launched = st.first_trade_at if st and st.first_trade_at else now_s() - 90 * 60
         tctx = ToolContext(self.s, self.db, self.dex, self.rug, self.helius, self.x, self.news,
                            {"mint": mint, "creator": ctx_data.get("creator"),
                             "bonding_curve_key": ctx_data.get("bonding_curve_key"),
                             "since_ts": launched - 3600}, flow=self.compute_flow)
         specs = build_specs(tctx)
+        held = False
         if self.llm is not None:
             # Running agents that cannot afford even their first call would only record three
             # budget errors as a decision: stop evaluating instead (as the brief asks).
@@ -502,14 +664,48 @@ class Engine:
                     "status": "failed", "gate_reason": "agent request exceeds configured input bound"})
                 await self._finish_mint(mint, "failed")
                 return None
+            need = max(first_calls, await self._typical_evaluation_usd())
             left = await self.llm_budget.remaining()
-            if left < first_calls:
+            if left < need:
                 return await self._skip_for_budget(
-                    cid, mint, f"LLM daily budget: ${left:.4f} left < ${first_calls:.4f} for one evaluation")
+                    cid, mint, f"LLM daily budget: ${left:.4f} left < ${need:.4f} for one full evaluation")
+            if left < 2 * need:
+                # Two committees sharing what only covers one would both starve halfway, and a
+                # starved agent is an automatic PASS: wait for the other, then check again.
+                await self._eval_gate.acquire()
+                held = True
+                left = await self.llm_budget.remaining()
+                if left < need:
+                    self._eval_gate.release()
+                    return await self._skip_for_budget(
+                        cid, mint, f"LLM daily budget: ${left:.4f} left < ${need:.4f} for one full evaluation")
+        try:
+            return await self._evaluate_with_llm(cid, mint, ctx_data, context, tctx, specs)
+        finally:
+            if held:
+                self._eval_gate.release()
+
+    async def _typical_evaluation_usd(self) -> float:
+        """What a whole evaluation has cost lately (triage, the three agents and the vetoes when
+        they ran), with headroom. The pre-check must cover all of it, not only the first calls:
+        a paced budget funds committees whose later turns fail on the budget, and an errored
+        agent is a PASS, so the money buys no decision. Below five samples: no estimate."""
+        rows = await self.db.fetchall(
+            "SELECT llm_cost_usd FROM candidates WHERE status='evaluated' AND llm_cost_usd > 0 "
+            "AND (gate_reason IS NULL OR gate_reason NOT LIKE 'triage:%') ORDER BY id DESC LIMIT 20")
+        costs = [float(r["llm_cost_usd"]) for r in rows]
+        if len(costs) < 5:
+            return 0.0
+        return 1.5 * sum(costs) / len(costs)
+
+    async def _evaluate_with_llm(self, cid: int, mint: str, ctx_data: dict, context: str, tctx, specs) -> dict | None:
         triage = None
         if self.llm is not None and self.s.TRIAGE_ENABLED:
             # the cheap screen: a confident PASS here spends nothing on the three agents
-            triage = await run_triage(self.llm, self.s, context, self.llm_budget)
+            triage = verify_triage(await run_triage(self.llm, self.s, context, self.llm_budget), ctx_data)
+            if triage.guard:
+                log.info("TRIAGE PASS overruled #%d %s %s: %s (said: %s)", cid, ctx_data.get("symbol"), mint,
+                         triage.guard, (triage.reasons or ["no reason given"])[0][:160])
             await self._record_vote(cid, mint, triage)
             if triage_skips(triage, self.s):
                 reason = f"triage: {(triage.reasons or ['no reason given'])[0][:200]}"
@@ -517,9 +713,12 @@ class Engine:
                     "status": "evaluated", "decision": "PASS", "mean_confidence": 0.0,
                     "gate_reason": reason, "llm_cost_usd": triage.cost_usd})
                 self.triage_skips += 1
-                log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f", cid, ctx_data.get("symbol"), mint,
-                         reason, triage.confidence, triage.cost_usd)
-                liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
+                found = self._found_at.pop(cid, None)
+                log.info("TRIAGE SKIP #%d %s %s: %s (conf %.2f) | cost $%.4f%s", cid, ctx_data.get("symbol"), mint,
+                         reason, triage.confidence, triage.cost_usd,
+                         f" | {now_s() - found:.0f}s after the scan found it" if found else "")
+                # the scan's curve depth: the buy refuses a curve that fell far below it (positions._depth_slip)
+                liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")
                 await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "",
                                             self.s.POSITION_MIN_USD, liq)
                 await self._finish_mint(mint, "evaluated")
@@ -548,11 +747,13 @@ class Engine:
             "status": "evaluated", "decision": result.decision, "mean_confidence": result.mean_confidence,
             "gate_reason": result.reason, "llm_cost_usd": spent})
         self.cycles += 1
-        log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f", cid,
+        found = self._found_at.pop(cid, None)
+        log.info("DECISION #%d %s %s: %s (mean conf %.2f, %s) votes: %s | cost $%.3f%s", cid,
                  ctx_data.get("symbol"), mint, result.decision, result.mean_confidence, result.reason,
                  ", ".join(f"{v.agent}={v.vote}/{v.confidence:.2f}{'!' if v.error else ''}"
-                           for v in [*votes, *vetoes]), spent)
-        liq = (ctx_data.get("prefilter") or {}).get("liquidity_usd")
+                           for v in [*votes, *vetoes]), spent,
+                 f" | {now_s() - found:.0f}s after the scan found it" if found else "")
+        liq = (ctx_data.get("prefilter") or {}).get("curve_liquidity_usd")       # the scan's curve depth
         await self.positions.create(mint, cid, "shadow", ctx_data.get("creator") or "", self.s.POSITION_MIN_USD, liq)
         if result.decision == "BUY":
             if kill_switch_active(self.s):
@@ -571,7 +772,7 @@ class Engine:
                     await self.tg.send(
                         f"GATE BUY {ctx_data.get('symbol')} {mint}\nmean conf {result.mean_confidence:.2f}, "
                         f"size ${size:.2f}{scaled}\n" + "\n".join(
-                            f"{v.agent}: {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
+                            f"{v.agent}: {_vote_label(v)} {v.confidence:.2f} - {(v.reasons or ['-'])[0][:160]}"
                             for v in [*votes, *vetoes]))
         await self._finish_mint(mint, "evaluated")
         return {"candidate_id": cid, "decision": result.decision, "votes": [v.as_json() for v in [*votes, *vetoes]]}
@@ -640,9 +841,15 @@ class Engine:
                  len(self.positions.active("real")), await self.llm_budget.remaining(),
                  await self.x_budget.remaining(), credits,
                  f"{self.sol_price.get():.2f}" if self.sol_price.get() else "?",
-                 f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else "")
+                 _skipped_curves(st) + self._insider_note()
+                 + (self.wallets.note() if self.wallets and self.s.LAUNCH_MEMORY_DAYS > 0 else "")
+                 + (f" | PAUSED: {self.risk.paused_reason}" if self.risk.paused_reason else ""))
+        await self._read_wallet()
         await self.db.kv_set("heartbeat", json.dumps({
-            "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "tracked": len(self.ingest.mints),
+            "ts": now_s(), "started_at": self.started_at, "mode": self.s.MODE, "code": self.code,
+            "wallet_sol": self._wallet[0] if self._wallet else None,
+            "wallet_at": self._wallet[1] if self._wallet else None, "sol_usd": self.sol_price.get(),
+            "tracked": len(self.ingest.mints),
             "simulated": bool(getattr(self, "simulated", False)),
             "launches": st["creates"], "trades": st["trades"], "curve_reads": st["curve_reads"],
             "stream_trades": st["stream_trades"], "trade_stream": self.stream_mode,
@@ -656,11 +863,48 @@ class Engine:
         await self._refresh_regime()
         await self._hourly_digest()
         if utc_day() != day:
-            text, path = await write_daily(self.db, self.s, day)
-            log.info("wrote %s", path)
-            await self.tg.send(f"Daily summary {day}\n" + text[:3500])
-            day = utc_day()
+            await self._send_daily(day)
+            day = utc_day()                  # set before the pruning: a failed delete must not resend the summary
+            await self._prune_insiders()
         return day
+
+    async def _read_wallet(self) -> None:
+        """The live wallet's SOL balance for /status, at most every WALLET_READ_S. A failed read keeps the
+        last one (/status shows how old it is); none is made while the month's Helius credits are spent."""
+        pubkey = getattr(self.executor, "pubkey", None)
+        if getattr(self.executor, "mode", "paper") != "live" or not pubkey or self._credits_exhausted:
+            return
+        if self._wallet and now_s() - self._wallet[1] < WALLET_READ_S:
+            return
+        try:
+            # capped: it runs inside the heartbeat, whose timestamp /status and the health check read
+            balance = await asyncio.wait_for(self.helius.balance_sol(pubkey), timeout=15)
+        except Exception as e:
+            log.warning("wallet balance read failed: %s", e or type(e).__name__)
+            return
+        if isinstance(balance, (int, float)) and math.isfinite(balance) and balance >= 0:
+            self._wallet = (float(balance), now_s())
+
+    async def _prune_insiders(self) -> None:
+        """About 35 insider rows per evaluated coin: keep two months for the insider watch and its report."""
+        cutoff = now_s() - INSIDER_KEEP_DAYS * 86400
+        try:
+            await self.db.execute("DELETE FROM insiders WHERE candidate_id IN (SELECT id FROM candidates WHERE ts < ?)",
+                                  [cutoff])
+            for table in ("insider_trades", "insider_watch"):
+                await self.db.execute(f"DELETE FROM {table} WHERE position_id IN "
+                                      "(SELECT id FROM positions WHERE status='closed' AND closed_at < ?)", [cutoff])
+        except Exception:
+            log.exception("could not prune old insider rows")
+
+    async def _send_daily(self, day: str) -> None:
+        """The day's report, to its file and to Telegram whole. 10 Oct: the summary was cut at
+        3,500 characters and stopped in the middle of the signal check, so the exit reasons, the
+        best and worst shadows and the moonshots never arrived. It now comes in as many messages
+        as it needs, in order."""
+        text, path = await write_daily(self.db, self.s, day)
+        log.info("wrote %s", path)
+        await self.tg.send_long(f"Daily summary {day}\n" + text)
 
     async def _refresh_regime(self) -> None:
         """Every REGIME_REFRESH_MIN: rebuild the market snapshot and ask the regime agent (or the
@@ -750,15 +994,23 @@ class Engine:
             "solprice": lambda: self.sol_price.run(self.stop),
             "positions": lambda: self.positions.run(self.stop),
             "curves": self.curve_poller,
+            "position_prices": self.position_price_poller,
             "stream_guard": self.stream_guard,
             "scanner": self.scanner,
             "heartbeat": self.heartbeat,
             **{f"evaluator{i}": self.evaluator for i in range(self.s.LLM_CONCURRENCY)},
         }
+        if self.moonshots:
+            loops["moonshots"] = lambda: self.moonshots.run(self.stop)
+        if self.insider_watch and self.s.INSIDER_WATCH and self.s.HELIUS_API_KEY:
+            loops["insider_watch"] = lambda: self.insider_watch.run(self.stop)
+        if self.wallets and self.s.LAUNCH_MEMORY_DAYS > 0:
+            loops["wallet_memory"] = lambda: self.wallets.run(self.stop)
         if self.tg.enabled and self.s.TELEGRAM_COMMANDS:
             loops["telegram"] = lambda: TelegramCommands(self.tg, self.db, self.s, engine=self).run(self.stop)
         tasks = [asyncio.create_task(self._supervise(name, fn), name=name) for name, fn in loops.items()]
-        log.info("bot running in %s mode (model %s)", self.s.MODE, self.s.LLM_MODEL)
+        log.info("bot running in %s mode (model %s, code %s)", self.s.MODE, self.s.LLM_MODEL, self.code or "?")
+        self.ready_at = now_s()
         sd_notify("READY=1")
         clean_stop = False
         try:
@@ -771,6 +1023,12 @@ class Engine:
         finally:
             self.stop.set()
             await asyncio.gather(*tasks, return_exceptions=True)
+            if clean_stop and consume_keep_pause(self.s):
+                # a restart queued from Telegram (not /restart reset): the day's loss window survives it,
+                # and so does a daily-loss pause
+                log.warning("restart from Telegram keeps the daily loss window%s", " and the daily-loss pause"
+                            if str(self.risk.paused_reason or "").startswith(LOSS_CAP_PREFIX) else "")
+                clean_stop = False
             await self.shutdown(clean_stop=clean_stop)
 
     async def shutdown(self, *, clean_stop: bool = True) -> None:

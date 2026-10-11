@@ -47,13 +47,17 @@ def _csv(v: str) -> list[str]:
     return [x.strip() for x in v.split(",") if x.strip()]
 
 
+LIVE_WALLET_CEILING_SOL = 3.0   # the most LIVE_MAX_WALLET_SOL may be set to (operator's call, 8 Oct: 0.5 -> 1 -> 3)
+
+
 @dataclass
 class Settings:
     # --- mode -------------------------------------------------------------------
     MODE: str = "paper"
     LIVE_CONFIRM: str = ""
     LIVE_DRY_RUN: bool = True
-    LIVE_MAX_WALLET_SOL: float = 0.5
+    LIVE_MAX_WALLET_SOL: float = 0.5          # raised to at most LIVE_WALLET_CEILING_SOL in .env on the server
+    LIVE_ACCOUNT_RENT_SOL: float = 0.0025    # a buy may also pay rent for a new token account (0.00204 SOL)
 
     # --- secrets (never logged) ------------------------------------------------
     ANTHROPIC_API_KEY: str = field(default="", repr=False)
@@ -84,6 +88,7 @@ class Settings:
     RUGCHECK_URL: str = "https://api.rugcheck.xyz/v1"
     HELIUS_RPC_URL: str = "https://mainnet.helius-rpc.com/?api-key={key}"
     HELIUS_API_URL: str = "https://api-mainnet.helius-rpc.com/v0"
+    HELIUS_WS_URL: str = "wss://mainnet.helius-rpc.com/?api-key={key}"   # insider watch (transactionSubscribe)
     JUPITER_URL: str = "https://api.jup.ag/swap/v2"
     X_API_URL: str = "https://api.x.com/2"
     CRYPTOPANIC_URL: str = "https://cryptopanic.com/api/developer/v2/posts/"
@@ -116,29 +121,74 @@ class Settings:
 
     # --- consensus -------------------------------------------------------------
     CONSENSUS_MIN_MEAN_CONFIDENCE: float = 0.65
-    GATE_NEUTRAL_VOTES: bool = True           # Scout/Hunter: "nothing found" is a neutral BUY (0.5-0.6), not a PASS
+    GATE_NEUTRAL_VOTES: bool = True           # Scout/Hunter: "nothing found" is a neutral BUY, not a PASS
+    # The neutral vote: what Scout and Hunter say when they find nothing against a coin. With the gate's
+    # mean floor it sets the Analyst's bar, 3 x the floor - 2 x this. 11 Oct: at 0.6 the Analyst needed
+    # 0.75; its BUYs at 0.70 or more had the same win rate (34%) over nearly twice the coins (244 against
+    # 130) and a better average return (-16% against -20%). Never above the floor: the Analyst must at
+    # least reach the floor on its own.
+    NEUTRAL_VOTE_CONFIDENCE: float = 0.625
 
     # --- paper costs -----------------------------------------------------------
     PUMPFUN_FEE_PCT: float = 1.0
     PUMPPORTAL_FEE_PCT: float = 0.5
-    NETWORK_FEE_SOL: float = 0.005
+    NETWORK_FEE_SOL: float = 0.005            # the most one transaction may cost (spend and balance checks)
+    # The priority fee sent with each PumpPortal transaction. Buys and planned sells (take-profit,
+    # trailing and time stops, the runner's target) pay PRIORITY_FEE_SOL; a stop loss, an emergency,
+    # the kill switch and any sale retried after a failure pay URGENT_PRIORITY_FEE_SOL, to land fast
+    # in a dump. 9 Oct: a flat 0.004 SOL on every transaction was 9-22% of a $10 trade.
+    PRIORITY_FEE_SOL: float = 0.001
+    URGENT_PRIORITY_FEE_SOL: float = 0.004
     ENTRY_SLIPPAGE_PCT: float = 3.0
     EXIT_SLIPPAGE_PCT: float = 5.0
     ENTRY_FILL_TIMEOUT_S: float = 300.0
+    # A live buy the pre-broadcast checks refuse (a moved price, an RPC slip) is retried on later
+    # ticks, with a fresh transaction each time, this many times in all before the entry is dropped.
+    LIVE_ENTRY_ATTEMPTS: int = 3
     EXIT_FILL_TIMEOUT_S: float = 120.0
     EXIT_RETRY_BASE_S: float = 5.0
     EXIT_RETRY_MAX_S: float = 300.0
     LIVE_CONFIRM_TIMEOUT_S: float = 60.0
 
     # --- exits -----------------------------------------------------------------
-    STOP_LOSS_PCT: float = 40.0
+    # 11 Oct: 1,276 of 1,836 shadows left by the stop loss or the liquidity rule, at a median -41% (a -40%
+    # stop filled near -47% with the paper costs); the coins that doubled had not dipped below -20% first.
+    STOP_LOSS_PCT: float = 30.0
     TAKE_PROFIT_PCT: float = 60.0
     TAKE_PROFIT_SELL_FRACTION: float = 0.5
     TRAILING_STOP_PCT: float = 30.0
+    # The trailing stop also runs before the take-profit once the price has been this far above the
+    # entry: a coin that ran and gave it back sells TRAILING_STOP_PCT under its peak (early_trailing_stop,
+    # urgent), not at the stop loss. 0 trails only after the take-profit, as before. Below TAKE_PROFIT_PCT.
+    TRAILING_ARM_PCT: float = 30.0
     TIME_STOP_HOURS: float = 6.0
+    # Runner: after a take-profit, the core's trailing or time stop sells all but this share of the
+    # original tokens, kept only while the sales so far plus that one cover the entry cost. The
+    # runner then exits at its price target, its hold limit or an emergency (see RUNNER_STOP_LOSS).
+    # Recorded on each position when it is created, so a change applies to new positions only.
+    RUNNER_ENABLED: bool = False
+    RUNNER_FRACTION: float = 0.10         # of the original tokens
+    RUNNER_TARGET_MULTIPLE: float = 300.0 # sell it when the price reaches this multiple of the entry price
+    RUNNER_MAX_HOLD_HOURS: float = 168.0  # counted from the entry
+    # A runner exists only once the sales so far covered the entry cost, so it has no stop loss unless
+    # this is on: a dip below the entry must not sell the free tokens of a coin that may still run 500x.
+    # Read at every price, so it applies to runners already open; emergencies and the kill switch still sell.
+    RUNNER_STOP_LOSS: bool = False
     EMERGENCY_LIQ_DROP_PCT: float = 50.0
+    # a real buy is refused when the curve's depth fell more than this since the scan (0 = off)
+    ENTRY_MAX_LIQ_SLIP_PCT: float = 20.0
     LIQ_POLL_S: float = 60.0
     RUGCHECK_POLL_S: float = 300.0
+    # A mark more than this many times above or below the last one is held until a second tick
+    # confirms it; 0 disables. One bad tick must not fill a take-profit or a stop.
+    TICK_SANITY_FACTOR: float = 20.0
+
+    # --- moonshot tracker (measures only, never trades) --------------------------
+    # Every evaluated coin is watched on DexScreener for this many days from the price its shadow
+    # opened at, so the report can show which ones went 10x/100x/500x and what the bot did. 0 = off.
+    MOONSHOT_TRACK_DAYS: float = 14.0
+    MOONSHOT_POLL_MIN: float = 15.0        # coins older than a day are read every 4th pass
+    MOONSHOT_ALERT_MULTIPLE: float = 100.0 # Telegram note once a coin's confirmed peak reaches this; 0 = off
 
     # --- data sources -----------------------------------------------------------
     # PumpPortal streams per-token trades only to funded API keys since May 2026, at 0.01 SOL
@@ -150,6 +200,26 @@ class Settings:
     HELIUS_MONTHLY_CREDITS: int = 1_000_000
     CURVE_POLL_CALLS_PER_MIN: float = 8.0     # getMultipleAccounts calls (100 curves, 1 credit each)
     CURVE_HOT_POLL_S: float = 15.0            # candidates, open positions and shadows
+    # Real positions only, on their own loop: every held curve in one call (1 credit) this often, so
+    # a stop or take-profit acts within seconds and a decided buy fills on the next read instead of
+    # waiting for the launch poller (9 Oct: GIGACHAD's stop filled at -44% between 15 s reads).
+    # After graduation DexScreener's pool price every POSITION_DEX_POLL_S. 0 turns either off.
+    POSITION_POLL_S: float = 2.0
+    POSITION_DEX_POLL_S: float = 10.0
+    # Insider sales on held coins (insiders.py): stream every trade on the curve of each open position
+    # (real ones first, then the newest shadows, at most INSIDER_WATCH_MAX coins) and record each sale
+    # by the coin's creator, launch-minute buyers, snipers, bundle wallets or top holders after the buy.
+    # INSIDER_EXIT=false only records (/report shows what acting would have done); true sells as an
+    # emergency once the insiders' sales since the buy reach INSIDER_EXIT_SUPPLY_PCT of the supply.
+    INSIDER_WATCH: bool = True
+    INSIDER_EXIT: bool = False
+    INSIDER_EXIT_SUPPLY_PCT: float = 2.0
+    INSIDER_WATCH_MAX: int = 60
+    # Wallet memory (wallets.py): each candidate's launch buyers and creator, scored on the coins the bot
+    # evaluated in the last LAUNCH_MEMORY_DAYS; measured in /report, not shown to the agents yet. Past
+    # coins without launch buyers on record are read back from the chain, LAUNCH_BACKFILL_PER_MIN a minute.
+    LAUNCH_MEMORY_DAYS: float = 7.0
+    LAUNCH_BACKFILL_PER_MIN: float = 10.0
     CURVE_FIRST_POLL_S: float = 60.0          # first read of a launch (most are dead within a minute)
     CURVE_POLL_SCALE: float = 1.0             # multiplies the 20/45/120/240 s read cadence of launches
     CURVE_DROP_AFTER_MIN: float = 15.0        # stop following a launch this old ...
@@ -306,7 +376,7 @@ def validate_settings(s: Settings) -> None:
         "LLM_MAX_TURNS", "LLM_MAX_TOKENS", "LLM_MAX_INPUT_BYTES", "LLM_TIMEOUT_S", "LLM_CONCURRENCY",
         "LLM_PRICE_IN_PER_MTOK", "LLM_PRICE_OUT_PER_MTOK", "TRIAGE_PRICE_IN_PER_MTOK",
         "TRIAGE_PRICE_OUT_PER_MTOK", "TRIAGE_MAX_TOKENS", "TIME_STOP_HOURS",
-        "ENTRY_FILL_TIMEOUT_S", "EXIT_FILL_TIMEOUT_S", "EXIT_RETRY_BASE_S", "EXIT_RETRY_MAX_S",
+        "ENTRY_FILL_TIMEOUT_S", "LIVE_ENTRY_ATTEMPTS", "EXIT_FILL_TIMEOUT_S", "EXIT_RETRY_BASE_S", "EXIT_RETRY_MAX_S",
         "LIVE_CONFIRM_TIMEOUT_S", "CURVE_POLL_CALLS_PER_MIN", "CURVE_HOT_POLL_S", "CURVE_POLL_SCALE",
         "DEX_TOKENS_RPS", "DEX_BOOSTS_RPS", "RUGCHECK_RPS", "HELIUS_RPC_RPS",
         "HELIUS_ENHANCED_RPS", "JUPITER_RPS", "REGIME_REFRESH_MIN",
@@ -316,16 +386,54 @@ def validate_settings(s: Settings) -> None:
             raise ConfigError(f"{name} must be greater than zero")
     if s.POSITION_MIN_USD > s.POSITION_MAX_USD:
         raise ConfigError("POSITION_MIN_USD must not exceed POSITION_MAX_USD")
+    if s.POSITION_POLL_S and not 1 <= s.POSITION_POLL_S <= 60:
+        raise ConfigError("POSITION_POLL_S must be 0 (off) or between 1 and 60 seconds")
+    if s.POSITION_DEX_POLL_S and not 5 <= s.POSITION_DEX_POLL_S <= 300:
+        raise ConfigError("POSITION_DEX_POLL_S must be 0 (off) or between 5 and 300 seconds")
+    if s.MOONSHOT_TRACK_DAYS > 60:
+        raise ConfigError("MOONSHOT_TRACK_DAYS must be 60 or less (0 turns the tracker off)")
+    if s.MOONSHOT_TRACK_DAYS > 0 and s.MOONSHOT_POLL_MIN < 1:
+        raise ConfigError("MOONSHOT_POLL_MIN must be at least 1")
+    if 0 < s.MOONSHOT_ALERT_MULTIPLE < 2:
+        raise ConfigError("MOONSHOT_ALERT_MULTIPLE must be 0 (off) or at least 2")
+    if not 0.1 <= s.INSIDER_EXIT_SUPPLY_PCT <= 50:
+        raise ConfigError("INSIDER_EXIT_SUPPLY_PCT must be between 0.1 and 50 (% of the supply)")
+    if not 1 <= s.INSIDER_WATCH_MAX <= 500:
+        raise ConfigError("INSIDER_WATCH_MAX must be between 1 and 500 coins")
+    if s.INSIDER_WATCH and not s.HELIUS_WS_URL.startswith("wss://"):
+        raise ConfigError("HELIUS_WS_URL must be a wss:// address")
+    if not (s.LAUNCH_MEMORY_DAYS == 0 or 1 <= s.LAUNCH_MEMORY_DAYS <= 14):
+        raise ConfigError("LAUNCH_MEMORY_DAYS must be 0 (off) or between 1 and 14 days")
+    if not 0 <= s.LAUNCH_BACKFILL_PER_MIN <= 60:
+        raise ConfigError("LAUNCH_BACKFILL_PER_MIN must be between 0 (off) and 60")
+    if not 0.01 <= s.RUNNER_FRACTION <= 0.25:
+        raise ConfigError("RUNNER_FRACTION must be between 0.01 and 0.25")
+    if s.RUNNER_TARGET_MULTIPLE <= 1:
+        raise ConfigError("RUNNER_TARGET_MULTIPLE must be greater than 1")
+    if s.RUNNER_MAX_HOLD_HOURS <= 0:
+        raise ConfigError("RUNNER_MAX_HOLD_HOURS must be greater than zero")
+    if s.RUNNER_ENABLED and s.RUNNER_MAX_HOLD_HOURS <= s.TIME_STOP_HOURS:
+        raise ConfigError("RUNNER_MAX_HOLD_HOURS must be longer than TIME_STOP_HOURS")
+    if s.RUNNER_ENABLED and s.TAKE_PROFIT_SELL_FRACTION + s.RUNNER_FRACTION >= 1:
+        raise ConfigError("TAKE_PROFIT_SELL_FRACTION plus RUNNER_FRACTION must stay below 1")
+    if s.TRAILING_ARM_PCT and s.TRAILING_ARM_PCT >= s.TAKE_PROFIT_PCT:
+        raise ConfigError("TRAILING_ARM_PCT must be below TAKE_PROFIT_PCT (0 trails only after the take-profit)")
     if s.PF_MIN_AGE_MIN > s.PF_MAX_AGE_MIN:
         raise ConfigError("PF_MIN_AGE_MIN must not exceed PF_MAX_AGE_MIN")
     if s.EXIT_RETRY_BASE_S > s.EXIT_RETRY_MAX_S:
         raise ConfigError("EXIT_RETRY_BASE_S must not exceed EXIT_RETRY_MAX_S")
-    if s.LIVE_MAX_WALLET_SOL > 0.5:
-        raise ConfigError("LIVE_MAX_WALLET_SOL must not exceed 0.5 SOL")
+    if 0 < s.TICK_SANITY_FACTOR <= 1:
+        raise ConfigError("TICK_SANITY_FACTOR must be above 1, or 0 to disable the check")
+    if s.LIVE_MAX_WALLET_SOL > LIVE_WALLET_CEILING_SOL:
+        raise ConfigError(f"LIVE_MAX_WALLET_SOL must not exceed {LIVE_WALLET_CEILING_SOL:g} SOL")
     for name in ("CONSENSUS_MIN_MEAN_CONFIDENCE", "AGENT_MIN_GROUNDING", "TRIAGE_MIN_CONFIDENCE",
                  "VETO_MIN_CONFIDENCE", "TAKE_PROFIT_SELL_FRACTION", "REGIME_MIN_MULTIPLIER"):
         if not 0 < getattr(s, name) <= 1:
             raise ConfigError(f"{name} must be greater than zero and at most one")
+    if not 0.5 <= s.NEUTRAL_VOTE_CONFIDENCE <= 0.65 or s.NEUTRAL_VOTE_CONFIDENCE > s.CONSENSUS_MIN_MEAN_CONFIDENCE:
+        raise ConfigError("NEUTRAL_VOTE_CONFIDENCE must be between 0.5 and 0.65, and at most CONSENSUS_MIN_MEAN_CONFIDENCE")
+    if not 0 <= s.ENTRY_MAX_LIQ_SLIP_PCT < 100:
+        raise ConfigError("ENTRY_MAX_LIQ_SLIP_PCT must be at least 0 and below 100")
     for name in ("DAILY_LOSS_CAP_PCT", "STOP_LOSS_PCT", "TRAILING_STOP_PCT",
                  "EMERGENCY_LIQ_DROP_PCT", "PF_MAX_TOP10_PCT"):
         if not 0 < getattr(s, name) <= 100:
@@ -333,3 +441,9 @@ def validate_settings(s: Settings) -> None:
     for name in ("PUMPFUN_FEE_PCT", "PUMPPORTAL_FEE_PCT", "ENTRY_SLIPPAGE_PCT", "EXIT_SLIPPAGE_PCT"):
         if getattr(s, name) >= 100:
             raise ConfigError(f"{name} must be below 100")
+    if not 0 < s.PRIORITY_FEE_SOL <= s.URGENT_PRIORITY_FEE_SOL:
+        raise ConfigError("PRIORITY_FEE_SOL must be above 0 and at most URGENT_PRIORITY_FEE_SOL")
+    if s.URGENT_PRIORITY_FEE_SOL > 0.8 * s.NETWORK_FEE_SOL + 1e-12:
+        # the spend check allows NETWORK_FEE_SOL per transaction; the priority fee keeps 20% of it
+        # for the signature fee and what PumpPortal adds, as the single 0.8 x NETWORK_FEE_SOL did
+        raise ConfigError("URGENT_PRIORITY_FEE_SOL must be at most 80% of NETWORK_FEE_SOL")

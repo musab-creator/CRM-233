@@ -89,7 +89,7 @@ class Vote:
         return d
 
 
-def vote_tool(with_size: bool) -> dict:
+def vote_tool(with_size: bool, size: tuple[float, float] = (5.0, 10.0)) -> dict:
     props: dict[str, Any] = {
         "vote": {"type": "string", "enum": ["BUY", "PASS"]},
         "confidence": {"type": "number", "description": "0.0 to 1.0"},
@@ -98,7 +98,8 @@ def vote_tool(with_size: bool) -> dict:
     }
     req = ["vote", "confidence", "reasons", "evidence"]
     if with_size:
-        props["size_usd"] = {"type": "number", "description": "Proposed position size in USD, 5 to 10"}
+        props["size_usd"] = {"type": "number",
+                             "description": f"Proposed position size in USD, {size[0]:g} to {size[1]:g}"}
         req.append("size_usd")
     return {
         "name": "submit_vote",
@@ -131,23 +132,51 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
     return Vote(agent, v, float(c), [r[:400] for r in reasons][:10], [e[:400] for e in evidence][:15], size)
 
 
+# A BUY at or below the neutral vote (NEUTRAL_VOTE_CONFIDENCE), from a neutral-mode Scout or Hunter, claims
+# nothing positive: "I looked and found nothing against it".
+NEUTRAL_AGENTS = ("scout", "hunter")
+NEUTRAL_CLAIM_CONFIDENCE = 0.7        # from here up a neutral-mode BUY claims attention or a catalyst: grounded or PASS
+
+
 def apply_grounding_guard(vote: Vote, context: Corpus, tools: Corpus, tool_calls_ok: int,
-                          min_ratio: float) -> Vote:
+                          min_ratio: float, neutral_max_conf: float | None = None) -> Vote:
     """A BUY must rest on data the agent actually looked at; otherwise it becomes PASS.
 
     Evidence may cite the candidate context or tool results, but at least one item must come
-    from a tool result: the context alone is what every agent already gets for free."""
+    from a tool result: the context alone is what every agent already gets for free.
+
+    `neutral_max_conf` (GATE_NEUTRAL_VOTES, Scout and Hunter only): a BUY at or below it is the
+    neutral "nothing found against the token" vote. It still needs a successful tool call, so the
+    agent did look, but its evidence is the absence of findings ("x_search results 0"), which the
+    grounding share cannot credit: on the first live evening every such vote was flipped to PASS at
+    grounding 0.17-0.30 while the Analyst voted BUY at 0.76-0.82. The guard exists to stop
+    fabricated positive claims; a neutral vote makes none.
+
+    Between the neutral vote and NEUTRAL_CLAIM_CONFIDENCE a neutral-mode BUY (Scout at 0.62: "one
+    link-only post, not bot-like") claims a little more than nothing, on counts of 0 or 1 that the
+    matcher ignores on purpose. Flipping it to PASS turned a mildly positive look into a veto
+    (DESK95, 8 Oct); the unverified part is the extra confidence, so that is what goes: the vote
+    becomes the neutral BUY. From NEUTRAL_CLAIM_CONFIDENCE up it claims attention or a catalyst and
+    is guarded in full."""
     vote.raw_vote = vote.vote
     vote.tool_calls_ok = tool_calls_ok
     grounded = [e for e in vote.evidence if context.grounded(e) or tools.grounded(e)]
     vote.grounding = round(len(grounded) / len(vote.evidence), 3) if vote.evidence else 0.0
     if vote.vote == "BUY":
+        why = None
         if tool_calls_ok < 1:
             vote.vote, vote.guard = "PASS", "BUY without any successful tool call"
+        elif neutral_max_conf is not None and vote.confidence <= neutral_max_conf:
+            pass  # neutral BUY: looked, found nothing against it; the Analyst must carry the gate
         elif vote.grounding < min_ratio:
-            vote.vote, vote.guard = "PASS", f"BUY evidence grounding {vote.grounding:.2f} < {min_ratio}"
+            why = f"evidence grounding {vote.grounding:.2f} < {min_ratio}"
         elif not any(tools.grounded(e) for e in vote.evidence):
-            vote.vote, vote.guard = "PASS", "BUY evidence cites nothing from tool results"
+            why = "evidence cites nothing from tool results"
+        if why and neutral_max_conf is not None and vote.confidence < NEUTRAL_CLAIM_CONFIDENCE:
+            vote.guard = f"BUY {vote.confidence:.2f} held to the neutral {neutral_max_conf:g}: {why}"
+            vote.confidence = neutral_max_conf
+        elif why:
+            vote.vote, vote.guard = "PASS", "BUY " + why
     return vote
 
 
@@ -158,6 +187,7 @@ class AgentSpec:
     tools: list[dict]           # Anthropic tool definitions (without submit_vote)
     impl: dict[str, ToolFn]     # tool name -> async implementation
     with_size: bool = False
+    size: tuple[float, float] = (5.0, 10.0)   # the Analyst's size range: POSITION_MIN_USD..POSITION_MAX_USD
 
 
 def _append_user_text(messages: list[dict], text: str) -> None:
@@ -192,7 +222,7 @@ async def _run_tool(fn: ToolFn | None, name: str, args: dict) -> tuple[str, bool
 
 async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSpec, context: str,
                     budget: Budget, subject_ids: set[str] | None = None) -> Vote:
-    vt = vote_tool(spec.with_size)
+    vt = vote_tool(spec.with_size, spec.size)
     ctx_corpus, tool_corpus = Corpus(subject_ids), Corpus(subject_ids)
     ctx_corpus.add(context)
     tool_calls_ok = 0
@@ -255,8 +285,10 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)
                     vote.cost_usd, vote.turns = total_cost, turns
+                    neutral = (s.NEUTRAL_VOTE_CONFIDENCE if (s.GATE_NEUTRAL_VOTES and spec.name in NEUTRAL_AGENTS)
+                               else None)
                     return apply_grounding_guard(vote, ctx_corpus, tool_corpus, tool_calls_ok,
-                                                 s.AGENT_MIN_GROUNDING)
+                                                 s.AGENT_MIN_GROUNDING, neutral_max_conf=neutral)
             if not uses:
                 messages.append({"role": "user", "content": "Call submit_vote to give your decision."})
                 force_vote = True

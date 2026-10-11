@@ -6,7 +6,7 @@ Live requires ALL of:
   WALLET_PRIVATE_KEY that parses (base58 secret key or JSON byte array)
   HELIUS_API_KEY (transactions are sent through Helius RPC)
   ANTHROPIC_API_KEY (the agents still gate every trade)
-  wallet balance <= LIVE_MAX_WALLET_SOL (0.5 SOL) at startup, read from chain
+  wallet balance <= LIVE_MAX_WALLET_SOL (default 0.5, at most LIVE_WALLET_CEILING_SOL) at startup, read from chain
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import Awaitable, Callable
 
 from solders.keypair import Keypair
 
-from ..config import Settings
+from ..config import LIVE_WALLET_CEILING_SOL, Settings
 
 CONFIRM_PHRASE = "I_ACCEPT_LOSSES"
 
@@ -42,8 +42,8 @@ def static_checks(s: Settings) -> Keypair | None:
     if mode == "paper":
         return None
     problems = []
-    if not isfinite(s.LIVE_MAX_WALLET_SOL) or not 0 < s.LIVE_MAX_WALLET_SOL <= 0.5:
-        problems.append("LIVE_MAX_WALLET_SOL must be finite, positive, and no more than 0.5 SOL")
+    if not isfinite(s.LIVE_MAX_WALLET_SOL) or not 0 < s.LIVE_MAX_WALLET_SOL <= LIVE_WALLET_CEILING_SOL:
+        problems.append(f"LIVE_MAX_WALLET_SOL must be finite, positive, and no more than {LIVE_WALLET_CEILING_SOL:g} SOL")
     if s.LIVE_CONFIRM != CONFIRM_PHRASE:
         problems.append(f"LIVE_CONFIRM must equal {CONFIRM_PHRASE}")
     kp = None

@@ -29,13 +29,14 @@ import base64
 import hashlib
 import logging
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from solders.pubkey import Pubkey
 
 log = logging.getLogger("bot.pumpchain")
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+WSOL_MINT = "So11111111111111111111111111111111111111112"
 CURVE_DISCRIMINATOR = hashlib.sha256(b"account:BondingCurve").digest()[:8]
 TOKEN_DECIMALS = 6
 LAMPORTS = 1_000_000_000
@@ -54,20 +55,46 @@ class Curve:
     supply: float
     complete: bool
     creator: str | None = None
+    quote_mint: str | None = None   # None: priced in SOL; otherwise the token the curve is priced in
+    # the account as read, for the log when a read makes no sense as a SOL curve
+    size: int = field(default=0, compare=False)
+    extra: str = field(default="", compare=False, repr=False)   # hex of bytes 81..166
+    # byte 81 of the 166-byte layout: pump.fun Mayhem Mode, whose curves hold far less virtual SOL
+    mayhem: bool = field(default=False, compare=False)
 
     @property
     def price_sol(self) -> float | None:
         return self.v_sol / self.v_tokens if self.v_tokens > 0 else None
 
 
+def plausible_curve(c: Curve) -> bool:
+    """A pump.fun curve starts at 30 virtual SOL against 1.073B virtual tokens and completes near
+    115 SOL against 280M. One live read (#784, 8 Oct) came back at 281x the token's price, far
+    outside anything a curve can reach; the bounds are loose enough for a non-standard curve and
+    tight enough to drop a corrupt read before it reaches the price history."""
+    return (0.1 * INITIAL_VIRTUAL_TOKENS <= c.v_tokens <= 1.5 * INITIAL_VIRTUAL_TOKENS
+            and 0.5 * INITIAL_VIRTUAL_SOL <= c.v_sol <= 20 * INITIAL_VIRTUAL_SOL)
+
+
 def decode_curve(data: bytes | None) -> Curve | None:
-    """Bonding-curve account bytes -> Curve, or None if it is not a bonding-curve account."""
+    """Bonding-curve account bytes -> Curve, or None if it is not a bonding-curve account.
+
+    Since May 2026 a curve may be priced in another token (USDC, a listed token, and since 7-8 Oct
+    any pump coin): the reserves at offsets 16 and 32 are then in that token's units, not lamports.
+    pump's IDL (pump-fun/pump-public-docs, 8 Oct 2026) puts quote_mint at bytes 83..115 of the
+    166-byte account; the default key (all zeros) means SOL. Shorter, older accounts are SOL."""
     if not data or len(data) < 49 or data[:8] != CURVE_DISCRIMINATOR:
         return None
     vt, vs, rt, rs, sup = struct.unpack_from("<5Q", data, 8)
     creator = str(Pubkey.from_bytes(data[49:81])) if len(data) >= 81 else None
+    quote = None
+    if len(data) >= 115 and any(data[83:115]):
+        quote = str(Pubkey.from_bytes(data[83:115]))
+        if quote == WSOL_MINT:
+            quote = None
     scale = 10 ** TOKEN_DECIMALS
-    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator)
+    return Curve(vt / scale, vs / LAMPORTS, rt / scale, rs / LAMPORTS, sup / scale, data[48] != 0, creator, quote,
+                 len(data), data[81:166].hex(), len(data) > 81 and data[81] == 1)
 
 
 def encode_curve(c: Curve) -> bytes:
@@ -76,7 +103,21 @@ def encode_curve(c: Curve) -> bytes:
     out = CURVE_DISCRIMINATOR + struct.pack("<5Q", round(c.v_tokens * scale), round(c.v_sol * LAMPORTS),
                                             round(c.real_tokens * scale), round(c.real_sol * LAMPORTS),
                                             round(c.supply * scale)) + bytes([int(c.complete)])
-    return out + (bytes(Pubkey.from_string(c.creator)) if c.creator else b"")
+    out += bytes(Pubkey.from_string(c.creator)) if c.creator else b""
+    if c.quote_mint:                                    # the 166-byte layout: mayhem, cashback, quote_mint, rest
+        out = out.ljust(81, b"\0") + b"\0\0" + bytes(Pubkey.from_string(c.quote_mint))
+        out = out.ljust(166, b"\0")
+    return out
+
+
+def bonding_curve_key(mint: str) -> str | None:
+    """The bonding-curve account of a pump.fun mint: the program address from the seeds
+    ("bonding-curve", mint). None for a string that is not a public key."""
+    try:
+        return str(Pubkey.find_program_address([b"bonding-curve", bytes(Pubkey.from_string(mint))],
+                                               Pubkey.from_string(PUMP_PROGRAM))[0])
+    except (ValueError, TypeError):
+        return None
 
 
 def _account_keys(tx: dict) -> list[str]:
@@ -164,6 +205,10 @@ class HeliusChain:
             res = await self.h.rpc("getMultipleAccounts", [chunk, {"encoding": "base64", "commitment": "confirmed"}])
             for k, acc in zip(chunk, (res or {}).get("value") or []):
                 data = (acc or {}).get("data")
+                owner = (acc or {}).get("owner")
+                if owner is not None and owner != PUMP_PROGRAM:
+                    out[k] = None                       # not pump's account, whatever its bytes look like
+                    continue
                 out[k] = decode_curve(base64.b64decode(data[0])) if isinstance(data, list) and data else None
         return out
 
@@ -200,11 +245,13 @@ class HeliusChain:
         return holder_snapshot(rows, curve_key, creator, complete)
 
     async def early_trades(self, mint: str, curve_key: str, window_s: float = 60.0, max_tx: int = 80,
-                           max_pages: int = 10) -> dict:
+                           max_pages: int = 10, concurrency: int | None = None) -> dict:
         """Trades in the first `window_s` seconds after launch (at most `max_tx` transactions).
 
         Signatures come newest first, 1,000 per call (1 credit). Paging back to the launch stops
-        after `max_pages`; `reached_launch` says whether it got there.
+        after `max_pages`; `reached_launch` says whether it got there. `concurrency` caps the
+        transaction reads in flight, so a background reader never queues dozens of calls ahead of
+        the position price reads on the shared rate limiter.
         """
         sigs: list[dict] = []
         before = None
@@ -229,9 +276,16 @@ class HeliusChain:
             return {"trades": [], "reached_launch": reached, "transactions": 0}
         t0 = ok[0].get("blockTime") or 0
         pick = [x for x in ok if (x.get("blockTime") or t0) - t0 <= window_s][:max_tx] if reached else []
-        txs = await asyncio.gather(*[self.h.rpc("getTransaction", [x["signature"], {
-            "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}]) for x in pick],
-            return_exceptions=True)
+        gate = asyncio.Semaphore(concurrency) if concurrency else None
+
+        async def read(sig: str):
+            if gate is None:
+                return await self.h.rpc("getTransaction", [sig, {
+                    "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}])
+            async with gate:
+                return await self.h.rpc("getTransaction", [sig, {
+                    "encoding": "json", "maxSupportedTransactionVersion": 0, "commitment": "confirmed"}])
+        txs = await asyncio.gather(*[read(x["signature"]) for x in pick], return_exceptions=True)
         trades: list[dict] = []
         for seq, tx in enumerate(txs):  # seq: block order, the tiebreaker inside a slot
             if isinstance(tx, dict):

@@ -43,6 +43,16 @@ def best_pair(pairs: list[dict], mint: str) -> dict | None:
     return max(cands, key=lambda p: ((p.get("liquidity") or {}).get("usd") or 0))
 
 
+def sol_price_native(p: dict | None) -> float | None:
+    """`priceNative` as SOL per token, or None when the pair is not quoted in wrapped SOL.
+    DexScreener's native price is in the pair's quote token: a USDC- or USDT-quoted pair reports
+    a price about SOL/USD times too high, which once booked a +39,000% paper exit."""
+    if not p or (p.get("quoteToken") or {}).get("address") != WSOL:
+        return None
+    v = _num(p.get("priceNative"))
+    return v if v and v > 0 else None
+
+
 def summarize_pair(p: dict | None) -> dict | None:
     if not p:
         return None
@@ -85,14 +95,20 @@ class DexScreener:
 
     async def tokens(self, mints: list[str]) -> dict[str, dict | None]:
         """mint -> raw best pair (or None). Batches of 30."""
-        out: dict[str, dict | None] = {}
+        return {m: best_pair(pairs, m) for m, pairs in (await self.token_pair_lists(mints)).items()}
+
+    async def token_pair_lists(self, mints: list[str]) -> dict[str, list[dict]]:
+        """mint -> every Solana pair with that mint as its base token, from the same batched call
+        (a held token's own pool must be found even when a side pool is deeper)."""
+        out: dict[str, list[dict]] = {}
         for i in range(0, len(mints), 30):
             chunk = mints[i:i + 30]
             data = await request_json(self.c, "GET", f"{self.base}/latest/dex/tokens/{','.join(chunk)}",
                                       limiter=self.lim)
             pairs = (data or {}).get("pairs") or []
             for m in chunk:
-                out[m] = best_pair(pairs, m)
+                out[m] = [p for p in pairs if p.get("chainId") == "solana"
+                          and (p.get("baseToken") or {}).get("address") == m]
         return out
 
     async def pair(self, mint: str) -> dict | None:

@@ -61,6 +61,16 @@ class LiveExecutionUnknown(LiveExecutionError):
     """May have landed: keep its intent and reconcile, never rebuild or invent a fill."""
 
 
+def spend_limit(side: str, sol_in: float, s) -> float:
+    """The most a transaction may take from the wallet. A buy spends `sol_in` plus the pump.fun
+    and PumpPortal percentage fees on top, the network fee, and the rent of a token account the
+    wallet may not have yet (the first buy of any token). A sell only pays fees and, on some
+    routes, a wrapped-SOL account it closes again."""
+    fees = (s.PUMPFUN_FEE_PCT + s.PUMPPORTAL_FEE_PCT) / 100
+    spend = sol_in * (1 + fees) if side == "buy" else 0.0
+    return spend + s.NETWORK_FEE_SOL + s.LIVE_ACCOUNT_RENT_SOL
+
+
 def check_transaction(msg, payer, max_sol_debit: float) -> dict:
     """Static checks on a remotely built transaction before it is signed.
 
@@ -143,18 +153,21 @@ class LiveExecutor:
         return f"LiveExecutor(pubkey={self.pubkey}, dry_run={self.dry_run})"
 
     # --- transaction builders ---------------------------------------------------
-    async def build_pumpportal(self, action: str, mint: str, amount, in_sol: bool) -> VersionedTransaction:
-        """`amount`: SOL (buy), tokens, or a percentage string like "100%" (sell)."""
+    async def build_pumpportal(self, action: str, mint: str, amount, in_sol: bool,
+                               urgent: bool = False) -> VersionedTransaction:
+        """`amount`: SOL (buy), tokens, or a percentage string like "100%" (sell). `urgent` sends the
+        higher priority fee (a stop loss, an emergency, the kill switch, a retried sale)."""
         body = {"publicKey": self.pubkey, "action": action, "mint": mint, "amount": amount,
                 "denominatedInSol": "true" if in_sol else "false",
                 # PumpPortal documents slippage as a whole percentage
                 "slippage": max(1, int(round(self.s.ENTRY_SLIPPAGE_PCT if action == "buy" else self.s.EXIT_SLIPPAGE_PCT))),
-                "priorityFee": round(self.s.NETWORK_FEE_SOL * 0.8, 6), "pool": "auto"}
+                "priorityFee": round(self.s.URGENT_PRIORITY_FEE_SOL if urgent else self.s.PRIORITY_FEE_SOL, 6),
+                "pool": "auto"}
         r = await self.http.post(self.s.PUMPPORTAL_TRADE_URL, data=body, timeout=20)
         if r.status_code != 200:
             raise LiveExecutionError(f"trade-local HTTP {r.status_code}: {r.text[:200]}")
         tx = VersionedTransaction.from_bytes(r.content)
-        max_debit = (float(amount) if in_sol else 0.0) + self.s.NETWORK_FEE_SOL
+        max_debit = spend_limit(action, float(amount) if in_sol else 0.0, self.s)
         return self._checked_sign(tx, max_debit)
 
     def _checked_sign(self, tx: VersionedTransaction, max_sol_debit: float) -> VersionedTransaction:
@@ -180,7 +193,8 @@ class LiveExecutor:
         if not data.get("requestId"):
             raise LiveExecutionError("jupiter order returned no requestId")
         tx = VersionedTransaction.from_bytes(base64.b64decode(data["transaction"], validate=True))
-        max_debit = (amount_raw / LAMPORTS if input_mint == WSOL else 0.0) + self.s.NETWORK_FEE_SOL
+        max_debit = spend_limit("buy" if input_mint == WSOL else "sell",
+                                amount_raw / LAMPORTS if input_mint == WSOL else 0.0, self.s)
         return self._checked_sign(tx, max_debit), data["requestId"]
 
     def _use_jupiter(self, mint: str) -> bool:
@@ -299,8 +313,12 @@ class LiveExecutor:
             sol = -sol_delta if side == "buy" else sol_delta
             if not isfinite(tokens) or tokens <= 0 or not isfinite(sol) or (side == "buy" and sol <= 0):
                 raise ValueError("receipt has no matching SOL/token movement")
-            if side == "buy" and sol > intent["amount"] + self.s.NETWORK_FEE_SOL + 1e-9:
-                # Do not conceal the loss: leave the signature quarantined for operator reconciliation.
+            if side == "buy" and sol > spend_limit("buy", intent["amount"], self.s) + 1e-9:
+                # The same allowance the transaction was simulated against (amount, percentage fees,
+                # network fee, token-account rent). Beyond it, do not conceal the loss: leave the
+                # signature quarantined for operator reconciliation. (First live buy, 8 Oct: this
+                # check still used amount + network fee and refused a receipt the simulation had
+                # passed, so the confirmed buy sat unreconciled.)
                 raise ValueError("confirmed spend exceeds the authorized SOL limit")
             fee = max(0.0, sol - intent["amount"]) if side == "buy" else int(meta.get("fee") or 0) / LAMPORTS
             fill = Fill(side, intent["price"], sol / tokens, tokens, sol, fee, sig,
@@ -346,8 +364,12 @@ class LiveExecutor:
                     "encoding": "base64", "sigVerify": True, "commitment": "confirmed",
                     "accounts": {"encoding": "base64", "addresses": [self.pubkey]}}])
             value = (simulation or {}).get("value")
-            if not isinstance(value, dict) or value.get("err") is not None:
-                raise ValueError("simulation failed or returned no result")
+            if not isinstance(value, dict):
+                raise ValueError("simulation returned no result")
+            if value.get("err") is not None:
+                # the program's own words: a slippage or balance failure reads differently from an RPC slip
+                said = [ln for ln in (value.get("logs") or []) if "error" in ln.lower() or "failed" in ln.lower()][-2:]
+                raise ValueError(f"simulation failed: {value['err']}" + (f" ({'; '.join(said)})" if said else ""))
             accounts = value.get("accounts") or []
             if len(accounts) != 1 or not isinstance(accounts[0], dict):
                 raise ValueError("simulation returned no payer account")
@@ -355,7 +377,7 @@ class LiveExecutor:
             if not isinstance(after_lamports, int) or after_lamports < 0:
                 raise ValueError("simulation returned an invalid payer balance")
             after = after_lamports / LAMPORTS
-            allowed = (amount if side == "buy" else 0.0) + self.s.NETWORK_FEE_SOL
+            allowed = spend_limit(side, amount, self.s)
             if not isfinite(before) or before - after > allowed + 1e-9:
                 raise ValueError("simulated payer debit exceeds the authorized SOL spending limit")
         except Exception as e:
@@ -368,10 +390,11 @@ class LiveExecutor:
             return await self._buy(mint, sol_in, price)
 
     async def _buy(self, mint: str, sol_in: float, price: float) -> Fill:
-        if not self.dry_run:
-            existing = await self.db.kv_get(self._intent_key(mint, "buy"))
-            if existing:
-                return await self._receipt_fill(json.loads(existing))
+        # A real transaction may be in flight from before a restart, dry run or not: read its
+        # receipt (the receipt path only reads the chain) rather than simulate over it.
+        existing = await self.db.kv_get(self._intent_key(mint, "buy"))
+        if existing:
+            return await self._receipt_fill(json.loads(existing))
         if kill_switch_active(self.s):
             raise LiveExecutionError("STOP file present; entry refused")
         jup = self._use_jupiter(mint)
@@ -397,27 +420,31 @@ class LiveExecutor:
             rid = None
         return await self._execute(mint, "buy", sol_in, price, tx, "jupiter" if jup else "pumpportal", rid)
 
-    async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0) -> Fill:
-        """Sell `fraction` of current holdings (`tokens` is the bot's own estimate of that amount)."""
+    async def sell(self, mint: str, tokens: float, price: float, fraction: float = 1.0,
+                   *, prefer_pumpportal: bool = False, urgent: bool = False) -> Fill:
+        """Sell `fraction` of current holdings (`tokens` is the bot's own estimate of that amount).
+        `prefer_pumpportal`: route through PumpPortal's "auto" pool even after graduation (a runner's
+        small remainder may be below Jupiter's minimum order). `urgent`: PumpPortal sends it with
+        URGENT_PRIORITY_FEE_SOL (Jupiter sets its own priority fee)."""
         if (not isfinite(tokens) or tokens <= 0 or not isfinite(price) or price <= 0
                 or not isfinite(fraction) or not 0 < fraction <= 1):
             raise ValueError("sell tokens/price must be positive and fraction must be within (0,1]")
         async with self._wallet_lock:
-            return await self._sell(mint, tokens, price, fraction)
+            return await self._sell(mint, tokens, price, fraction, prefer_pumpportal, urgent)
 
-    async def _sell(self, mint: str, tokens: float, price: float, fraction: float) -> Fill:
-        if not self.dry_run:
-            existing = await self.db.kv_get(self._intent_key(mint, "sell"))
-            if existing:
-                return await self._receipt_fill(json.loads(existing))
+    async def _sell(self, mint: str, tokens: float, price: float, fraction: float,
+                    prefer_pumpportal: bool = False, urgent: bool = False) -> Fill:
+        existing = await self.db.kv_get(self._intent_key(mint, "sell"))
+        if existing:                                   # see _buy: never simulate over a pending real sell
+            return await self._receipt_fill(json.loads(existing))
         full = fraction >= 0.999
-        jup = self._use_jupiter(mint)
+        jup = self._use_jupiter(mint) and not prefer_pumpportal
         if self.dry_run:
             if jup:
                 tx, _ = await self.build_jupiter(mint, WSOL, int(tokens * 10 ** PUMP_DECIMALS))
             else:
-                tx = await self.build_pumpportal("sell", mint, round(tokens, 6), in_sol=False)
-            f = exit_fill(tokens, price, self.s)
+                tx = await self.build_pumpportal("sell", mint, round(tokens, 6), in_sol=False, urgent=urgent)
+            f = exit_fill(tokens, price, self.s, urgent)
             f.tx_sig = await self._simulate(tx, "jupiter" if jup else "pumpportal", "sell")
             return f
         raw_before, tok_before = await self.chain.token_balance(self.pubkey, mint)
@@ -431,7 +458,7 @@ class LiveExecutor:
             tx, rid = await self.build_jupiter(mint, WSOL, amount_raw)
         else:
             pct = "100%" if full else f"{fraction * 100:.4g}%"
-            tx = await self.build_pumpportal("sell", mint, pct, in_sol=False)
+            tx = await self.build_pumpportal("sell", mint, pct, in_sol=False, urgent=urgent)
             rid = None
         return await self._execute(mint, "sell", tokens, price, tx, "jupiter" if jup else "pumpportal", rid)
 

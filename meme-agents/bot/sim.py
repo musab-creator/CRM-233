@@ -340,9 +340,12 @@ class FakeLLM:
     def __init__(self):
         self.messages = self
         self.calls = 0
+        self.contexts: list[str] = []          # the candidate data each agent was given (first message)
 
     async def create(self, *, model, max_tokens, system, tools, messages, **kw):
         self.calls += 1
+        if messages and isinstance(messages[0].get("content"), str) and len(self.contexts) < 500:
+            self.contexts.append(messages[0]["content"])
         await asyncio.sleep(0.05)
         usage0 = SimpleNamespace(input_tokens=900, output_tokens=60, cache_creation_input_tokens=0,
                                  cache_read_input_tokens=0)

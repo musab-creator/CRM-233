@@ -1,0 +1,43 @@
+# systemd unit for the meme-agents ops service: the process behind Telegram /update, /restart,
+# /set and /dryrun. deploy/install.sh --ops fills in @APP_DIR@ and @USER@ and installs it as
+# /etc/systemd/system/meme-agents-ops.service.
+#
+# The bot itself (meme-agents.service) runs with its code and .env read-only and without
+# privileges, so it only queues request files under data/ops/. This service, the same user but
+# outside that sandbox, re-validates every request against the allowlist in bot/ops.py and runs
+# only deploy/update.sh, deploy/set-env.sh KEY=VALUE and `sudo -n systemctl restart meme-agents`
+# (the sudoers line in deploy/VPS.md). It exits after a deploy changed the code so that
+# Restart=always brings it back on the new version.
+#
+#   sudo systemctl status meme-agents-ops     is it running?
+#   journalctl -u meme-agents-ops -f          what it ran, and what each run printed
+
+[Unit]
+Description=meme-agents ops: runs update/restart/set requests queued from Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@APP_DIR@
+ExecStart=@APP_DIR@/.venv/bin/python -m bot ops --watch
+Restart=always
+RestartSec=5
+# a deploy builds and tests the new code first: give a running request time to finish on stop
+KillMode=mixed
+TimeoutStopSec=1500
+Environment=PYTHONUNBUFFERED=1
+Environment=GIT_TERMINAL_PROMPT=0
+PrivateTmp=true
+ProtectControlGroups=true
+UMask=0077
+# No NoNewPrivileges=, and none of the options that imply it for a service with a User=
+# (ProtectKernelTunables, ProtectKernelModules, ProtectKernelLogs, ProtectClock, ProtectHostname,
+# LockPersonality, RestrictRealtime, RestrictSUIDSGID, RestrictNamespaces, RestrictAddressFamilies,
+# PrivateDevices, MemoryDenyWriteExecute, SystemCallFilter, SystemCallArchitectures, DynamicUser):
+# with that flag set, sudo refuses to run and nothing can restart or update the bot from the phone.
+# The watcher reports the flag in /ops; tests/test_phone_ops.py keeps this list out of the file.
+
+[Install]
+WantedBy=multi-user.target

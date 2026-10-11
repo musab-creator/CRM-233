@@ -51,13 +51,13 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot report [--day YYYY-MM-DD]` | Print closed trades, win rate, expectancy, profit factor, max drawdown, PnL in SOL and USD, and per-agent accuracy. Writes the daily markdown file. |
 | `python -m bot simulate [--minutes N]` | Offline end-to-end run with synthetic launches and fake APIs. Uses `data/sim.db`. |
 | `python -m bot report --sim` | Report on the simulation database |
-| `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
+| `python -m bot status [--sim]` | Live view, safe to run while the bot runs: heartbeat, stream health, budgets, in live mode the wallet's SOL balance (read every 5 minutes, with a warning when it is above the `LIVE_MAX_WALLET_SOL` startup limit, so the next restart would lock live entries), today's funnel, open positions with net PnL, the last 5 decisions with each agent's vote |
 | `python -m bot status --check [--alert]` | One line for monitoring (OK, PAUSED, DEGRADED, DOWN or BLIND); exits 1 if degraded, down or blind. `--alert` sends a Telegram message when the state changes. |
 | `python -m bot preflight [--probe]` | Checks every API and key with free calls. `--probe` also records what the live APIs return and tests this build's assumptions against it (about 3 minutes). |
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
-| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume and stop (stop asks to confirm). The same as commands: `/status`, `/digest`, `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/help`. Only `TELEGRAM_CHAT_ID` is answered. Settings and keys change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
+| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON, moonshots and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report [section]` (the whole report, or one of its sections: `insiders`, `dips`, `moonshots`, `gate`, `signals`, `shadows`, `execution`, `agents`, `wallets`, `open`, `trades`), `/moonshots` (every evaluated coin's confirmed peak over the 14 days after the bot saw it: how many went 10x/100x/500x, and whether the bot bought, passed, vetoed or skipped them at triage), `/trades`, `/why [id or address]` (every vote on the latest decision, on decision #id, or on the coin whose address starts with the given 6+ letters, with its reasons, what its positions did and when an insider warning fired; trade and insider lines number positions, so look those coins up by address), `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
 
 ## How a token moves through the pipeline
 
@@ -106,7 +106,10 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
      cost about $0.13 per candidate. It may skip only on hard red flags already in the data
      (snipers still holding a third of the inflow, bundled buys, dev sold half or more together
      with one of those, fewer than 10 effective holders, momentum reversed). The creator selling
-     on its own is not a flag: in the recorded outcomes those tokens did not do worse. Errors, budget stops and unsure votes let the
+     on its own is not a flag: in the recorded outcomes those tokens did not do worse. A skip must
+     also be backed by one of those flags recomputed from the data in code; a PASS that cites a
+     flag the numbers do not contain (seen live: "12.5 effective holders is below 10") is
+     downgraded to BUY and the committee decides. Errors, budget stops and unsure votes let the
      candidate through. Its vote is stored like the others, so the report scores its skips
      against the shadow book. `TRIAGE_ENABLED=false` turns it off.
    - **Scout (المحقق):** `x_search`, `dexscreener_profile`, `dexscreener_boosts`. It judges
@@ -150,10 +153,23 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    asks Scout "is there organic attention?" and Hunter "is there a live catalyst?", and a token
    a few minutes old almost never has either, so in two days of live data Scout voted BUY 0
    times in 179 and nothing traded. Neutral mode asks each agent "did you find a reason not to
-   buy in your area?": spam, bots or a deceptive name are a PASS from Scout, a stale or invented
-   catalyst a PASS from Hunter, and "nothing either way" is a BUY at confidence 0.5 to 0.6.
-   Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence floor then means
-   Analyst's on-chain evidence has to carry the decision, and the veto stage still runs.
+   buy in your area?", and only a hard finding is a PASS: from Scout, coordinated spam (three or
+   more accounts with near-identical text), a fake community run from the launcher's own accounts,
+   or an impersonation claiming to be a real brand's or person's official token; from Hunter, the
+   same impersonation or a pitch resting on a catalyst shown to be invented or days old. Being named
+   after someone, having no posts, bot listing posts or a generic name is the normal background and
+   stays neutral (11 Oct: PASSes on that background picked losers at the base rate over 840 scored
+   PASSes). "Nothing either way" is a BUY at the neutral vote, `NEUTRAL_VOTE_CONFIDENCE` (0.625; 0.5
+   when a tool failed). Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence
+   floor then means Analyst's on-chain evidence has to carry the decision: two neutral votes need
+   the Analyst at 3 × 0.65 − 2 × 0.625 = 0.70, so 0.625 + 0.625 + 0.70 is the lowest unanimous BUY
+   that passes (at the old 0.6 neutral the Analyst needed 0.75; its BUYs at 0.70 had the same win
+   rate over nearly twice the coins). The neutral vote is phone-settable between 0.5 and 0.65 and
+   never above the floor, so the Analyst must at least reach the floor on its own; the gate itself
+   is unchanged. The veto stage still runs. A neutral BUY is exempt from the evidence-grounding share
+   of the guard, because its evidence is the absence of findings; it still needs a successful tool
+   call. A Scout or Hunter BUY between the neutral vote and 0.7 on evidence the guard cannot credit
+   is held to the neutral vote rather than flipped to PASS; from 0.7 up it is guarded in full.
 
    **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
    so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a
@@ -186,10 +202,17 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 
    Every tick (a curve move or a streamed trade) marks open positions to market. After
    graduation the price lives in the AMM pool, so a position with no tick for `LIQ_POLL_S` is
-   marked at DexScreener's price.
+   marked at DexScreener's price, and only from a pair quoted in SOL. A mark more than
+   `TICK_SANITY_FACTOR` (20) times away from the last one is held until a second tick lands
+   near it, so one bad price cannot fill a take-profit or a stop; the report leaves out shadows
+   that were booked that way before this check existed.
 6. **Exits.** These are rules only:
-   - stop loss at -40%
+   - stop loss at -30% (`STOP_LOSS_PCT`; 11 Oct: a -40% stop filled near -47% after costs, and the
+     coins that doubled had never dipped below -20% first)
    - at +60%, sell half, then put a 30% trailing stop on the rest
+   - the trailing stop also runs before the take-profit once the price has been 30% above the entry
+     (`TRAILING_ARM_PCT`, 0 turns it off): a coin that ran and gives it back sells 30% under its peak
+     as `early_trailing_stop`, with the urgent fee, instead of riding down to the stop loss
    - time stop at 6 hours
    - emergency exit if liquidity falls 50% (checked every 60 s) or Rugcheck turns to danger
      (checked every 5 minutes). On the bonding curve, liquidity is the curve's own depth, the
@@ -197,11 +220,17 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 7. **Risk.**
    - at most 3 open positions
    - at most 1 position per creator wallet
-   - a daily loss cap of 50% of the bankroll pauses entries until you restart the bot
+   - a daily loss cap of 50% of the bankroll pauses entries until you reset it: realized losses count
+     from UTC midnight or the day's last reset, and a restart from the phone (`/update`, `/restart`,
+     a `/set`) keeps both the count and the pause; `/restart reset` ends the pause and starts over
    - entries are refused when the bankroll can't fund them
+   - a gate BUY the risk check refuses sends `⚪ NO ENTRY` with the reason to Telegram, once per
+     kind of refusal (its numbers aside) per 15 minutes, with a count of the ones refused in
+     between; every refusal is logged
 
-Every evaluated candidate also gets a **shadow position**: a $5 paper position with no bankroll
-that runs through the same exit rules. This gives every vote an outcome, even when the token
+Every evaluated candidate also gets a **shadow position**: a paper position of `POSITION_MIN_USD`
+($5 by default) with no bankroll that runs through the same exit rules, except that a shadow is
+never sold on insider sells (it is the report's measure of what holding through them does). This gives every vote an outcome, even when the token
 was never traded, so the report can score each agent's BUY votes separately.
 
 ## Is the LLM worth it? Reading the report
@@ -214,12 +243,48 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
   the pre-filter alone. The Brier score checks whether the agent's confidence is honest:
   0.25 is a coin flip and lower is better.
 - **Gate what-if.** The recorded votes are replayed through the gate at mean-confidence
-  thresholds from 0.50 to 0.90, both unanimous and 2-of-3. A *pre-filter only* baseline row
-  sits on top. If no gate row beats the baseline over a few hundred candidates, the agents
-  are not earning their cost. That is the time to change prompts or thresholds.
+  thresholds from 0.50 to 0.90, both unanimous and 2-of-3, plus *analyst BUY alone* by the
+  Analyst's own confidence: under `GATE_NEUTRAL_VOTES` the gate reduces to an Analyst BUY at
+  the bar the neutral vote sets (0.70 at the 0.625 default) with nothing found against the token,
+  so that row is the lower bound of what the live gate selects. A *pre-filter only* baseline row sits on top. If no gate row beats
+  the baseline over a few hundred candidates, the agents are not earning their cost. That is
+  the time to change prompts or thresholds.
 - **Signal check.** For each flow feature, it compares the outcomes of candidates above and
   below the median, which shows which signals actually separate winners from losers in your
   data.
+- **Real trades against their own shadows.** Each closed real trade is paired with the shadow of
+  the same coin and decision, which filled and sold at the paper rules' prices. The selection is
+  identical, so the gap (median and mean, in points, and in SOL at the real stake) is what live
+  execution cost: later fills, real slippage, the priority fees. The line also says how often both
+  ended for the same reason and how often one won where the other lost.
+- **Insider sells and the coins that ran.** Under the insider section's what-if rows, for the coins
+  the watch covered that reached 2x and 10x: how many the insider exit would have sold at each
+  threshold, because the insiders' net sales crossed it while the position was open and not yet a
+  runner, with the median price of those sales. Snipers taking profit on the way up look like a
+  dump to the rule; this is the cost of a low threshold on the coins the bot is hunting.
+- **Open runners at today's price.** A runner keeps its last tokens for up to
+  `RUNNER_MAX_HOLD_HOURS` (a week), so its result stays out of every closed-trade figure for
+  days. The report values each open runner at its last mark: its sales so far plus what the
+  runner would fetch now, minus the cost, in dollars at the buy's SOL price. They are added to
+  the shadow book (as their own `+` line, then a total), the gate what-if (an `open` column
+  counts them), the signal check, the agent scores (the real runner when the coin was bought)
+  and the best and worst shadows, each labeled.
+- **Exit reasons with their outcomes, and round trips.** Each exit reason's count, median return and
+  dollars, for the shadows and the real trades. Then the losing shadows that had first been up
+  `TRAILING_ARM_PCT` or more, and what the trailing stop armed early would have sold them for at
+  `TRAILING_STOP_PCT` under their peak (the trail level, not replayed). What that rule and a tighter stop
+  cost on the coins that run is in the moonshot section: how the shadows of the coins that reached 2x
+  left, by exit reason, with how many were sold at a loss.
+- **Dips before the run.** For each coin seen since this was added: its lowest price before its
+  first 2x and before its peak (as a change from the price the bot saw), when each came, and
+  its price 6, 12 and 24 hours on with its lowest in between. The shadow's own trades cover the
+  time it was open; then the moonshot tracker's reads, every 15 minutes in the first day and
+  hourly after, where a low counts when two reads in a row reach it, so a dip between two reads
+  is missed. The report shows how deep the coins that doubled fell first, how long the 2x and
+  the peak took, what a -50% or -60% stop would have kept against what it would have cost on
+  the coins that kept falling (inside the first 6 hours), and what holding the coins the time
+  stop sold to 12 or 24 hours would have done. These are counts from recorded prices, not a
+  replay, and no exit rule reads them.
 
 Any sample under 30 is flagged as noise. Don't tune on it.
 
@@ -237,13 +302,36 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   - PAUSED: the daily loss cap was hit;
   - DEGRADED: the last 6 agent votes all failed, for example because the Anthropic key expired.
 - **Telegram control panel.** With Telegram set up, the bot long-polls its own messages (no open
-  port). `/panel` shows buttons; the commands behind them are `/status`, `/digest` (this hour so
-  far), `/report`, `/trades`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
+  port). `/panel` shows buttons; the commands behind them are `/status` (in live mode with the
+  wallet's balance), `/digest` (this hour so far), `/report [section]` (one section at a time on the
+  phone: `/report insiders`), `/moonshots` (which evaluated coins went 10x/100x/500x), `/trades`,
+  `/why [id or address]`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
   positions keep their exits), `/resume` (clears a Telegram pause and the STOP file, never the
   bot's own loss-cap pause), `/stop` (writes the STOP file) and `/help`, only from
   `TELEGRAM_CHAT_ID`. Commands from any other chat are logged and ignored; commands sent while
-  the bot was down are not answered on restart. The chat can never change a setting or a key:
-  the service runs with its code and `.env` read-only.
+  the bot was down are not answered on restart. The bot process itself can never change a
+  setting or a key: the service runs with its code and `.env` read-only.
+- **Server actions from the phone.** `/update`, `/restart`, `/set KEY=VALUE` and `/dryrun on`
+  are not run by the bot. They are written as request files under `data/ops/` and picked up by
+  the ops service (`python -m bot ops --watch`, installed with `deploy/install.sh --ops`), which
+  re-validates each request against the allowlist in `bot/ops.py` and runs only
+  `deploy/update.sh` (fast-forward of the tracked branch after its tests pass),
+  `deploy/set-env.sh KEY=VALUE` or `sudo -n systemctl restart meme-agents`; the result comes back
+  into the chat. The allowlist holds bounded operational numbers (budgets, sizing within $20 a
+  position and $500 bankroll, exits, the gate thresholds no lower than the brief's 0.65,
+  pre-filter limits) and a few switches. Never from the phone: `MODE`, `LIVE_CONFIRM`,
+  `LIVE_MAX_WALLET_SOL`, any key, token or wallet, `TELEGRAM_CHAT_ID`, paths and URLs;
+  `LIVE_DRY_RUN` only turns on. A `/set` is also checked against the bot's own cross-field
+  rules as `.env` would load afterwards, `.env` is backed up first, and a value the bot will not
+  start on is put back (that one key; never `LIVE_DRY_RUN`) and the bot restarted again, so the
+  phone cannot lock itself out. A
+  restart from the phone keeps the day's loss count and a daily-loss pause (`/restart reset` ends
+  both); `/dryrun on` is
+  refused while live positions are open (`/dryrun on force` overrides). Requests run one at a
+  time and wait behind an update; one the service only finds 10 minutes after it was made is
+  refused; one found half-done after the service's own restart is reported rather than run
+  again; the Telegram offset is persisted so the restart a command causes never replays it;
+  and `/ops` shows the queue and the last results.
 - **Updates.** `deploy/update.sh` fetches the tracked branch (fast-forward only), builds and
   tests it in a separate checkout and virtualenv while the old bot keeps running, then stops
   the service, switches code and dependencies over and restarts. If the restart or the health
@@ -260,7 +348,8 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   logged with its traceback, counted, shown by `status`, and restarted.
 - **Restarts are safe.** Open positions, queued candidates and budgets all resume from
   SQLite. A crash restart keeps a daily-loss pause in force; a clean stop and start resets
-  the loss baseline. Older databases are migrated in place.
+  the loss baseline, except a restart queued from Telegram, which keeps it unless sent as
+  `/restart reset`. Older databases are migrated in place.
 
 ## Budgets
 
@@ -271,6 +360,9 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   released evenly over the UTC day, with `LLM_BUDGET_BURST_HOURS` (2) hours' worth available up
   front, so the bot evaluates around the clock. The first live hour cost $2.26 for 17
   candidates; unpaced, a $5 day would be spent by 02:30 UTC. The cap itself is never exceeded.
+  A candidate is evaluated only when the released budget covers a whole committee (1.5 x the
+  mean cost of recent ones), and one at a time while it covers fewer than two, so an agent is
+  never cut off mid-evaluation by the trickle; `/status` shows `(err:budget)` when one was.
 - **X.** The bot tracks spend per UTC month. Before each call it reserves the worst case
   (`max_results × $0.005`, or `$0.01` for a user lookup) and refuses the call if that doesn't
   fit in `X_MONTHLY_BUDGET_USD`. It stores every post id in `x_posts` and uses `since_id`, so
@@ -333,7 +425,16 @@ Live mode starts only if **all** of these are true. Otherwise it refuses with ex
 - `LIVE_CONFIRM=I_ACCEPT_LOSSES`
 - `WALLET_PRIVATE_KEY` parses
 - `HELIUS_API_KEY` and `ANTHROPIC_API_KEY` are set
-- the wallet's on-chain balance is 0.5 SOL or less at startup
+- the wallet's on-chain balance is `LIVE_MAX_WALLET_SOL` or less at startup (default 0.5, at most 3)
+
+When a check fails the bot still starts, with entries locked and a 🔒 LIVE LOCKED message in the
+chat, so `/status`, `/set`, `/update` and `/restart` keep working from the phone; exits of open
+positions still run when the key and config are sound. `/resume` cannot clear the lock: fix the
+cause and `/restart`.
+
+If the bot service is down for any other reason, the ops service notices within about 20
+seconds, says so in the chat, and answers `/restart` and `/update` itself until the bot is back
+(`bot/rescue.py`). Any other command gets one line saying the bot is down.
 
 Orders go to PumpPortal's Local Trade API (`POST /api/trade-local`, `pool: "auto"`) and are
 signed locally with `solders`. Graduated tokens go through Jupiter Swap API v2 instead

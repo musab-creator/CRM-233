@@ -138,7 +138,12 @@ Added after the build, when research showed a change in PumpPortal's data API:
 23. **The LLM budget is paced** (`LLM_BUDGET_PACING`, default on): the daily budget is released
     evenly over the UTC day with `LLM_BUDGET_BURST_HOURS` (2) hours' worth up front, so the bot
     evaluates throughout the day instead of spending it all in the first two hours. The brief's
-    cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`.
+    cap still holds: nothing is spent beyond `LLM_DAILY_BUDGET_USD`. A candidate starts only when
+    the released budget covers a whole evaluation (1.5 x the mean cost of the last 20 committees,
+    not just each agent's first call), and when it covers fewer than two, committees run one at a
+    time: on the first live day at $25, the trickle funded first calls while Scout and Analyst
+    starved on later turns, and a starved agent is an automatic PASS, so the money bought
+    decisions that could never be BUY. `/status` counts agent errors by cause.
 24. **Telegram commands come only from `TELEGRAM_CHAT_ID`.** The bot long-polls `getUpdates`
     (no inbound port, so the firewall stays closed) and answers `/panel`, `/status`, `/digest`,
     `/report`, `/trades`, `/log`, `/settings`, `/pause`, `/resume` and `/stop` from that chat
@@ -174,10 +179,24 @@ Added after the build, when research showed a change in PumpPortal's data API:
     Scout's PASSes also carried no information (75% of them were losers against an 80% base
     rate), because a token a few minutes old has no social footprint yet. The gate stays
     unanimous; what changes is the question. Scout and Hunter now vote PASS when they find
-    something against the token and BUY at 0.5 to 0.6 when they find nothing either way, so
-    Analyst (BUY lift 1.71x in the same data) has to supply the confidence that lifts the mean
-    over 0.65, and the forensics and social vetoes still run on every BUY. `false` restores the
-    strict prompts.
+    something against the token and BUY at 0.6 when they find nothing either way (0.5 when a tool
+    failed), so Analyst (BUY lift 1.71x in the same data) has to supply the confidence that lifts
+    the mean over 0.65: 0.6 + 0.6 + 0.75 is the lowest passing combination, which is why the
+    Analyst's neutral-mode prompt asks for 0.75 or more. The forensics and social vetoes still run
+    on every BUY. `false` restores the strict prompts. First live evening (7 Oct, 21:46 and 21:49
+    UTC): the Analyst voted BUY at 0.82 and 0.76, Scout and Hunter voted their neutral BUY, and
+    the grounding guard flipped both to PASS at grounding 0.17-0.30, because evidence such as
+    "x_search results 0" has no number the corpus can match. A neutral BUY (confidence at or
+    below 0.6 from Scout or Hunter in this mode) is therefore exempt from the grounding share;
+    it still needs at least one successful tool call, and the Analyst's BUY is guarded as before.
+    A Scout or Hunter BUY between 0.6 and 0.7 on evidence the matcher cannot credit (DESK95, 8 Oct:
+    Scout at 0.62 on "one link-only post", counts of 0 and 1 that the matcher ignores) is held to
+    the neutral 0.6 instead of flipped to PASS: the unverified part is the extra confidence, not
+    the look. From 0.7 up a BUY claims attention or a catalyst and is guarded in full. Scout's PASS
+    is for a bot *pattern* (Pao, 8 Oct: eight signal bots in three minutes); one or two automated
+    listing posts, and the launcher's own announcement, are the background every launch gets and
+    leave the vote neutral (CUSTOM, 8 Oct, was a PASS on one listing bot; Sworn on the launcher's
+    one post, a +6% shadow). Sock-puppet communities run by the launcher stay a PASS.
 29. **The model is never allowed to answer in prose where a vote is due.** Triage and Regime
     force their single tool with `tool_choice`, and a committee agent is forced to call
     `submit_vote` on its final turn and on any turn after a reply without a tool call. Before
@@ -204,6 +223,47 @@ Added after the build, when research showed a change in PumpPortal's data API:
     signals; dev selling counts only together with a sniper or bundling flag. Five-minute net
     flow turning negative after a positive previous window is the momentum flag instead. To be
     re-checked against the report once a week of neutral-gate data exists.
+33. **A triage skip needs a red flag the code can find in the data.** On the first live evening
+    Haiku skipped CATE for "effective holders 12.5, well below the threshold of 10" and NOBO for
+    dev selling plus zero retention, the exact pair the prompt demotes to weak signals. A model
+    reading a number backwards cannot be prompted away, so `hard_red_flags()` recomputes the
+    prompt's deterministic flags (rugged creator history, the top three launch-minute buyers holding
+    a third or more of the token's whole net inflow and still in (their share of the launch minute
+    itself is always large and is not the test),
+    bundling, fewer than 10 effective buyers or holders, five-minute net flow turning negative or
+    drawdown beyond 40%, buyers or inflow 30% below the pre-filter scan) from the same fields the
+    model saw, leniently and never from a null. A PASS with none of them becomes a BUY with the
+    reason in `guard`, so the committee decides; a backed PASS carries the computed flags in its
+    evidence. The two judgment flags (copycat name, "far below the scan" by eye) cannot skip
+    alone any more; Scout checks copies in the committee.
+
+34. **Server actions from the phone go through a second process, never the bot.** The bot's
+    unit keeps its code and `.env` read-only with no privileges, so Telegram `/update`,
+    `/restart`, `/set` and `/dryrun on` only write request files under `data/ops/`. The ops
+    service (`python -m bot ops --watch`, `deploy/meme-agents-ops.service`, same user, no
+    sandbox) re-validates each one against the allowlist in `bot/ops.py` and runs nothing but
+    `deploy/update.sh`, `deploy/set-env.sh KEY=VALUE` and `sudo -n systemctl restart
+    meme-agents`. The allowlist is bounded operational numbers and switches; `MODE`,
+    `LIVE_CONFIRM`, `LIVE_MAX_WALLET_SOL`, keys, the wallet, the chat id, paths and URLs are not
+    in it, `LIVE_DRY_RUN` only turns on, and the gate threshold cannot go below the brief's
+    0.65. So a phone in the wrong hands can deploy tested code from the tracked branch, restart,
+    and move numbers inside their limits, but cannot enable real sends, raise the wallet cap or
+    read a secret. Requests the service only finds 10 minutes after they were made are refused;
+    one found half-done after a service restart is reported, not re-run. The service trusts
+    nothing in a request file beyond what it re-validates (a result is named after the file, a
+    malformed file is refused and set aside), checks a `/set` against the bot's own cross-field
+    rules, backs `.env` up and puts back the one key the bot will not start on (never
+    `LIVE_DRY_RUN`), keeps a daily-loss pause across a phone restart, and refuses `/dryrun on` while live positions are open. The
+    Telegram offset is persisted in the database so the restart a command causes never replays
+    it, and `.env` is rewritten in place so the bot's read-only bind mount on it survives.
+
+35. **A live buy may take a little more than the SOL amount and the network fee.** The first
+    real buy (Livepad, 8 Oct, $5) was refused by the pre-broadcast simulation check because the
+    transaction also paid the rent of the wallet's new token account (0.00204 SOL) and the pump.fun
+    and PumpPortal percentage fees on top of the amount. The spending limit the bot authorises
+    (`spend_limit()` in `bot/live/executor.py`, applied both statically before signing and to the
+    simulated payer debit) is now amount × (1 + fees) + `NETWORK_FEE_SOL` + `LIVE_ACCOUNT_RENT_SOL`
+    (default 0.0025 SOL). Anything beyond that is still refused before broadcast.
 
 ## File tree
 
@@ -249,12 +309,13 @@ meme-agents/
     acceptance.py    the brief's "Done when" test, automated
     telegram.py      optional alerts and the getUpdates poller
     digest.py        the hourly Telegram digest
-    commands.py      Telegram commands (/status /digest /report /stop /resume) from the configured chat
+    commands.py      Telegram commands (/status /digest /report /stop /resume /update /restart /set) from the configured chat
+    ops.py           the ops service: runs update/restart/set requests queued from Telegram (allowlist, bounds)
     engine.py        wires everything together
     sim.py           offline synthetic feed for smoke runs (no network, no keys)
   tests/  test_prefilter.py test_consensus.py test_paper.py test_exits.py
           test_live_guard.py test_ingest.py test_budget.py test_agents.py
-  deploy/ install.sh  update.sh  set-env.sh  meme-agents.service  healthcheck.sh  VPS.md
+  deploy/ install.sh  update.sh  set-env.sh  meme-agents.service  meme-agents-ops.service  healthcheck.sh  VPS.md
   KEYS.md            where to get each API key, where to store it
 .github/workflows/meme-agents-live.yml   paper run on a GitHub runner (probe / 60-min acceptance)
 ```

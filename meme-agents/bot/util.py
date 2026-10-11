@@ -6,6 +6,7 @@ import math
 import os
 import random
 import re
+import subprocess
 import time
 from collections.abc import Iterable
 from urllib.parse import quote, quote_plus
@@ -130,6 +131,25 @@ def sd_notify(state: str) -> bool:
         return True
     except OSError:
         return False
+
+
+def git_commit(path) -> str | None:
+    """The checked-out commit (7 characters) of the repository at `path`, or None when git or the
+    repository cannot say. /status and /ops show it, so a phone can tell which code is running."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short=7", "HEAD"], cwd=str(path), capture_output=True, text=True,
+                           timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = r.stdout.strip()
+    if r.returncode != 0 or not re.fullmatch(r"[0-9a-f]{7,40}", out):
+        return None
+    try:                                            # edited files are not that commit: say so
+        d = subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=str(path), capture_output=True, timeout=10,
+                           check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return out[:7]
+    return out[:7] + ("+dirty" if d.returncode == 1 else "")
 
 
 class InstanceLock:

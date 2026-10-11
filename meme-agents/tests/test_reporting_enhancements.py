@@ -290,3 +290,65 @@ def test_health_reports_a_running_mode_configuration_mismatch(s):
             await db.close()
     state, line = asyncio.run(go())
     assert state == "DEGRADED" and "running mode=live" in line
+
+
+def test_report_shows_the_shape_of_shadow_returns(s):
+    from bot.report import shadow_extremes
+    now = datetime(2026, 1, 2, 12, tzinfo=timezone.utc).timestamp()
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "RUNNER", "symbol": "RUN", "created_at": now - 7200})
+            for i, (mint, ret_sol, exit_reason, held) in enumerate([
+                    ("RUNNER", 1.2, "trailing_stop", 4000), ("A", -0.015, "stop_loss", 120), ("B", -0.012, "stop_loss", 300),
+                    ("C", 0.004, "take_profit", 900), ("D", -0.02, "time_stop", 21600), ("E", -0.011, "stop_loss", 60)]):
+                await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": mint, "candidate_id": 100 + i,
+                                              "creator": "C", "status": "closed", "size_usd": 5.0, "cost_sol": 0.025,
+                                              "pnl_sol": ret_sol, "pnl_usd": ret_sol * 200, "exit_reason": exit_reason,
+                                              "opened_at": now - held, "closed_at": now, "entry_price": 1e-8,
+                                              "last_price": 1e-8 * (1 + ret_sol / 0.025)})
+            await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": "NAN", "status": "closed",
+                                          "cost_sol": 0.025, "pnl_sol": float("nan"), "pnl_usd": 1.0, "closed_at": now})
+            ex = await shadow_extremes(db, top=2)
+            text = render_text(await build_report(db, s, day="2026-01-02"))
+            return ex, text
+        finally:
+            await db.close()
+    ex, text = asyncio.run(go())
+    assert ex["n"] == 6 and ex["over_10x"] == 1                       # the NaN row is ignored, RUNNER is 48x
+    assert ex["median_return"] == pytest.approx((-0.012 / 0.025 + -0.011 / 0.025) / 2)   # the two middle of six
+    assert [x["symbol"] for x in ex["best"]] == ["RUN", "C"] and [x["symbol"] for x in ex["worst"]] == ["D", "A"]
+    assert ex["top_pnl_share"] == pytest.approx((1.2 + 0.004) * 200 / ((1.2 - 0.015 - 0.012 + 0.004 - 0.02 - 0.011) * 200))
+    assert "shadow returns: median" in text and "1 shadows at +1000% or more" in text
+    assert "+4800%  RUN        cand 100   trailing stop            held 1.1h   $+240.00  1e-08 -> 4.9e-07" in text
+
+
+def test_the_daily_summary_arrives_whole(s, monkeypatch):
+    """10 Oct: the daily summary was cut at 3,500 characters, in the middle of the signal check;
+    everything after it (exit reasons, best and worst shadows, moonshots) never reached the phone."""
+    import bot.engine as engine_mod
+    from bot.engine import Engine
+    from bot.telegram import MAX_MESSAGE, Telegram
+    from tests.test_commands import FakeHttp
+
+    lines = [f"line {i:04d} " + "x" * 60 for i in range(400)]          # about 28,000 characters
+
+    async def long_report(db, settings, day):
+        return "\n".join(lines), "data/reports/daily.md"
+
+    monkeypatch.setattr(engine_mod, "write_daily", long_report)
+
+    async def go():
+        eng = Engine(s)
+        http = FakeHttp([])
+        eng.tg = Telegram(http, "123:abc", "42")
+        try:
+            await eng._send_daily("2026-10-09")
+        finally:
+            await eng.http.aclose()
+        return [body["text"] for method, body in http.posts if method == "sendMessage"]
+    sent = asyncio.run(go())
+    assert len(sent) > 1 and all(len(t) <= MAX_MESSAGE for t in sent)
+    assert sent[0].startswith("Daily summary 2026-10-09\nline 0000")
+    assert "\n".join(sent).split("\n")[1:] == lines                     # every line, in order, none cut

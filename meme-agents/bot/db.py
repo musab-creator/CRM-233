@@ -9,6 +9,14 @@ from typing import Any, Iterable
 
 import aiosqlite
 
+# Shadow positions with a sell booked at more than SPIKE_FACTOR times their final mark were priced
+# by a bad tick, not a run: a real runner's take-profit sits within a trailing stop of its last
+# mark. Every shadow statistic (report, regime snapshot) leaves them out.
+SPIKE_FACTOR = 20.0
+SPIKED_SHADOWS_SQL = ("SELECT f.position_id FROM fills f JOIN positions q ON q.id=f.position_id "
+                      "WHERE q.kind='shadow' AND f.side='sell' AND q.last_price>0 AND f.price>q.last_price*%g"
+                      % SPIKE_FACTOR)
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -85,7 +93,11 @@ CREATE TABLE IF NOT EXISTS positions (
     proceeds_sol REAL DEFAULT 0, pnl_sol REAL, pnl_usd REAL,
     sol_usd_entry REAL, sol_usd_exit REAL, exit_reason TEXT,
     pending_exit TEXT, pending_exit_fraction REAL, pending_exit_at REAL,
-    exit_attempts INTEGER DEFAULT 0, next_exit_at REAL
+    exit_attempts INTEGER DEFAULT 0, next_exit_at REAL,
+    runner_fraction REAL DEFAULT 0, runner_target_multiple REAL, runner_max_hold_hours REAL,
+    runner_active INTEGER DEFAULT 0, liq_source TEXT,
+    trough_price REAL, trough_at REAL, peak_at REAL, trough_before_peak REAL,
+    first_2x_at REAL, trough_before_2x REAL
 );
 CREATE INDEX IF NOT EXISTS ix_pos_status ON positions(status, kind);
 CREATE INDEX IF NOT EXISTS ix_pos_candidate ON positions(candidate_id,kind,status);
@@ -114,6 +126,39 @@ CREATE TABLE IF NOT EXISTS live_tx (
     signature TEXT, sent INTEGER, ok INTEGER, detail TEXT
 );
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, detail TEXT);
+
+-- every evaluated coin, watched for MOONSHOT_TRACK_DAYS from the price its shadow opened at (moonshots.py)
+CREATE TABLE IF NOT EXISTS moonshots (
+    mint TEXT PRIMARY KEY, candidate_id INTEGER, ref_price REAL, ref_at REAL, ref_sol_usd REAL,
+    peak_price REAL, peak_at REAL, peak_mcap_usd REAL, prev_price REAL,
+    last_price REAL, last_mcap_usd REAL, last_at REAL, first_at REAL, supply REAL,
+    polls INTEGER DEFAULT 0, readings INTEGER DEFAULT 0, misses INTEGER DEFAULT 0,
+    alerted_at REAL, done INTEGER DEFAULT 0,
+    dips INTEGER, low_price REAL, low_at REAL, low_before_peak REAL, first_2x_at REAL, low_before_2x REAL,
+    price_6h REAL, price_12h REAL, price_24h REAL, low_0h_6h REAL, low_6h_12h REAL, low_12h_24h REAL
+);
+CREATE INDEX IF NOT EXISTS ix_moonshots_done ON moonshots(done, ref_at);
+
+-- each evaluated coin's insiders as the bot saw them (insiders.py): creator, launch-minute buyers,
+-- snipers, same-slot bundle buyers, top holders; tokens = what the wallet held at evaluation
+CREATE TABLE IF NOT EXISTS insiders (
+    candidate_id INTEGER, mint TEXT, wallet TEXT, roles TEXT, tokens REAL,
+    PRIMARY KEY (candidate_id, wallet)
+);
+CREATE INDEX IF NOT EXISTS ix_insiders_wallet ON insiders(wallet);
+-- positions whose coin's trades were streamed (from when a subscription covering them was confirmed),
+-- and every insider trade after their entry; cum_supply_pct = the insiders' net sales since entry
+CREATE TABLE IF NOT EXISTS insider_watch (position_id INTEGER PRIMARY KEY, mint TEXT, kind TEXT, started_at REAL);
+CREATE TABLE IF NOT EXISTS insider_trades (
+    id INTEGER PRIMARY KEY, position_id INTEGER, mint TEXT, ts REAL, side TEXT, wallet TEXT, roles TEXT,
+    tokens REAL, sol REAL, price REAL, cum_supply_pct REAL, signature TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_insider_trades_pos ON insider_trades(position_id, ts);
+CREATE INDEX IF NOT EXISTS ix_insider_trades_sig ON insider_trades(position_id, signature, wallet);
+CREATE INDEX IF NOT EXISTS ix_fills_pos ON fills(position_id, side, ts);
+CREATE INDEX IF NOT EXISTS ix_insiders_mint ON insiders(mint);
+-- wallets.py: past coins whose launch buyers were read back from the chain (ok, empty, error)
+CREATE TABLE IF NOT EXISTS wallet_backfill (mint TEXT PRIMARY KEY, status TEXT, attempts INTEGER, at REAL, detail TEXT);
 """
 
 # Columns added after the first release: (table, column, type). Applied with ALTER TABLE when
@@ -126,12 +171,37 @@ MIGRATIONS = [
     ("positions", "pending_exit_fraction", "REAL"),
     ("positions", "exit_attempts", "INTEGER DEFAULT 0"),
     ("positions", "next_exit_at", "REAL"),
+    ("positions", "runner_fraction", "REAL DEFAULT 0"),
+    ("positions", "runner_target_multiple", "REAL"),
+    ("positions", "runner_max_hold_hours", "REAL"),
+    ("positions", "runner_active", "INTEGER DEFAULT 0"),
+    ("positions", "liq_source", "TEXT"),
     ("mints", "real_sol", "REAL"),
     ("mints", "curve_at", "REAL"),
     ("mints", "wallets_ex_dev", "INTEGER"),
     ("mints", "holders_now", "INTEGER"),
     ("mints", "holders_at", "REAL"),
     ("mints", "mayhem", "INTEGER DEFAULT 0"),
+    ("insiders", "source", "TEXT"),          # NULL: recorded at evaluation; 'read_back': wallets.py, from the chain
+    # dips and timing (positions.py marks them from the entry, moonshots.py from the first read)
+    ("positions", "trough_price", "REAL"),
+    ("positions", "trough_at", "REAL"),
+    ("positions", "peak_at", "REAL"),
+    ("positions", "trough_before_peak", "REAL"),
+    ("positions", "first_2x_at", "REAL"),
+    ("positions", "trough_before_2x", "REAL"),
+    ("moonshots", "dips", "INTEGER"),        # NULL: tracked before dips were recorded, left out of them
+    ("moonshots", "low_price", "REAL"),
+    ("moonshots", "low_at", "REAL"),
+    ("moonshots", "low_before_peak", "REAL"),
+    ("moonshots", "first_2x_at", "REAL"),
+    ("moonshots", "low_before_2x", "REAL"),
+    ("moonshots", "price_6h", "REAL"),
+    ("moonshots", "price_12h", "REAL"),
+    ("moonshots", "price_24h", "REAL"),
+    ("moonshots", "low_0h_6h", "REAL"),
+    ("moonshots", "low_6h_12h", "REAL"),
+    ("moonshots", "low_12h_24h", "REAL"),
 ]
 
 MINT_COLS = (
@@ -296,6 +366,16 @@ class Database:
         qs = ",".join("?" * len(row))
         vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in row.values()]
         return await self.execute(f"INSERT INTO {table} ({cols}) VALUES ({qs})", vals)
+
+    async def save_insiders(self, candidate_id: int, mint: str, insiders: dict[str, dict],
+                            source: str | None = None) -> None:
+        """A candidate's insider set (insiders.insider_set) at evaluation. `source='read_back'`: the
+        launch minute read back later (wallets.py); those rows never replace ones recorded live."""
+        verb = "INSERT OR IGNORE" if source else "INSERT OR REPLACE"
+        await self.executemany(
+            f"{verb} INTO insiders (candidate_id, mint, wallet, roles, tokens, source) VALUES (?,?,?,?,?,?)",
+            [(candidate_id, mint, w, ",".join(e.get("roles") or []), e.get("tokens"), source)
+             for w, e in insiders.items()])
 
     async def update(self, table: str, key: str, key_val: Any, row: dict) -> None:
         sets = ",".join(f"{c}=?" for c in row)

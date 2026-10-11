@@ -20,6 +20,7 @@ from typing import Awaitable, Callable
 
 from .config import Settings
 from .db import Database
+from .feeds.pumpchain import plausible_curve
 from .util import now_s
 
 log = logging.getLogger("bot.ingest")
@@ -88,6 +89,7 @@ class MintState:
     streamed: bool = False              # every trade since launch came from the paid stream
     mayhem: bool = False                # pump.fun Mayhem Mode: an AI agent trades it for 24 h
     supply: float | None = None         # token_total_supply from the curve (Mayhem mints extra)
+    bad_curve_reads: int = 0            # implausible curve reads in a row
     snapshots: deque = field(default_factory=lambda: deque(maxlen=240), repr=False)  # (ts, price, real_sol)
 
     @property
@@ -142,8 +144,9 @@ class Ingestor:
         self.subscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.unsubscribe: Callable[[list[str]], Awaitable[None]] | None = None
         self.stream_new_tokens = False  # subscribe every launch to the paid trade stream
-        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "migrations": 0,
-                      "other_launchpads": 0}
+        self.non_sol: dict[str, str] = {}   # pinned mints whose curve is priced in another token -> that token
+        self.stats = {"creates": 0, "trades": 0, "stream_trades": 0, "curve_reads": 0, "curve_rejected": 0, "non_sol_quote": 0,
+                      "migrations": 0, "other_launchpads": 0}
 
     # --- message handling -----------------------------------------------------
     async def handle(self, msg: dict, ts: float | None = None) -> None:
@@ -279,14 +282,59 @@ class Ingestor:
         if st is None:
             return False
         self.stats["curve_reads"] += 1
+        if getattr(c, "quote_mint", None):
+            # priced in another token: its reserves are not SOL, so neither its price, inflow nor
+            # depth means what the filters, agents and exits read them as (9 Oct: the flood of
+            # "implausible" reads). Not a candidate; a held coin keeps its last SOL figures.
+            self.stats["non_sol_quote"] = self.stats.get("non_sol_quote", 0) + 1
+            if mint not in self.pinned:
+                log.debug("%s: priced in %s, not SOL: no longer tracked", mint, c.quote_mint)   # counted in the heartbeat
+                await self._drop([mint], f"non-SOL quote {c.quote_mint}")
+            else:
+                # held or being decided: its curve figures cannot be used, and positions sells it
+                # (PositionManager reads non_sol) rather than hold a coin it can neither mark nor measure
+                if mint not in self.non_sol:
+                    log.warning("%s: priced in %s, not SOL, while held or a candidate", mint, c.quote_mint)
+                self.non_sol[mint] = c.quote_mint
+                st.curve_at = 0.0
+            return False
         first = not st.curve_at
-        st.curve_at = ts
         if c.complete:
+            st.curve_at = ts
             # graduated: the curve is emptied into the AMM pool, so keep the inflow it reached
             st.graduated, st.progress = True, 1.0
             st.real_sol = max(st.real_sol or 0.0, c.real_sol, c.v_sol - INITIAL_VIRTUAL_SOL)
             self._mark_dirty(mint)
             return False
+        if not plausible_curve(c):
+            # a corrupt read must not become a tick, a snapshot or the token's market cap
+            self.stats["curve_rejected"] += 1
+            st.bad_curve_reads += 1
+            read = f"v_sol={c.v_sol:.4g} v_tokens={c.v_tokens:.4g} real_sol={c.real_sol:.4g}"
+            if (c.mayhem or st.mayhem) and mint not in self.pinned:
+                # 9 Oct: the logged bytes showed these to be Mayhem Mode curves (byte 81 set, SOL quote)
+                # holding 0.2-12 virtual SOL, not corrupt reads. The filters, agents and exits assume a
+                # 30-SOL curve, so they are not traded: dropped at the first read, counted in the heartbeat.
+                self.stats["mayhem_dropped"] = self.stats.get("mayhem_dropped", 0) + 1
+                log.debug("%s: Mayhem Mode curve %s: not traded, no longer tracked", mint, read)
+                await self._drop([mint], "Mayhem Mode curve")
+                return False
+            if mint in self.pinned:
+                log.warning("%s: rejecting implausible curve read %s (last price %s)", mint, read,
+                            f"{st.last_price_sol:.3e}" if st.last_price_sol else "none")
+            elif st.bad_curve_reads == 1:
+                # 9 Oct: dozens of new curves read like this every few minutes, still after the quote_mint
+                # check, so one line per coin keeps the account's bytes for working out what they are
+                log.info("%s: implausible curve read %s (account %d bytes, bytes 81+: %s)", mint, read, c.size,
+                         c.extra or "none")
+            else:
+                # no SOL curve reads like this twice in a row: not a candidate, stop reading it
+                self.stats["curve_unreadable"] = self.stats.get("curve_unreadable", 0) + 1
+                log.info("%s: implausible curve read again (%s): no longer tracked", mint, read)
+                await self._drop([mint], "implausible curve reads")
+            return False
+        st.bad_curve_reads = 0
+        st.curve_at = ts                                 # only an accepted read counts as the curve read
         moved = not first and (abs((st.v_sol or 0) - c.v_sol) > 1e-9 or abs((st.v_tokens or 0) - c.v_tokens) > 1e-6)
         st.real_sol = c.real_sol
         st.v_sol, st.v_tokens = c.v_sol, c.v_tokens

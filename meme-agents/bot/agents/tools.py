@@ -11,7 +11,7 @@ from ..feeds.dexscreener import summarize_pair
 from ..feeds.rugcheck import pool_accounts
 from .base import AgentSpec
 from .forensics import funding_graph, wallet_profile
-from .prompts import ROLE_PROMPTS, role_prompt
+from .prompts import role_prompt
 from .social import author_stats
 
 
@@ -22,6 +22,21 @@ def _tool(name: str, desc: str, props: dict | None = None, required: list[str] |
 
 MINT_ARG = {"mint": {"type": "string", "description": "Token mint address"}}
 
+
+
+def _sizes(s: Settings) -> tuple[float, float]:
+    """The position sizes the bot may take (POSITION_MIN_USD..POSITION_MAX_USD), which the prompts state."""
+    return (s.POSITION_MIN_USD, s.POSITION_MAX_USD)
+
+
+def _rules(s: Settings) -> tuple[float, float, float]:
+    """The exit rules the prompts state: the stop loss, the take-profit and the time stop."""
+    return (s.STOP_LOSS_PCT, s.TAKE_PROFIT_PCT, s.TIME_STOP_HOURS)
+
+
+def _gate(s: Settings) -> tuple[float, float]:
+    """The gate's mean floor and the neutral vote, which together set the Analyst's bar in the prompts."""
+    return (s.CONSENSUS_MIN_MEAN_CONFIDENCE, s.NEUTRAL_VOTE_CONFIDENCE)
 
 @dataclass
 class ToolContext:
@@ -87,7 +102,7 @@ def scout_spec(ctx: ToolContext) -> AgentSpec:
         _tool("dexscreener_profile", "Project links and socials listed on DexScreener for a mint.", MINT_ARG),
         _tool("dexscreener_boosts", "Latest paid DexScreener boosts on Solana, and whether this token is boosted."),
     ]
-    return AgentSpec("scout", role_prompt("scout", ctx.s.GATE_NEUTRAL_VOTES), tools,
+    return AgentSpec("scout", role_prompt("scout", ctx.s.GATE_NEUTRAL_VOTES, _sizes(ctx.s), _rules(ctx.s), _gate(ctx.s)), tools,
                      {"x_search": x_search, "dexscreener_profile": dexscreener_profile,
                       "dexscreener_boosts": dexscreener_boosts})
 
@@ -123,7 +138,7 @@ def hunter_spec(ctx: ToolContext) -> AgentSpec:
               {"handle": {"type": "string"}}, ["handle"]),
         _tool("news_feed", f"Crypto and general news headlines from the last {int(ctx.s.CATALYST_WINDOW_MIN)} min."),
     ]
-    return AgentSpec("hunter", role_prompt("hunter", ctx.s.GATE_NEUTRAL_VOTES), tools,
+    return AgentSpec("hunter", role_prompt("hunter", ctx.s.GATE_NEUTRAL_VOTES, _sizes(ctx.s), _rules(ctx.s), _gate(ctx.s)), tools,
                      {"x_user_timeline": x_user_timeline, "news_feed": news_feed})
 
 
@@ -203,9 +218,9 @@ def analyst_spec(ctx: ToolContext) -> AgentSpec:
               "5-minute momentum).",
               {**MINT_ARG, "limit": {"type": "integer", "description": "10-200, default 80"}}),
     ]
-    return AgentSpec("analyst", role_prompt("analyst", ctx.s.GATE_NEUTRAL_VOTES), tools,
+    return AgentSpec("analyst", role_prompt("analyst", ctx.s.GATE_NEUTRAL_VOTES, _sizes(ctx.s), _rules(ctx.s), _gate(ctx.s)), tools,
                      {"rugcheck": rugcheck, "holders": holders, "dexscreener_pair": dexscreener_pair,
-                      "recent_trades": recent_trades}, with_size=True)
+                      "recent_trades": recent_trades}, with_size=True, size=_sizes(ctx.s))
 
 
 def build_specs(ctx: ToolContext) -> list[AgentSpec]:
@@ -264,7 +279,7 @@ def forensics_spec(ctx: ToolContext) -> AgentSpec:
               "who funded each, shared funders, creator-funded wallets, fresh wallets."),
         _tool("sniper_wallets", "The launch-minute top-3 sniper wallets: their history and funding links."),
     ]
-    return AgentSpec("forensics", ROLE_PROMPTS["forensics"], tools,
+    return AgentSpec("forensics", role_prompt("forensics", size=_sizes(ctx.s), rules=_rules(ctx.s)), tools,
                      {"creator_history": creator_history, "holder_funding": holder_funding,
                       "sniper_wallets": sniper_wallets})
 
@@ -297,7 +312,8 @@ def social_spec(ctx: ToolContext) -> AgentSpec:
               "x_search results.",
               {"author_ids": {"type": "array", "items": {"type": "string"}}}),
     ]
-    return AgentSpec("social", ROLE_PROMPTS["social"], tools, {"x_search": x_search, "x_authors": x_authors})
+    return AgentSpec("social", role_prompt("social", size=_sizes(ctx.s), rules=_rules(ctx.s)), tools,
+                     {"x_search": x_search, "x_authors": x_authors})
 
 
 def build_veto_specs(ctx: ToolContext) -> list[AgentSpec]:

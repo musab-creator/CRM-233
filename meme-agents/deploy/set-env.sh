@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Change non-secret settings, for example:
 #   bash deploy/set-env.sh HELIUS_MONTHLY_CREDITS=200000000 HELIUS_RPC_RPS=200
-# Replaces duplicate keys and writes .env atomically. Use nano .env for credentials: command
+# Replaces duplicate keys and writes .env in place (see the note below). Use nano .env for credentials: command
 # arguments can appear in process listings and shell history. Restart afterwards.
 set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,7 +13,6 @@ PY="$APP_DIR/.venv/bin/python"; [ -x "$PY" ] || PY=python3
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 path = Path(sys.argv[1])
@@ -52,23 +51,21 @@ for key, value in updates.items():
     if key not in seen:
         result.append(f'{key}="{value}"')
 
-fd, temporary = tempfile.mkstemp(prefix=".env-update-", dir=path.parent)
+# Write into the existing file rather than renaming a new one over it: the running bot's
+# unit keeps .env read-only with a bind mount on this very inode, and a rename would detach
+# that mount (Linux renames over mountpoints since 3.18), leaving .env writable inside the
+# sandbox until the next restart. The ops service keeps a copy in data/ops/env.backup.
+data = ("\n".join(result) + "\n").encode("utf-8")
+fd = os.open(path, os.O_WRONLY)
 try:
     os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as file:
-        file.write("\n".join(result) + "\n")
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(temporary, path)
-    if os.name != "nt":
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+    os.ftruncate(fd, 0)
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+    os.fsync(fd)
 finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
+    os.close(fd)
 for key in updates:
     print(f"updated {key}")
 PY

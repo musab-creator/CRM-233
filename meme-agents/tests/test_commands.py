@@ -133,7 +133,8 @@ def test_command_loop_sets_menu_and_stops(tmp_path):
     asyncio.run(go())
     assert http.posts[0][0] == "setMyCommands"
     assert [c["command"] for c in http.posts[0][1]["commands"]] == [
-        "panel", "status", "digest", "report", "trades", "log", "settings", "pause", "resume", "stop", "help"]
+        "panel", "status", "digest", "report", "moonshots", "trades", "why", "log", "settings", "pause", "resume", "stop",
+        "update", "restart", "set", "dryrun", "ops", "help"]
 
 
 def test_preflight_hint_explains_409_from_the_running_bot():
@@ -234,3 +235,24 @@ def test_resume_does_not_clear_the_bots_own_loss_cap_pause(tmp_path):
     asyncio.run(go())
     assert http.posts[0][1]["text"].startswith("still paused by the bot itself (daily loss cap")
     assert eng.risk.paused_reason.startswith("daily loss cap")
+
+
+def test_report_sends_one_section_when_asked(tmp_path):
+    """11 Oct: the report reaches the phone as several messages; the operator pasted the first one twice
+    looking for the insider rows. /report insiders answers with that section alone."""
+    s = _settings(tmp_path)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            tc = TelegramCommands(Telegram(FakeHttp([]), s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            whole, _ = await tc.answer("report", "")
+            gate, _ = await tc.answer("report", " Gate ")
+            bogus, _ = await tc.answer("report", "bogus")
+            return whole, gate, bogus
+        finally:
+            await db.close()
+    whole, gate, bogus = asyncio.run(go())
+    assert whole.startswith("meme-agents report (paper mode)") and "== Gate what-if" in whole
+    assert gate.startswith("== Gate what-if") and "== Per-agent" not in gate and "meme-agents report" not in gate
+    assert bogus.startswith("/report takes one of: ") and "insiders" in bogus and "dips" in bogus

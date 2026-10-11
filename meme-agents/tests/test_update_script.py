@@ -75,6 +75,9 @@ def server(tmp_path, request):
 
 def run(srv, stubs, *args, ssh_cmd=None, extra_env=None):
     env = {**os.environ, **GIT_ENV, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}", "UPDATE_LOG": str(srv / "log")}
+    # a deploy from the phone runs this suite under the ops service, which exports the flag:
+    # only the test decides whether update.sh believes it is non-interactive
+    env.pop("MEME_AGENTS_NONINTERACTIVE", None)
     env.update(extra_env or {})
     if ssh_cmd is not None:
         env["SSH_ORIGINAL_COMMAND"] = ssh_cmd
@@ -127,3 +130,25 @@ def test_local_changes_are_never_overwritten(server):
     r = run(srv, stubs, ssh_cmd=f"deploy work {new_sha}")
     assert r.returncode != 0 and not (srv / "log").exists()
     assert (srv / "v").read_text() == "local edit\n"
+
+
+def test_the_ops_service_never_waits_for_a_sudo_password(server):
+    srv, _dev, stubs, new_sha = server
+    r = run(srv, stubs, extra_env={"MEME_AGENTS_NONINTERACTIVE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert git(srv, "rev-parse", "HEAD") == new_sha
+    log = (srv / "log").read_text()
+    assert "sudo -n systemctl stop meme-agents" in log and "sudo -n systemctl restart meme-agents" in log
+    assert "sudo systemctl" not in log
+
+
+def test_the_ops_service_rollback_never_waits_for_a_sudo_password_either(server):
+    srv, _dev, stubs, new_sha = server
+    old_sha = git(srv, "rev-parse", "HEAD")
+    r = run(srv, stubs, extra_env={"MEME_AGENTS_NONINTERACTIVE": "1", "FAIL_RESTART": "1"})
+    assert r.returncode != 0 and "deployment failed" in r.stderr
+    assert git(srv, "rev-parse", "HEAD") == old_sha and (srv / "v").read_text() == "1\n"
+    assert (srv / ".venv" / "bin" / "python").exists() and not list(srv.glob(".venv-deploy.*"))
+    log = (srv / "log").read_text()
+    assert "sudo -n systemctl restart meme-agents" in log and "sudo -n systemctl start meme-agents" in log
+    assert "sudo systemctl" not in log

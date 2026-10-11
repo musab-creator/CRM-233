@@ -1,0 +1,187 @@
+"""A paced LLM budget must fund whole committees, never partial ones: the pre-check covers what a
+full evaluation costs lately, a tight budget runs one committee at a time and re-checks after
+waiting, and the status says why an agent failed (a starved agent is an automatic PASS)."""
+import asyncio
+import json
+
+from bot.config import load_settings
+from bot.db import Database
+from bot.sim import SIM_OVERRIDES, build_sim_engine
+from bot.status import _err_tag, build_status
+from bot.util import now_s
+
+
+def _settings(tmp_path, **extra):
+    o = dict(SIM_OVERRIDES, DB_PATH=str(tmp_path / "b.db"), REPORTS_DIR=str(tmp_path / "rep"),
+             STOP_FILE=str(tmp_path / "STOP"), LOG_FILE="", **extra)
+    return load_settings(overrides=o)
+
+
+def test_full_evaluation_estimate_uses_recent_committees_not_triage_skips(tmp_path):
+    s = _settings(tmp_path)
+    eng = build_sim_engine(s)
+
+    async def run():
+        await eng.db.open()
+        try:
+            assert await eng._typical_evaluation_usd() == 0.0                      # no history: no estimate
+            for i, cost in enumerate([0.10, 0.12, 0.14, 0.16]):
+                await eng.db.insert("candidates", {"mint": f"m{i}", "ts": now_s(), "metrics": "{}", "status": "evaluated",
+                                                   "decision": "PASS", "gate_reason": "agent error: scout", "llm_cost_usd": cost})
+            assert await eng._typical_evaluation_usd() == 0.0                      # four samples are not enough
+            await eng.db.insert("candidates", {"mint": "skip", "ts": now_s(), "metrics": "{}", "status": "evaluated",
+                                               "decision": "PASS", "gate_reason": "triage: bundled", "llm_cost_usd": 0.005})
+            await eng.db.insert("candidates", {"mint": "m4", "ts": now_s(), "metrics": "{}", "status": "evaluated",
+                                               "decision": "BUY", "gate_reason": "unanimous", "llm_cost_usd": 0.18})
+            # five committees (a triage-only skip is not one): 1.5 x their mean
+            assert abs(await eng._typical_evaluation_usd() - 1.5 * (0.10 + 0.12 + 0.14 + 0.16 + 0.18) / 5) < 1e-9
+        finally:
+            await eng.db.close()
+    asyncio.run(run())
+
+
+def test_tight_budget_runs_one_committee_at_a_time_and_rechecks_after_waiting(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    eng = build_sim_engine(s)
+    # enough for one committee, not two: once one has started, the other finds the money gone
+    active, peak, ran, state = [0], [0], [], {"spent": False}
+
+    async def fake_remaining():
+        return 0.10 if state["spent"] else 0.30
+
+    async def fake_estimate():
+        return 0.20
+
+    async def fake_committee(cid, mint, ctx_data, context, tctx, specs):
+        state["spent"] = True
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        await asyncio.sleep(0.05)
+        active[0] -= 1
+        ran.append(cid)
+        await eng.db.update("candidates", "id", cid, {"status": "evaluated", "decision": "PASS"})
+        return {"candidate_id": cid, "decision": "PASS", "votes": []}
+
+    async def run():
+        await eng.db.open()
+        try:
+            monkeypatch.setattr(eng.llm_budget, "remaining", fake_remaining)
+            monkeypatch.setattr(eng, "_typical_evaluation_usd", fake_estimate)
+            monkeypatch.setattr(eng, "_evaluate_with_llm", fake_committee)
+
+            async def no_positions(mint, status):   # the position manager only exists inside run()
+                return None
+            monkeypatch.setattr(eng, "_finish_mint", no_positions)
+            a = await eng.db.insert("candidates", {"mint": "A" * 32, "ts": now_s(), "metrics": json.dumps({"symbol": "A"})})
+            b = await eng.db.insert("candidates", {"mint": "B" * 32, "ts": now_s(), "metrics": json.dumps({"symbol": "B"})})
+            await asyncio.gather(eng.evaluate(a), eng.evaluate(b))
+            rows = {r["id"]: r for r in await eng.db.fetchall("SELECT id, status, gate_reason FROM candidates")}
+            assert peak[0] == 1 and len(ran) == 1
+            skipped = [r for r in rows.values() if r["status"] == "skipped_budget"]
+            assert len(skipped) == 1 and "for one full evaluation" in skipped[0]["gate_reason"]
+            assert not eng._eval_gate.locked()
+        finally:
+            await eng.db.close()
+    asyncio.run(run())
+
+
+def test_status_names_the_cause_of_agent_errors(tmp_path):
+    assert _err_tag(None) == "" and _err_tag("") == ""
+    assert _err_tag("llm budget: llm budget: 0.0300 needed, 0.0012 left") == "(err:budget)"
+    assert _err_tag("api 529: overloaded") == "(err:api)"
+    assert _err_tag("rate limited: 429") == "(err:rate)"
+    assert _err_tag("connection: peer reset") == "(err:net)"
+    assert _err_tag("something new") == "(err)"
+    s = _settings(tmp_path)
+
+    async def run():
+        db = await Database(s.DB_PATH).open()
+        try:
+            cid = await db.insert("candidates", {"mint": "M" * 32, "ts": now_s(), "metrics": "{}", "status": "evaluated",
+                                                 "decision": "PASS", "mean_confidence": 0.2,
+                                                 "gate_reason": "agent error: scout, analyst"})
+            for agent, err in (("scout", "llm budget: 0.03 needed, 0.00 left"), ("analyst", "llm budget: x"),
+                               ("hunter", None)):
+                await db.insert("votes", {"candidate_id": cid, "mint": "M" * 32, "agent": agent, "vote": "PASS",
+                                          "confidence": 0.0 if err else 0.6, "error": err, "ts": now_s()})
+            text = await build_status(db, s)
+        finally:
+            await db.close()
+        return text
+    text = asyncio.run(run())
+    assert "agent errors today: budget 2 (" in text
+    assert "scout=PASS/0.00(err:budget)" in text and "hunter=PASS/0.60 " in text
+
+
+def test_why_shows_every_vote_with_its_reasons_and_the_shadow_outcome(tmp_path):
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _msg, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+    http = FakeHttp([[_msg(1, "/why"), _msg(2, "/why 999"), _msg(3, "/why 1")]])
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "M" * 32, "symbol": "DESK95", "created_at": now_s() - 9000})
+            cid = await db.insert("candidates", {"mint": "M" * 32, "ts": now_s() - 8000, "metrics": "{}",
+                                                 "status": "evaluated", "decision": "PASS", "mean_confidence": 0.65,
+                                                 "gate_reason": "PASS from scout(guard: BUY evidence grounding 0.31 < 0.5)"})
+            await db.insert("votes", {"candidate_id": cid, "mint": "M" * 32, "agent": "analyst", "vote": "BUY",
+                                      "confidence": 0.72, "reasons": ["Rugcheck score 1, creator still holds 2%"],
+                                      "ts": now_s()})
+            await db.insert("votes", {"candidate_id": cid, "mint": "M" * 32, "agent": "scout", "vote": "PASS",
+                                      "confidence": 0.62, "guard": "BUY evidence grounding 0.31 < 0.5",
+                                      "reasons": ["Three posts from unrelated accounts", "no bot pattern"], "ts": now_s()})
+            await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": "M" * 32, "candidate_id": cid,
+                                          "creator": "C", "status": "closed", "size_usd": 5.0, "cost_sol": 0.04,
+                                          "proceeds_sol": 0.028, "pnl_usd": -1.5, "exit_reason": "stop_loss",
+                                          "opened_at": now_s() - 7000, "closed_at": now_s() - 1000})
+            tc = TelegramCommands(Telegram(http, s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            await tc.poll_once()
+        finally:
+            await db.close()
+    asyncio.run(go())
+    sent = [j["text"] for m, j in http.posts if m == "sendMessage"]
+    assert len(sent) == 3 and sent[0] == sent[2] and sent[1] == "no candidate #999"
+    text = sent[0]
+    assert text.startswith("#1 DESK95 " + "M" * 32) and "PASS (mean conf 0.65) · PASS from scout(guard" in text
+    assert "analyst: BUY 0.72\n  - Rugcheck score 1" in text
+    assert "scout: PASS 0.62 (guard: BUY evidence grounding 0.31 < 0.5)\n  - Three posts" in text
+    assert "shadow $5: -$1.50 (-30%) · stop loss · held" in text
+
+
+def test_why_shows_what_an_open_shadow_already_sold_and_still_holds(tmp_path):
+    """9 Oct: QI (#1013) ran 158x while its shadow was open as a runner, and /why said only
+    "shadow $10: open". It now shows the price against the entry, the sales and what is held."""
+    from bot.commands import TelegramCommands
+    from bot.telegram import Telegram
+    from tests.test_commands import FakeHttp, _settings as _cmd_settings
+    s = _cmd_settings(tmp_path)
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            await db.insert("mints", {"mint": "Q" * 32, "symbol": "QI", "created_at": now_s() - 9000})
+            cid = await db.insert("candidates", {"mint": "Q" * 32, "ts": now_s() - 8000, "metrics": "{}",
+                                                 "status": "evaluated", "decision": "PASS", "mean_confidence": 0.64,
+                                                 "gate_reason": "mean confidence 0.640 < 0.65"})
+            pid = await db.insert("positions", {"kind": "shadow", "mode": "live", "mint": "Q" * 32, "candidate_id": cid,
+                                                "creator": "C", "status": "open", "size_usd": 10.0, "cost_sol": 0.09,
+                                                "entry_price": 1e-7, "tokens_initial": 9e5, "tokens_remaining": 9e4,
+                                                "proceeds_sol": 0.4, "last_price": 1.2e-5, "peak_price": 1.58e-5,
+                                                "sol_usd_entry": 110.0, "runner_active": 1, "opened_at": now_s() - 7000})
+            for reason, price, tokens, sol in (("entry", 1e-7, 9e5, 0.09), ("take_profit", 1.6e-7, 4.5e5, 0.071),
+                                               ("core_trailing_stop", 9.1e-7, 3.6e5, 0.329)):
+                await db.insert("fills", {"position_id": pid, "ts": now_s() - 6000, "side": "buy" if reason == "entry"
+                                          else "sell", "reason": reason, "price": price, "tokens": tokens, "sol": sol})
+            tc = TelegramCommands(Telegram(FakeHttp([]), s.TELEGRAM_BOT_TOKEN, s.TELEGRAM_CHAT_ID), db, s)
+            text, _ = await tc.answer("why", str(cid))
+        finally:
+            await db.close()
+        return text
+    text = asyncio.run(go())
+    assert "shadow $10: open (runner) · now x120 the entry, peak x158" in text
+    assert "sold 90% of the tokens for 0.4000 SOL: banked +0.3190 SOL (+$35.09)" in text
+    assert "the 10% still held is worth" in text
+    assert "core trailing stop @ 9.100e-07 (x9.1 entry)" in text

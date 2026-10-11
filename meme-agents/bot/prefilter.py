@@ -63,7 +63,7 @@ def curve_liquidity_usd(st: MintState, sol_usd: float | None) -> float | None:
 
 def stage2(rug: dict | None, pair: dict | None, s: Settings, curve_liq_usd: float | None = None) -> PrefilterResult:
     r: list[str] = []
-    m: dict = {}
+    m: dict = {"curve_liquidity_usd": curve_liq_usd}   # the curve's own depth, kept apart from DexScreener's figure
     if not rug or not rug.get("has_report"):
         r.append("rugcheck report unavailable")
     else:

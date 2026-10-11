@@ -14,7 +14,7 @@ so check the linked page before you pay for anything.
 | `JUPITER_API_KEY` | Optional, live mode only | Swaps for graduated tokens | Free plan: 1 req/s |
 | `PUMPPORTAL_API_KEY` | **Not needed** (see below) | Paid per-token trade stream, off by default | 0.01 SOL per 10,000 trades from a wallet you fund |
 | `CRYPTOPANIC_TOKEN` | Optional | Extra news headlines | Paid plans only (the free plan was discontinued in early 2026). Without it the bot uses free RSS feeds. |
-| `WALLET_PRIVATE_KEY` | Live mode only | Signing live transactions | Use a brand-new wallet. The bot refuses to start live mode if it holds more than 0.5 SOL. |
+| `WALLET_PRIVATE_KEY` | Live mode only | Signing live transactions | Use a brand-new wallet. The bot refuses to start live mode if it holds more than `LIVE_MAX_WALLET_SOL` (default 0.5, at most 1). |
 
 DexScreener, Rugcheck and PumpPortal's new-token and migration stream need no key.
 

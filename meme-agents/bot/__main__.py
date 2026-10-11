@@ -8,6 +8,7 @@
     python -m bot preflight [--probe] [--seconds N] [--no-llm]   are the APIs and keys working?
     python -m bot acceptance [--minutes 60] [--sim] [--no-llm]   the brief's "Done when" test
     python -m bot live-check      run the live-mode startup checks and exit
+    python -m bot ops [--watch | --once]   run server actions queued from Telegram (the ops service)
 """
 from __future__ import annotations
 
@@ -17,14 +18,44 @@ import logging
 import math
 from dataclasses import fields
 from datetime import date
+import os
 import signal
 import sys
+import time
 
 from .config import load_settings
 from .live.guard import LiveRefused
 from .util import redact, register_secrets, setup_logging
 
 log = logging.getLogger("bot")
+
+
+def _log_refused_config(text: str) -> None:
+    """The service refusing its .env prints to stderr, which only the journal keeps and a phone cannot
+    read; the same line goes into the log file, where /log and a failed phone restart (bot/ops.py
+    startup_error) find it. Best effort: the settings that name the file are the ones being refused."""
+    from .config import ROOT, ConfigError, Settings, load_dotenv
+    s = Settings()
+    raw: dict = {}
+    try:
+        raw = load_dotenv(ROOT / ".env")
+    except ConfigError:
+        pass
+    # resolved as load_settings does: the environment over .env, and empty means the default file
+    value = os.environ["LOG_FILE"] if "LOG_FILE" in os.environ else raw.get("LOG_FILE", "")
+    if value:
+        s.LOG_FILE = value
+    try:
+        path = s.path(s.LOG_FILE)
+        if os.geteuid() == 0 and not path.exists():
+            return                              # root must not create a log the service's user cannot open
+        path.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()                       # the format setup_logging writes, to the millisecond
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) + f",{int(now * 1000) % 1000:03d}"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{stamp} ERROR   bot.__main__: {text}\n")
+    except OSError:
+        pass
 
 
 def _install_signals(engine) -> None:
@@ -162,6 +193,20 @@ async def _live_check() -> int:
     return 0
 
 
+def _ops(s, watch: bool, once: bool) -> int:
+    """The companion service behind Telegram /update, /restart, /set and /dryrun (bot/ops.py)."""
+    from .ops import format_queue, watch_once
+    from .ops import watch as watch_queue
+    if watch:
+        return watch_queue(s)
+    if once:
+        done = watch_once(s)
+        print(f"{len(done)} request(s) processed" if done else "nothing queued")
+        return 0 if all(r["ok"] for r in done) else 1
+    print(format_queue(s))
+    return 0
+
+
 def _positive_duration(value: str) -> float:
     try:
         duration = float(value)
@@ -193,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--minutes", type=_positive_duration, default=10)
     sm.add_argument("--seed", type=int, default=7)
     sub.add_parser("live-check", help="run live-mode startup checks")
+    op = sub.add_parser("ops", help="server actions queued from Telegram: list them, or run them")
+    op.add_argument("--watch", action="store_true", help="run queued actions as they arrive (the ops service)")
+    op.add_argument("--once", action="store_true", help="run what is queued now, then exit")
     st = sub.add_parser("status", help="what the bot is doing right now (safe while it runs)")
     st.add_argument("--sim", action="store_true", help="status of the simulation database")
     st.add_argument("--check", action="store_true", help="one line for monitoring; exit 1 if down or blind")
@@ -217,13 +265,33 @@ def main(argv: list[str] | None = None) -> int:
     try:
         s = load_settings(overrides=SIM_OVERRIDES if sim else None)
     except ConfigError as e:
-        print(redact(f"config error: {e}"), file=sys.stderr)
-        return 2
+        if cmd != "ops":
+            print(redact(f"config error: {e}"), file=sys.stderr)
+            if cmd == "run":
+                _log_refused_config(redact(f"config error: {e}"))
+            return 2
+        # The ops service must stay up on a broken .env: a /set from the phone is how it gets repaired.
+        from .config import ROOT, Settings, load_dotenv
+        print(redact(f"config error: {e}; the ops service runs with default settings so that /set can repair .env"),
+              file=sys.stderr)
+        s = Settings()
+        try:                                    # the paths still come from .env, so the queue is where the bot looks
+            raw = load_dotenv(ROOT / ".env")
+            for name in ("DB_PATH", "LOG_FILE", "STOP_FILE", "REPORTS_DIR"):
+                if raw.get(name):
+                    setattr(s, name, raw[name])
+        except ConfigError:
+            pass
     register_secrets(getattr(s, field.name) for field in fields(s) if not field.repr)
     # Only long-running commands write the log file.
     try:
         setup_logging(s.LOG_LEVEL, s.path(s.LOG_FILE)
                       if s.LOG_FILE and cmd in ("run", "simulate", "acceptance") else None)
+        if cmd == "run":
+            # a failed phone restart quotes only errors after this line (bot/ops.py startup_error)
+            log.info("starting (pid %d)", os.getpid())
+        if cmd == "ops":
+            return _ops(s, a.watch, a.once)
         if cmd == "run":
             coro = _run(getattr(a, "minutes", None))
         elif cmd == "report":
@@ -247,10 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(redact(f"cannot access a required file or service: {exc}. "
                      "Check the project directory, permissions and network connection."), file=sys.stderr)
+        if cmd == "run":
+            log.error("cannot access a required file or service: %s", exc)
         return 3
-    except Exception:
-        # Keep diagnostics useful while the formatter masks keys even in tracebacks.
-        log.exception("command failed; check the error below and run python -m bot preflight")
+    except Exception as exc:
+        # Keep diagnostics useful while the formatter masks keys even in tracebacks; the first line
+        # names the exception, which is what a failed phone restart quotes.
+        log.exception("command failed (%s: %s); check the error below and run python -m bot preflight",
+                      type(exc).__name__, (str(exc).splitlines() or [""])[0][:200])
         return 1
 
 

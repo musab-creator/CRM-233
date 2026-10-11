@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 
 from .budget import pace_released, utc_day, utc_month
@@ -41,6 +42,22 @@ def _read_heartbeat(raw: str | None) -> tuple[dict, str | None]:
         return {}, "heartbeat is malformed or has an invalid timestamp"
 
 
+ERROR_TAGS = (("llm budget", "budget"), ("rate limited", "rate"), ("timed out", "timeout"), ("timeout", "timeout"),
+              ("connection", "net"), ("api ", "api"), ("refusal", "refusal"), ("no vote after", "noanswer"),
+              ("invalid vote", "invalid"))
+
+
+def _err_tag(error) -> str:
+    """Why an agent failed, in a word: a budget starve and an API outage need different fixes."""
+    if not error:
+        return ""
+    e = str(error).lower()
+    for needle, tag in ERROR_TAGS:
+        if needle in e:
+            return f"(err:{tag})"
+    return "(err)"
+
+
 def _positive(value) -> float | None:
     try:
         number = float(value)
@@ -54,6 +71,21 @@ def _ago(ts: float | None, now: float) -> str:
         return "never"
     d = now - ts
     return f"{d:.0f}s ago" if d < 120 else f"{d / 60:.0f}m ago" if d < 7200 else f"{d / 3600:.1f}h ago"
+
+
+def _wallet_line(hb: dict, s: Settings, now: float) -> str:
+    """The live wallet as the bot last read it (every 5 minutes), and a warning when it holds more than
+    the startup limit: the next restart or /update would come up with live entries locked."""
+    raw, at = hb.get("wallet_sol"), _positive(hb.get("wallet_at"))
+    sol = (float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw)
+           and raw >= 0 else None)
+    if sol is None or at is None:
+        return "wallet: not read yet (the bot reads it every 5 minutes in live mode)"
+    rate = _positive(hb.get("sol_usd"))
+    usd = f" (~${sol * rate:,.2f})" if rate else ""
+    over = (f"; above the {s.LIVE_MAX_WALLET_SOL:g} SOL startup limit (LIVE_MAX_WALLET_SOL): the next restart or "
+            "/update starts with live entries locked until SOL is moved out" if sol > s.LIVE_MAX_WALLET_SOL else "")
+    return f"wallet: {sol:.4f} SOL{usd}, read {_ago(at, now)}{over}"
 
 
 async def health(db: Database, s: Settings, now: float | None = None) -> tuple[str, str]:
@@ -107,7 +139,9 @@ async def build_status(db: Database, s: Settings) -> str:
              "RUNNING" if alive and now - alive < 180 else
              "NOT RUNNING (no heartbeat in 3 min)" if alive else "never started")
     running_mode = hb.get("mode") if hb.get("mode") in ("paper", "live") else s.MODE
-    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}")
+    code = hb.get("code") if isinstance(hb.get("code"), str) and re.fullmatch(r"[0-9a-f]{7}(\+dirty)?", hb["code"]) else None
+    lines.append(f"bot: {state}, last heartbeat {_ago(alive, now)}  mode={running_mode}"
+                 + (f"  code={code}" if code else ""))
     if heartbeat_error:
         lines.append(heartbeat_error)
     if hb.get("mode") in ("paper", "live") and running_mode != s.MODE:
@@ -138,6 +172,8 @@ async def build_status(db: Database, s: Settings) -> str:
     lines.append(f"budgets: LLM ${llm:.2f} of ${s.LLM_DAILY_BUDGET_USD:.2f} today{paced}, X ${xs:.2f} of "
                  f"${s.X_MONTHLY_BUDGET_USD:.2f} this month, Helius credits {hb.get('helius_credits_month') or 0} of "
                  f"{s.HELIUS_MONTHLY_CREDITS} this month{helius}")
+    if running_mode == "live":
+        lines.append(_wallet_line(hb, s, now))
 
     start = utc_midnight(now)
     f = {}
@@ -151,6 +187,15 @@ async def build_status(db: Database, s: Settings) -> str:
     pnl = (await db.fetchone("SELECT COALESCE(SUM(pnl_usd),0) s FROM positions WHERE kind='real' AND status='closed'"
                              " AND closed_at>=?", [start]))["s"]
     lines.append("today (UTC): " + ", ".join(f"{k} {v}" for k, v in f.items()) + f", realized PnL ${pnl:+.2f}")
+    errs = await db.fetchall("SELECT v.error FROM votes v JOIN candidates c ON c.id=v.candidate_id "
+                             "WHERE c.ts>=? AND v.error IS NOT NULL AND v.error != ''", [start])
+    if errs:
+        by: dict[str, int] = {}
+        for e in errs:
+            tag = _err_tag(e["error"]).strip("()").removeprefix("err:").removeprefix("err") or "other"
+            by[tag] = by.get(tag, 0) + 1
+        lines.append("agent errors today: " + ", ".join(f"{k} {v}" for k, v in sorted(by.items(), key=lambda kv: -kv[1]))
+                     + " (an errored agent is a PASS; budget = the paced LLM budget ran out mid-evaluation)")
 
     pos = await db.fetchall("SELECT * FROM positions WHERE kind='real' AND status IN ('pending','open') "
                            "AND (mode=? OR mode IS NULL) ORDER BY id", [running_mode])
@@ -172,6 +217,12 @@ async def build_status(db: Database, s: Settings) -> str:
                      f"price {chg} vs entry, peak {peak_change}"
                      f"{', TP taken' if p['tp_done'] else ''}  net {upnl:+.4f} SOL"
                      f"{'  EXIT PENDING: ' + p['pending_exit'] if p['pending_exit'] else ''}")
+        if p.get("runner_active"):
+            share = 100 * (p["tokens_remaining"] or 0) / p["tokens_initial"] if p["tokens_initial"] else 0
+            target = p.get("runner_target_multiple") or s.RUNNER_TARGET_MULTIPLE
+            left = (p.get("runner_max_hold_hours") or s.RUNNER_MAX_HOLD_HOURS) - (now - (p["opened_at"] or now)) / 3600
+            lines.append(f"    🏃 RUNNER {share:.0f}% of the tokens, price {last / entry if entry and last else 0:.2f}x "
+                         f"of entry, target {target:g}x, time exit in {max(0.0, left):.1f} h")
 
     dec = await db.fetchall("SELECT c.id, c.mint, c.ts, c.decision, c.mean_confidence, c.gate_reason, m.symbol "
                             "FROM candidates c LEFT JOIN mints m ON m.mint=c.mint WHERE c.decision IS NOT NULL "
@@ -183,7 +234,7 @@ async def build_status(db: Database, s: Settings) -> str:
         vs = await db.fetchall("SELECT agent, vote, confidence, guard, error FROM votes WHERE candidate_id=? "
                                "ORDER BY agent", [d["id"]])
         vtxt = "  ".join(f"{v['agent']}={v['vote']}/{v['confidence'] or 0:.2f}"
-                         f"{'(guard)' if v['guard'] else ''}{'(err)' if v['error'] else ''}" for v in vs)
+                         f"{'(guard)' if v['guard'] else ''}{_err_tag(v['error'])}" for v in vs)
         when = datetime.fromtimestamp(d["ts"], timezone.utc).strftime("%H:%M")
         lines.append(f"  {when} #{d['id']} {(d['symbol'] or '?')[:10]:10s} {d['decision']:4s} "
                      f"conf {d['mean_confidence'] or 0:.2f}  {vtxt}  | {d['gate_reason']}")

@@ -42,6 +42,7 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
                                        "grounding, guard, error FROM votes"),
             "shadows": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='shadow'"),
             "reals": await db.fetchall("SELECT candidate_id FROM positions WHERE kind='real'"),
+            "insiders": await db.fetchall("SELECT candidate_id, roles FROM insiders"),
             "blocks": (await db.fetchone("SELECT COUNT(*) c FROM events WHERE kind='risk_block'"))["c"],
             "trades": (await db.fetchone("SELECT COUNT(*) c FROM trades"))["c"],
             "credits": await db.kv_get(next(iter([k["k"] for k in await db.fetchall(
@@ -79,19 +80,33 @@ def test_engine_completes_decision_cycles_without_errors(tmp_path, caplog, strea
         assert all(v["error"] is None and v["tool_calls_ok"] >= 1 for v in vs)
         assert c["decision"] in ("BUY", "PASS") and c["gate_reason"]
         flow = json.loads(c["metrics"])["flow"]
+        # the wallet-memory numbers are stored with the candidate (None until the book has loaded)
+        wm = json.loads(c["metrics"])["wallets"]
+        assert wm is None or set(wm) == {"wm_creator_launches", "wm_creator_best_x", "wm_launch_known",
+                                         "wm_launch_serial", "wm_launch_smart", "wm_launch_2x_rate"}
         if stream == "off":
             # per-token state came from the chain: curve reads, holder counts, launch-minute trades
             assert flow["source"] == "chain" and flow["launch_minute_trades"] > 0 and "error" not in flow
             assert flow["wallets_ex_dev"] >= 5 and flow["curve_reads"] >= 1
             assert json.loads(c["metrics"])["prefilter"]["inflow_source"] == "curve"
+            # its insiders were filed for the insider watch: the creator, launch buyers, top holders
+            mine = [i["roles"] for i in r["insiders"] if i["candidate_id"] == c["id"]]
+            assert len(mine) >= 5 and any("creator" in roles for roles in mine)
+            assert any("early" in roles for roles in mine) and any("top" in roles for roles in mine)
         else:
             assert "distinct_buyers_ex_dev" in flow and flow["trades"] > 0
+            # from the streamed launch minute: the creator and the launch buyers (no holder snapshot here)
+            mine = [i["roles"] for i in r["insiders"] if i["candidate_id"] == c["id"]]
+            assert any("early" in roles for roles in mine) and not any("top" in roles for roles in mine)
     if stream == "off":
         assert eng.ingest.stats["curve_reads"] > 0 and eng.ingest.stats["stream_trades"] == 0
         assert int(r["credits"]) > 0  # Helius credits are metered and persisted
     else:
         assert r["trades"] > 100 and eng.ingest.stats["stream_trades"] > 100
     assert {sh["candidate_id"] for sh in r["shadows"]} >= {c["id"] for c in r["evaluated"]}
+    assert any(json.loads(c["metrics"])["wallets"] for c in r["evaluated"])      # the book loaded and answered
+    # ... and kept from the agents until /report shows they separate winners from losers
+    assert eng.llm.contexts and not any('"wallets"' in ctx or "wm_launch" in ctx for ctx in eng.llm.contexts)
     assert any("DECISION" in rec.getMessage() for rec in caplog.records)
     # grounded BUYs must survive the guard (a guard that rejects everything would pass silently otherwise)
     assert any(v["raw_vote"] == "BUY" and v["vote"] == "BUY" and v["guard"] is None for v in r["votes"])
