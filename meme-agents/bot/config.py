@@ -121,7 +121,13 @@ class Settings:
 
     # --- consensus -------------------------------------------------------------
     CONSENSUS_MIN_MEAN_CONFIDENCE: float = 0.65
-    GATE_NEUTRAL_VOTES: bool = True           # Scout/Hunter: "nothing found" is a neutral BUY (0.5-0.6), not a PASS
+    GATE_NEUTRAL_VOTES: bool = True           # Scout/Hunter: "nothing found" is a neutral BUY, not a PASS
+    # The neutral vote: what Scout and Hunter say when they find nothing against a coin. With the gate's
+    # mean floor it sets the Analyst's bar, 3 x the floor - 2 x this. 11 Oct: at 0.6 the Analyst needed
+    # 0.75; its BUYs at 0.70 or more had the same win rate (34%) over nearly twice the coins (244 against
+    # 130) and a better average return (-16% against -20%). Never above the floor: the Analyst must at
+    # least reach the floor on its own.
+    NEUTRAL_VOTE_CONFIDENCE: float = 0.625
 
     # --- paper costs -----------------------------------------------------------
     PUMPFUN_FEE_PCT: float = 1.0
@@ -424,6 +430,8 @@ def validate_settings(s: Settings) -> None:
                  "VETO_MIN_CONFIDENCE", "TAKE_PROFIT_SELL_FRACTION", "REGIME_MIN_MULTIPLIER"):
         if not 0 < getattr(s, name) <= 1:
             raise ConfigError(f"{name} must be greater than zero and at most one")
+    if not 0.5 <= s.NEUTRAL_VOTE_CONFIDENCE <= 0.65 or s.NEUTRAL_VOTE_CONFIDENCE > s.CONSENSUS_MIN_MEAN_CONFIDENCE:
+        raise ConfigError("NEUTRAL_VOTE_CONFIDENCE must be between 0.5 and 0.65, and at most CONSENSUS_MIN_MEAN_CONFIDENCE")
     if not 0 <= s.ENTRY_MAX_LIQ_SLIP_PCT < 100:
         raise ConfigError("ENTRY_MAX_LIQ_SLIP_PCT must be at least 0 and below 100")
     for name in ("DAILY_LOSS_CAP_PCT", "STOP_LOSS_PCT", "TRAILING_STOP_PCT",

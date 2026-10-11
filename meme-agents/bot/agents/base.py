@@ -132,8 +132,9 @@ def validate_vote(agent: str, data: Any, with_size: bool) -> Vote:
     return Vote(agent, v, float(c), [r[:400] for r in reasons][:10], [e[:400] for e in evidence][:15], size)
 
 
-NEUTRAL_MAX_CONFIDENCE = 0.6          # a BUY at or below this, from a neutral-mode Scout or Hunter, ...
-NEUTRAL_AGENTS = ("scout", "hunter")  # ... claims nothing positive: "I looked and found nothing against it"
+# A BUY at or below the neutral vote (NEUTRAL_VOTE_CONFIDENCE), from a neutral-mode Scout or Hunter, claims
+# nothing positive: "I looked and found nothing against it".
+NEUTRAL_AGENTS = ("scout", "hunter")
 NEUTRAL_CLAIM_CONFIDENCE = 0.7        # from here up a neutral-mode BUY claims attention or a catalyst: grounded or PASS
 
 
@@ -284,7 +285,8 @@ async def run_agent(client: anthropic.AsyncAnthropic, s: Settings, spec: AgentSp
                 if b.name == "submit_vote":
                     vote = validate_vote(spec.name, b.input, spec.with_size)
                     vote.cost_usd, vote.turns = total_cost, turns
-                    neutral = NEUTRAL_MAX_CONFIDENCE if (s.GATE_NEUTRAL_VOTES and spec.name in NEUTRAL_AGENTS) else None
+                    neutral = (s.NEUTRAL_VOTE_CONFIDENCE if (s.GATE_NEUTRAL_VOTES and spec.name in NEUTRAL_AGENTS)
+                               else None)
                     return apply_grounding_guard(vote, ctx_corpus, tool_corpus, tool_calls_ok,
                                                  s.AGENT_MIN_GROUNDING, neutral_max_conf=neutral)
             if not uses:

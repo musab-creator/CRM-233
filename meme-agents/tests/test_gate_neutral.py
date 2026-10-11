@@ -1,12 +1,16 @@
 """GATE_NEUTRAL_VOTES prompts, and forced submit_vote / submit_regime tool choice: the model can
 no longer answer in prose and burn the evaluation (the live cause of 90 triage errors in a day)."""
 import asyncio
+
+import pytest
 from types import SimpleNamespace
 
 
-from bot.agents.base import NEUTRAL_MAX_CONFIDENCE, AgentSpec, Vote, apply_grounding_guard, run_agent
+from bot.agents.base import AgentSpec, Vote, apply_grounding_guard, run_agent
 from bot.agents.grounding import Corpus
-from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, TRIAGE, role_prompt
+from bot.agents.prompts import NEUTRAL_PROMPTS, ROLE_PROMPTS, TRIAGE, analyst_bar, role_prompt
+
+NEUTRAL_MAX_CONFIDENCE = 0.6      # the guard at the old neutral vote: its band logic is unchanged
 from bot.agents.triage import run_triage
 from bot.budget import Budget
 from bot.config import Settings, load_settings
@@ -23,8 +27,9 @@ def test_role_prompt_variants():
     # strict: no catalyst / no attention means PASS; neutral: it is a low-confidence BUY
     assert "No catalyst found still means PASS" in role_prompt("hunter")
     assert "No catalyst found still means PASS" not in role_prompt("hunter", True)
-    assert "neutral" in role_prompt("hunter", True) and "BUY at 0.6" in role_prompt("scout", True)
-    assert "0.75 or more" in role_prompt("analyst", True) and "exactly 0.6" in role_prompt("hunter", True)
+    assert "neutral" in role_prompt("hunter", True) and "BUY at 0.625 when" in role_prompt("scout", True)
+    assert "at 0.7 or more when several facts agree" in role_prompt("analyst", True)
+    assert "exactly 0.625, not lower" in role_prompt("hunter", True)
     assert "Most candidates should be PASS" in role_prompt("scout") and "Most candidates" not in role_prompt("scout", True)
     # the veto and triage prompts are unchanged by the flag
     for name in ("triage", "forensics", "social"):
@@ -152,7 +157,7 @@ def test_the_analyst_weighs_the_flow_fields_by_the_recorded_outcomes():
     assert "(-25% against -25%, 22% winners against 26%)" in TRIAGE and "-33% against -34%" not in TRIAGE
     neutral = NEUTRAL_PROMPTS["analyst"].split("Your vote carries the decision", 1)[1]
     assert "launch buyers still holding" in neutral and "creator still in" not in neutral
-    assert "0.75 or more" in neutral                                                  # the gate is unchanged
+    assert "at 0.7 or more when several facts agree" in neutral      # the Analyst's bar at the 0.625 neutral vote
 
 
 def _corpora():
@@ -197,10 +202,96 @@ def test_neutral_buy_is_exempt_from_the_grounding_share_but_not_from_looking():
                                  neutral_max_conf=NEUTRAL_MAX_CONFIDENCE).vote == "PASS"
 
 
-def test_two_neutral_votes_and_an_analyst_at_075_reach_the_gate_floor():
-    assert round((0.6 + 0.6 + 0.75) / 3, 4) >= 0.65          # the lowest passing combination
-    assert round((0.6 + 0.6 + 0.74) / 3, 4) < 0.65
-    assert round((0.55 + 0.53 + 0.82) / 3, 4) < 0.65         # FORM8 at 21:46Z would still have failed the mean
+def test_the_neutral_vote_sets_the_analysts_bar_and_the_prompts_follow_the_settings(s):
+    """11 Oct: at a 0.6 neutral the Analyst needed 0.75 (RUNNER at 0.72 was refused on the arithmetic alone);
+    its BUYs at 0.70 or more had the same 34% win rate over 244 coins against 130. The neutral vote is a setting:
+    two neutrals and the Analyst at the bar reach the 0.65 gate exactly, the gate itself is unchanged, and every
+    neutral prompt states the numbers the bot runs with."""
+    assert analyst_bar(0.65, 0.625) == 0.7 and analyst_bar(0.65, 0.6) == 0.75 and analyst_bar(0.7, 0.625) == 0.85
+    assert round((0.625 + 0.625 + 0.70) / 3, 4) >= 0.65 and round((0.625 + 0.625 + 0.69) / 3, 4) < 0.65
+    assert round((0.6 + 0.6 + 0.74) / 3, 4) < 0.65           # the old arithmetic
+    assert round((0.55 + 0.53 + 0.82) / 3, 4) < 0.65         # FORM8 at 21:46Z would still fail the mean
+    from bot.agents.tools import ToolContext, analyst_spec, hunter_spec, scout_spec
+    s.NEUTRAL_VOTE_CONFIDENCE = 0.6
+    ctx = ToolContext(s, None, None, None, None, None, None, {"mint": "m"})
+    for spec in (scout_spec(ctx), hunter_spec(ctx), analyst_spec(ctx)):
+        assert "0.6 is the neutral vote" in spec.system and "exactly 0.6, not lower" in spec.system
+        assert "need the Analyst at 0.75 or more for the mean to reach 0.65" in spec.system
+        assert "0.625" not in spec.system
+    assert "lift it above 0.6. BUY at 0.6 when X and the profile" in scout_spec(ctx).system
+    assert "vote BUY at 0.6 and say" in hunter_spec(ctx).system
+    assert "at 0.75 or more when several facts agree" in analyst_spec(ctx).system
+    s.NEUTRAL_VOTE_CONFIDENCE, s.CONSENSUS_MIN_MEAN_CONFIDENCE = 0.625, 0.7
+    text = analyst_spec(ctx).system
+    assert "mean confidence is at least 0.7," in text and "at 0.85 or more when several facts agree" in text
+    assert "two neutral votes at 0.625 need the Analyst at 0.85 or more for the mean to reach 0.7" in text
+    assert role_prompt("analyst", True) == NEUTRAL_PROMPTS["analyst"]        # the defaults keep the literal text
+    # the setting is bounded: never above the gate's floor, never above 0.65 or below 0.5
+    from bot.config import ConfigError, validate_settings
+    s.CONSENSUS_MIN_MEAN_CONFIDENCE = 0.65
+    for bad in (0.66, 0.45):
+        s.NEUTRAL_VOTE_CONFIDENCE = bad
+        with pytest.raises(ConfigError, match="NEUTRAL_VOTE_CONFIDENCE"):
+            validate_settings(s)
+    s.NEUTRAL_VOTE_CONFIDENCE = 0.65
+    validate_settings(s)
+    s.CONSENSUS_MIN_MEAN_CONFIDENCE = 0.64
+    with pytest.raises(ConfigError, match="NEUTRAL_VOTE_CONFIDENCE"):
+        validate_settings(s)                                                 # never above the floor
+
+
+def test_the_agent_loop_holds_a_mild_buy_to_the_configured_neutral_vote(s):
+    """A Scout BUY a little above neutral on evidence the matcher cannot credit is held to the neutral vote
+    the bot runs with (0.625 by default, 0.6 when set so), not to a constant."""
+    spec = AgentSpec("scout", "Your role: Scout", [], {})
+
+    def mild(conf):
+        data = {"vote": "BUY", "confidence": conf, "reasons": ["one link-only post"], "evidence": ["1 post, link-only"]}
+        return SimpleNamespace(content=[SimpleNamespace(type="tool_use", id="t1", name="submit_vote", input=data)],
+                               stop_reason="tool_use", usage=_usage())
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            # a tool call first (the neutral vote still needs a successful lookup), then the vote
+            looked = SimpleNamespace(content=[SimpleNamespace(type="tool_use", id="x1", name="x_search",
+                                                              input={"query": "$X"})],
+                                     stop_reason="tool_use", usage=_usage())
+            spec.impl["x_search"] = lambda a: _ok({"results": 0})
+            out = []
+            for setting in (0.625, 0.6):
+                s.NEUTRAL_VOTE_CONFIDENCE = setting
+                v = await run_agent(RecordingClient([looked, mild(0.64)]), s, spec, "ctx", Budget(db, "llm", 5, "day"))
+                out.append((v.vote, v.confidence, v.guard))
+            s.GATE_NEUTRAL_VOTES = False
+            v = await run_agent(RecordingClient([looked, mild(0.64)]), s, spec, "ctx", Budget(db, "llm", 5, "day"))
+            out.append((v.vote, v.confidence, v.guard))
+            return out
+        finally:
+            await db.close()
+    held_625, held_6, strict = asyncio.run(go())
+    assert held_625 == ("BUY", 0.625, "BUY 0.64 held to the neutral 0.625: evidence grounding 0.00 < 0.5")
+    assert held_6 == ("BUY", 0.6, "BUY 0.64 held to the neutral 0.6: evidence grounding 0.00 < 0.5")
+    assert strict[0] == "PASS" and strict[2] == "BUY evidence grounding 0.00 < 0.5"   # strict mode: no neutral band
+
+
+async def _ok(value):
+    return value
+
+
+def test_scout_and_hunter_pass_only_on_hard_findings():
+    """11 Oct, 1,656 votes each: Scout's PASSes (about half its votes) picked losers 78% of the time and Hunter's
+    79%, against a 77% base rate, so they removed trades at random. A PASS now needs a named hard finding at 0.7
+    or more; no posts, bot listing posts, a generic name or a name borrowed from a person stay neutral."""
+    scout, hunter = NEUTRAL_PROMPTS["scout"], NEUTRAL_PROMPTS["hunter"]
+    assert "PASS only on a hard finding, with confidence 0.7 or more" in scout and "coordinated spam" in scout
+    assert "78% against a 77% base rate over 639 scored PASSes" in scout
+    assert "or a copy of a known token" not in scout and "a deceptive name or metadata" not in scout
+    assert "generic \\\nor borrowed meme name" in scout or "or borrowed meme name" in scout
+    assert "PASS only on a hard finding, with confidence 0.7 or more" in hunter
+    assert "is the normal pump.fun meme and is not a finding" in hunter
+    assert "79% against a 77% base rate over 201 scored PASSes" in hunter
+    assert "in a way that would mislead buyers" not in hunter
 
 
 def test_the_analyst_proposes_sizes_inside_the_configured_range(s):

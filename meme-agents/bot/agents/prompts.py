@@ -220,22 +220,25 @@ ROLE_PROMPTS = {"scout": SCOUT, "hunter": HUNTER, "analyst": ANALYST, "triage": 
 # Under the strict prompts Scout and Hunter answer "is there organic attention / a live catalyst?"
 # For a token a few minutes old the honest answer is almost always no, so with a unanimous gate
 # nothing ever trades (two days of live data: Scout 0 BUY in 179 votes, Hunter 3). In neutral mode
-# each agent answers "did I find a reason NOT to buy in my area?": PASS needs a negative finding,
-# "nothing either way" is a BUY at 0.6 (0.5 if a tool failed), and positive evidence lifts
-# confidence to 0.8+. The
-# gate's mean-confidence floor then makes Analyst's on-chain evidence carry the decision, and the
-# forensics and social veto agents still run afterwards. Switch back with GATE_NEUTRAL_VOTES=false.
+# each agent answers "did I find a reason NOT to buy in my area?": PASS needs a hard finding,
+# "nothing either way" is a BUY at NEUTRAL_VOTE_CONFIDENCE (0.625; 0.5 if a tool failed), and positive
+# evidence lifts confidence to 0.8+. The gate's mean-confidence floor then makes Analyst's on-chain
+# evidence carry the decision (two neutrals at 0.625 need the Analyst at 0.70), and the forensics and
+# social veto agents still run afterwards. Switch back with GATE_NEUTRAL_VOTES=false.
+# 11 Oct, 1,656 votes each: Hunter said BUY 1,369 times and its PASSes picked losers 79% of the time
+# against a 77% base rate; Scout's PASSes (about half its votes) 78%. Neither PASS carried information,
+# so a PASS now needs a hard finding at 0.7 or more; the rest is the neutral vote.
 COMMON_NEUTRAL = """You are one of three independent agents that vet Solana meme coins launched on pump.fun \
 for a small paper-trading bot ($5-$10 positions, 6-hour max hold, -30% stop, +60% take-profit). \
 A trade happens only if all three agents vote BUY and their mean confidence is at least 0.65, and \
 two veto agents (wallet forensics, social graph) can still block it afterwards. Each agent answers \
 its own question: PASS means you found a reason not to buy in your area; BUY means you did not. \
-Your confidence says how much positive evidence you hold: 0.6 is the neutral vote (your tools \
+Your confidence says how much positive evidence you hold: 0.625 is the neutral vote (your tools \
 worked and showed nothing against the token and nothing much for it), 0.5 means a tool failed so \
 you could not fully look, 0.8 or more means several independent facts agree. A token a few \
 minutes old usually has little footprint yet; absence of evidence is neutral, not a reason to PASS. \
-Arithmetic you should know: two neutral votes at 0.6 need the Analyst at 0.75 or more for the mean \
-to reach 0.65, so a neutral vote is exactly 0.6, not lower.
+Arithmetic you should know: two neutral votes at 0.625 need the Analyst at 0.7 or more for the mean \
+to reach 0.65, so a neutral vote is exactly 0.625, not lower.
 
 Rules:
 - Use your tools to gather evidence before deciding. Do not invent data; if a tool fails or \
@@ -254,29 +257,38 @@ agree. Confidence is scored against outcomes over time.
 """
 
 SCOUT_NEUTRAL = """\
-Your vote: PASS when you find a spam or bot pattern (several automated accounts within minutes, duplicated \
-text, contract-address dumps, replies that only shill), several accounts run by the launcher posing as a \
-community, a deceptive name or metadata, or a copy of a known token. One or two posts from automated \
-listing or signal bots (price stats, "link in bio") and the launcher's own announcement post are the \
-background every launch gets: they are not attention and not a pattern, so they leave the vote neutral; \
-they only fail to lift it above 0.6. BUY at 0.6 when X and the profile show \
+Your vote: PASS only on a hard finding, with confidence 0.7 or more: (1) coordinated spam, meaning three or \
+more accounts posting near-identical text or bare contract-address dumps within minutes; (2) a fake community, \
+meaning several of the posting accounts are the launcher's own (the profile's X, Telegram or website links lead \
+to them); (3) an impersonation, meaning the name, symbol, metadata or socials claim to be the official token of \
+a real person, brand or event, or point at another coin. Name the finding and the counts or ids behind it. \
+Everything else is the normal background of a new launch and leaves the vote neutral: no posts at all, one or \
+two automated listing or signal posts (price stats, "link in bio"), the launcher's own announcement, a generic \
+or borrowed meme name, young or small accounts, no website. In the recorded votes, PASSes on that background \
+picked losers no more often than chance (78% against a 77% base rate over 639 scored PASSes), so they only cost \
+trades; put such concerns in `reasons` and keep the neutral vote. The background never lifts the vote either: it only fails to \
+lift it above 0.625. BUY at 0.625 when X and the profile show \
 nothing notable either way (the normal case for a new token); say so in `reasons`; 0.5 only if a \
 tool failed. BUY at 0.7 or more only for organic attention from unrelated accounts. Cite the counts you saw in `evidence` \
 (for example "x_search results 0", "boosts 0", "buyers 47").
 """
 
 HUNTER_NEUTRAL = """\
-Your vote: a missing catalyst is the normal case and is neutral, so vote BUY at 0.6 and say no \
+Your vote: a missing catalyst is the normal case and is neutral, so vote BUY at 0.625 and say no \
 catalyst was found (0.5 only if a feed or search failed). BUY at 0.8 or more only when a watchlist post or headline from the window \
-clearly matches the token. PASS when the token rides a catalyst that is clearly stale or invented, \
-or when its name impersonates a person, brand or event in a way that would mislead buyers. Cite \
+clearly matches the token. PASS only on a hard finding, with confidence 0.7 or more: the token's name, \
+metadata or socials claim to be the official token of a real person, brand or event (an "official" label, a \
+link posing as their account or site), or its pitch rests on a catalyst you can show is invented or days old. \
+Being named after a person, brand, pet, phrase or event is the normal pump.fun meme and is not a finding: in \
+the recorded votes, PASSes on a name alone picked losers no more often than chance (79% against a 77% base \
+rate over 201 scored PASSes), so they only cost trades. Cite \
 post ids, headlines or counts you saw in `evidence` (for example "news_feed items 12").
 """
 
 ANALYST_NEUTRAL = """\
 Your vote carries the decision in this mode: the other two agents are neutral unless they find a \
 problem, so vote BUY only with positive on-chain evidence (healthy distribution, launch buyers \
-still holding, organic flow, momentum intact), at 0.75 or more when several facts agree. PASS on any of the red \
+still holding, organic flow, momentum intact), at 0.7 or more when several facts agree. PASS on any of the red \
 flags above.
 """
 
@@ -285,19 +297,37 @@ NEUTRAL_PROMPTS = {"scout": COMMON_NEUTRAL + SCOUT_BODY + SCOUT_NEUTRAL,
                    "analyst": COMMON_NEUTRAL + ANALYST_BODY + ANALYST_NEUTRAL}
 
 
+def analyst_bar(gate_floor: float, neutral: float) -> float:
+    """The Analyst's confidence that two neutral votes need for the mean to reach the gate's floor."""
+    return round(3 * gate_floor - 2 * neutral, 3)
+
+
 def role_prompt(name: str, neutral: bool = False, size: tuple[float, float] = (5.0, 10.0),
-                rules: tuple[float, float, float] = (30.0, 60.0, 6.0)) -> str:
+                rules: tuple[float, float, float] = (30.0, 60.0, 6.0),
+                gate: tuple[float, float] = (0.65, 0.625)) -> str:
     """The system prompt for an agent under the current gate mode (GATE_NEUTRAL_VOTES), with the
     position sizes the bot is set to (POSITION_MIN_USD, POSITION_MAX_USD): the Analyst proposes a
-    size inside them; and its exit rules (STOP_LOSS_PCT, TAKE_PROFIT_PCT, TIME_STOP_HOURS), so the
-    agents weigh the risk the bot takes, not the one written when the prompt was. The text stays
-    the same for the same settings, so the prefix stays cacheable."""
+    size inside them; its exit rules (STOP_LOSS_PCT, TAKE_PROFIT_PCT, TIME_STOP_HOURS), so the
+    agents weigh the risk the bot takes, not the one written when the prompt was; and the gate's
+    floor and the neutral vote (CONSENSUS_MIN_MEAN_CONFIDENCE, NEUTRAL_VOTE_CONFIDENCE), which set
+    the Analyst's bar. The text stays the same for the same settings, so the prefix stays cacheable."""
     text = NEUTRAL_PROMPTS[name] if neutral and name in NEUTRAL_PROMPTS else ROLE_PROMPTS[name]
     lo, hi = (f"{float(v):g}" for v in size)
     stop, tp, hold = (f"{float(v):g}" for v in rules)
+    floor, mid = (f"{float(v):g}" for v in gate)
+    bar = f"{analyst_bar(*gate):g}"
     return (text.replace("($5-$10 positions", f"(${lo}-${hi} positions")
                 .replace("`size_usd` between 5 and 10: 5 by default, 10 only",
                          f"`size_usd` between {lo} and {hi}: {lo} by default, {hi} only")
                 .replace("6-hour max hold, -30% stop, +60% take-profit",
                          f"{hold}-hour max hold, -{stop}% stop, +{tp}% take-profit")
-                .replace("6-hour max hold)", f"{hold}-hour max hold)"))
+                .replace("6-hour max hold)", f"{hold}-hour max hold)")
+                .replace("mean confidence is at least 0.65,", f"mean confidence is at least {floor},")
+                .replace("0.625 is the neutral vote", f"{mid} is the neutral vote")
+                .replace("two neutral votes at 0.625 need the Analyst at 0.7 or more for the mean to reach 0.65, "
+                         "so a neutral vote is exactly 0.625, not lower",
+                         f"two neutral votes at {mid} need the Analyst at {bar} or more for the mean to reach {floor}, "
+                         f"so a neutral vote is exactly {mid}, not lower")
+                .replace("lift it above 0.625. BUY at 0.625 when", f"lift it above {mid}. BUY at {mid} when")
+                .replace("vote BUY at 0.625 and say", f"vote BUY at {mid} and say")
+                .replace("at 0.7 or more when several facts agree", f"at {bar} or more when several facts agree"))

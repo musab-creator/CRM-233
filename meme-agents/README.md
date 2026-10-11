@@ -153,15 +153,23 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
    asks Scout "is there organic attention?" and Hunter "is there a live catalyst?", and a token
    a few minutes old almost never has either, so in two days of live data Scout voted BUY 0
    times in 179 and nothing traded. Neutral mode asks each agent "did you find a reason not to
-   buy in your area?": spam, bots or a deceptive name are a PASS from Scout, a stale or invented
-   catalyst a PASS from Hunter, and "nothing either way" is a BUY at confidence 0.6 (0.5 when a
-   tool failed). Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence
-   floor then means Analyst's on-chain evidence has to carry the decision (0.6 + 0.6 + 0.75 is
-   the lowest unanimous BUY that passes), and the veto stage still runs. A neutral BUY is exempt
-   from the evidence-grounding share of the guard, because its evidence is the absence of
-   findings; it still needs a successful tool call. A Scout or Hunter BUY between 0.6 and 0.7 on
-   evidence the guard cannot credit is held to the neutral 0.6 rather than flipped to PASS; from
-   0.7 up it is guarded in full.
+   buy in your area?", and only a hard finding is a PASS: from Scout, coordinated spam (three or
+   more accounts with near-identical text), a fake community run from the launcher's own accounts,
+   or an impersonation claiming to be a real brand's or person's official token; from Hunter, the
+   same impersonation or a pitch resting on a catalyst shown to be invented or days old. Being named
+   after someone, having no posts, bot listing posts or a generic name is the normal background and
+   stays neutral (11 Oct: PASSes on that background picked losers at the base rate over 840 scored
+   PASSes). "Nothing either way" is a BUY at the neutral vote, `NEUTRAL_VOTE_CONFIDENCE` (0.625; 0.5
+   when a tool failed). Positive evidence lifts confidence to 0.8 or more. The 0.65 mean-confidence
+   floor then means Analyst's on-chain evidence has to carry the decision: two neutral votes need
+   the Analyst at 3 × 0.65 − 2 × 0.625 = 0.70, so 0.625 + 0.625 + 0.70 is the lowest unanimous BUY
+   that passes (at the old 0.6 neutral the Analyst needed 0.75; its BUYs at 0.70 had the same win
+   rate over nearly twice the coins). The neutral vote is phone-settable between 0.5 and 0.65 and
+   never above the floor, so the Analyst must at least reach the floor on its own; the gate itself
+   is unchanged. The veto stage still runs. A neutral BUY is exempt from the evidence-grounding share
+   of the guard, because its evidence is the absence of findings; it still needs a successful tool
+   call. A Scout or Hunter BUY between the neutral vote and 0.7 on evidence the guard cannot credit
+   is held to the neutral vote rather than flipped to PASS; from 0.7 up it is guarded in full.
 
    **Veto stage.** A unanimous BUY then goes to two more agents, which run only at this point
    so their cost falls on the rare BUY, not on every candidate. They can turn the BUY into a
@@ -237,8 +245,8 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
 - **Gate what-if.** The recorded votes are replayed through the gate at mean-confidence
   thresholds from 0.50 to 0.90, both unanimous and 2-of-3, plus *analyst BUY alone* by the
   Analyst's own confidence: under `GATE_NEUTRAL_VOTES` the gate reduces to an Analyst BUY at
-  0.75 or more with nothing found against the token, so that row is the lower bound of what
-  the live gate selects. A *pre-filter only* baseline row sits on top. If no gate row beats
+  the bar the neutral vote sets (0.70 at the 0.625 default) with nothing found against the token,
+  so that row is the lower bound of what the live gate selects. A *pre-filter only* baseline row sits on top. If no gate row beats
   the baseline over a few hundred candidates, the agents are not earning their cost. That is
   the time to change prompts or thresholds.
 - **Signal check.** For each flow feature, it compares the outcomes of candidates above and

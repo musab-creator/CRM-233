@@ -243,9 +243,10 @@ def gate_sweep(scored: list[dict], thresholds=(0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 
         for t in thresholds:
             sel = [r for r in scored if r["buys"] >= need and r["mean_conf"] >= t]
             rows.append({"rule": label, "threshold": t, **_bucket(sel)})
-    # Under GATE_NEUTRAL_VOTES the gate reduces to "Analyst BUY at 0.75+, nothing found against the
-    # token by Scout or Hunter", so the Analyst's own BUYs by confidence are the lower bound of what
-    # the live gate would select; a Scout or Hunter PASS can only remove candidates from this set.
+    # Under GATE_NEUTRAL_VOTES the gate reduces to "Analyst BUY at the bar the neutral vote sets (0.70 at
+    # the 0.625 default, 0.75 at 0.6), nothing found against the token by Scout or Hunter", so the
+    # Analyst's own BUYs by confidence are the lower bound of what the live gate would select; a Scout
+    # or Hunter PASS can only remove candidates from this set.
     for t in (0.65, 0.7, 0.75, 0.8, 0.85, 0.9):
         sel = [r for r in scored if r.get("analyst_buy") and (r.get("analyst_conf") or 0) >= t]
         rows.append({"rule": "analyst BUY alone", "threshold": t, **_bucket(sel)})

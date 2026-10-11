@@ -110,6 +110,7 @@ SETTABLE: dict[str, object] = {
     "URGENT_PRIORITY_FEE_SOL": (float, 0.0005, 0.004),
     "CONSENSUS_MIN_MEAN_CONFIDENCE": (float, 0.65, 1.0),
     "GATE_NEUTRAL_VOTES": bool,
+    "NEUTRAL_VOTE_CONFIDENCE": (float, 0.5, 0.65),
     "TRIAGE_ENABLED": bool,
     "TRIAGE_MIN_CONFIDENCE": (float, 0.5, 1.0),
     "VETO_ENABLED": bool,

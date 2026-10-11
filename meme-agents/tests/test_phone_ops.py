@@ -124,6 +124,7 @@ def test_settable_allowlist_and_bounds(tmp_path):
     assert ops.allowed("POSITION_MAX_USD") == "1 to 20" and ops.allowed("TELEGRAM_DIGEST") == "all/wins/off"
     assert ops.allowed("LIVE_DRY_RUN") == "true only" and ops.allowed("TRIAGE_ENABLED") == "true/false"
     assert ops.SETTABLE["CONSENSUS_MIN_MEAN_CONFIDENCE"][1] == 0.65     # the brief's gate cannot be lowered
+    assert ops.SETTABLE["NEUTRAL_VOTE_CONFIDENCE"] == (float, 0.5, 0.65)  # the neutral vote never above the floor
     words = ("KEY", "TOKEN", "SECRET", "PRIVATE", "URL", "PATH", "FILE", "DIR", "MODE", "CONFIRM", "WALLET", "CHAT")
     assert not [k for k in ops.SETTABLE if any(w in k for w in words)]
 
