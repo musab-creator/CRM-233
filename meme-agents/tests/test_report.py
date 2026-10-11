@@ -232,3 +232,64 @@ def test_open_runners_count_at_todays_price_in_the_shadow_totals(s):
     assert "over 4 (2 of them open runners at today's price)" in text
     assert "(2 of these coins are open runners at today's price; today's price = " in text
     assert "open runner" in text and "; the 2 open runners count at today's price" in text
+
+
+def test_real_trades_are_measured_against_their_own_shadows(s):
+    """11 Oct: live trades lost about -31% a trade against about -20% for the shadow rows matching the live
+    gate. The same coin's shadow holds the selection equal, so the gap is what execution cost."""
+    from bot.paper import open_result
+    from bot.report import execution_gap, report_section
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            def real(cid, cost, pnl, entry, exit_reason):
+                return db.insert("positions", {"mint": f"M{cid}", "candidate_id": cid, "kind": "real", "mode": s.MODE,
+                                               "status": "closed", "size_usd": 10.0, "cost_sol": cost, "pnl_sol": pnl,
+                                               "pnl_usd": pnl * 100, "entry_price": entry, "exit_reason": exit_reason,
+                                               "sol_usd_entry": 100.0, "opened_at": 1.0, "closed_at": 2.0})
+
+            def shadow(cid, cost, pnl, entry, exit_reason):
+                return db.insert("positions", {"mint": f"M{cid}", "candidate_id": cid, "kind": "shadow",
+                                               "status": "closed", "cost_sol": cost, "pnl_sol": pnl, "pnl_usd": pnl * 100,
+                                               "entry_price": entry, "exit_reason": exit_reason, "opened_at": 1.0,
+                                               "closed_at": 2.0})
+            await real(1, 0.1, -0.03, 1.1e-7, "stop_loss")             # -30% live, -10% shadow: 20 points lost
+            await shadow(1, 0.05, -0.005, 1e-7, "stop_loss")
+            await shadow(1, 0.05, -0.02, 1e-7, "time_stop")            # an older shadow on the same coin: ignored
+            await db.execute("UPDATE positions SET closed_at=1.5 WHERE candidate_id=1 AND exit_reason='time_stop'")
+            await real(2, 0.1, 0.02, 0.95e-7, "trailing_stop")         # +20% live, -20% shadow: the live trade won
+            await shadow(2, 0.05, -0.01, 1e-7, "stop_loss")
+            await real(3, 0.1, -0.01, 1e-7, "emergency_insider_sell")  # -10% live; its shadow is an open runner
+            runner = await db.insert("positions", {"mint": "M3", "candidate_id": 3, "kind": "shadow", "status": "open",
+                                                   "runner_active": 1, "cost_sol": 0.05, "proceeds_sol": 0.12,
+                                                   "tokens_initial": 1e6, "tokens_remaining": 1e5, "entry_price": 1e-7,
+                                                   "last_price": 5e-6, "sol_usd_entry": 150.0, "opened_at": 1.0})
+            await real(4, 0.1, -0.05, 1e-7, "stop_loss")               # no shadow at all: left out, counted
+            x = await execution_gap(db, s)
+            r = await build_report(db, s)
+            row = await db.fetchone("SELECT * FROM positions WHERE id=?", [runner])
+            return x, r, open_result(row, s)["ret"]
+        finally:
+            await db.close()
+    x, r, runner_ret = asyncio.run(go())
+    gaps = sorted([-0.3 - (-0.1), 0.2 - (-0.2), -0.1 - runner_ret])
+    assert x["n"] == 3 and x["unpaired"] == 1 and x["open_shadows"] == 1
+    assert x["median_gap"] == pytest.approx(gaps[1]) and x["mean_gap"] == pytest.approx(sum(gaps) / 3)
+    assert x["gap_sol"] == pytest.approx(0.1 * sum(gaps)) and x["gap_usd"] == pytest.approx(0.1 * sum(gaps) * 100)
+    assert x["median_entry_gap"] == pytest.approx(0.0)                 # +10%, -5%, 0%: the middle one
+    assert (x["same_exit"], x["shadow_won_real_lost"], x["real_won_shadow_lost"]) == (1, 1, 1)
+    text = render_text(r)
+    assert "== Real trades against their own shadows (same coin, same decision; the shadow ran the paper rules) ==" in text
+    assert f"3 pairs (1 without a shadow to compare): the paper trade returned a median {gaps[1] * 100:+.1f} points " \
+           f"against its shadow (mean {sum(gaps) / 3 * 100:+.1f}); it bought a median +0.0% from the shadow's entry " \
+           f"price; at the paper stake that is {0.1 * sum(gaps):+.4f} SOL / ${0.1 * sum(gaps) * 100:+.2f}" in text
+    assert ("same exit on both 1 of 3; the shadow won where the paper trade lost 1; the paper trade won where the "
+            "shadow lost 1; 1 shadow still open as a runner, at today's price") in text
+    # one section at a time, for the phone
+    section = report_section(text, "execution")
+    assert section.startswith("== Real trades against") and "== Per-agent" not in section and "same exit on both" in section
+    assert report_section(text, "Gate").startswith("== Gate what-if") and "== Signal" not in report_section(text, "gate")
+    assert report_section(text, "bogus").startswith("/report takes one of: summary, day, execution, agents, gate")
+    assert report_section(text, "dips") == "the report has no dips section right now"
+    assert "a shadow stakes POSITION_MIN_USD, now $5" in text

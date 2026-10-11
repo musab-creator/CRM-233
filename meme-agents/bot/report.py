@@ -323,6 +323,12 @@ def _finite(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and math.isfinite(v) else None
 
 
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    n = len(xs)
+    return None if not n else xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
 def _open_row(p: dict, s: Settings) -> dict:
     """An open position plus what its sales so far realized: the proceeds minus the cost of the share
     of tokens sold. A runner has banked its take-profit and core sales while it stays open for days
@@ -350,6 +356,62 @@ def _open_banked(rows: list[dict]) -> dict | None:
     usd = [r["banked_usd"] for r in banked]
     return {"n": len(banked), "sol": math.fsum(r["banked_sol"] for r in banked),
             "usd": math.fsum(usd) if all(u is not None for u in usd) else None}
+
+
+async def execution_gap(db: Database, s: Settings) -> dict | None:
+    """Each closed real trade against its own shadow: the same coin and decision, the shadow filled and sold
+    at the paper rules' prices. The gap is what live execution cost (later fills, real slippage, the
+    priority fees) and nothing else, since the selection is identical. 11 Oct: live trades lost about
+    -31% a trade against about -20% for the shadow rows matching the live gate, and whether that gap is
+    execution or selection decides where to work."""
+    reals = await db.fetchall(
+        "SELECT id, candidate_id, cost_sol, pnl_sol, entry_price, exit_reason, sol_usd_entry FROM positions "
+        "WHERE kind='real' AND status='closed' AND (mode=? OR mode IS NULL) AND candidate_id IS NOT NULL "
+        "ORDER BY closed_at, id", [s.MODE])
+    reals = [p for p in reals if (_finite(p["cost_sol"]) or 0) > 0 and _finite(p["pnl_sol"]) is not None]
+    if not reals:
+        return None
+    wanted = {p["candidate_id"] for p in reals}
+    shadows: dict[int, dict] = {}
+    for q in await db.fetchall(
+            "SELECT candidate_id, cost_sol, pnl_sol, entry_price, exit_reason FROM positions WHERE kind='shadow' "
+            "AND status='closed' AND candidate_id IS NOT NULL AND id NOT IN (" + SPIKED_SHADOWS_SQL + ") "
+            "ORDER BY closed_at, id"):
+        if q["candidate_id"] in wanted and (_finite(q["cost_sol"]) or 0) > 0 and _finite(q["pnl_sol"]) is not None:
+            shadows[q["candidate_id"]] = {"ret": q["pnl_sol"] / q["cost_sol"], "entry_price": q["entry_price"],
+                                          "exit": q["exit_reason"] or "?", "open": False}   # the latest one
+    for q in await _open_runners(db, s):
+        if q["candidate_id"] in wanted and q["candidate_id"] not in shadows:
+            shadows[q["candidate_id"]] = {"ret": q["ret"], "entry_price": q["entry_price"], "exit": "open runner",
+                                          "open": True}
+    gaps, entry_gaps, usd = [], [], []
+    same = shadow_won = real_won = opened = 0
+    for p in reals:
+        sh = shadows.get(p["candidate_id"])
+        if sh is None:
+            continue
+        real_ret = p["pnl_sol"] / p["cost_sol"]
+        gap = real_ret - sh["ret"]
+        gaps.append((gap, gap * p["cost_sol"]))
+        rate = _finite(p["sol_usd_entry"])
+        usd.append(gap * p["cost_sol"] * rate if rate and rate > 0 else None)
+        e_real, e_sh = _finite(p["entry_price"]), _finite(sh["entry_price"])
+        if e_real and e_sh and e_real > 0 and e_sh > 0:
+            entry_gaps.append(e_real / e_sh - 1)
+        same += (p["exit_reason"] or "?") == sh["exit"]
+        shadow_won += sh["ret"] > 0 >= real_ret
+        real_won += real_ret > 0 >= sh["ret"]
+        opened += sh["open"]
+    if not gaps:
+        return None
+    points = [g for g, _ in gaps]
+    n = len(points)
+    return {"n": n, "unpaired": len(reals) - n, "median_gap": _median(points),
+            "mean_gap": math.fsum(points) / n, "gap_sol": math.fsum(g for _, g in gaps),
+            "gap_usd": math.fsum(usd) if all(u is not None for u in usd) else None,
+            "median_entry_gap": _median(entry_gaps),
+            "same_exit": same, "shadow_won_real_lost": shadow_won, "real_won_shadow_lost": real_won,
+            "open_shadows": opened}
 
 
 async def build_report(db: Database, s: Settings, day: str | None = None) -> dict:
@@ -414,6 +476,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
     return {
         "generated_at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
         "mode": s.MODE,
+        "shadow_stake_usd": s.POSITION_MIN_USD,
         "data_source": "simulation" if heartbeat.get("simulated") is True else
                        "real feeds" if heartbeat.get("simulated") is False else "unrecorded",
         "legacy_unknown_mode_trades": sum(p["mode"] is None for p in closed_recorded),
@@ -431,6 +494,7 @@ async def build_report(db: Database, s: Settings, day: str | None = None) -> dic
         "shadow_with_runners": trade_metrics([p["pnl_usd"] or 0 for p in shadows] + [p["pnl_usd"] for p in runners],
                                              [p["pnl_sol"] or 0 for p in shadows] + [p["pnl_sol"] for p in runners],
                                              s.BANKROLL_USD),
+        "execution": await execution_gap(db, s),
         **_agent_section(await agent_accuracy(db, s.MODE, s)),
         "gate_sweep": gate_sweep(scored),
         "gate_sweep_open": sum(r["open"] for r in scored),
@@ -542,6 +606,7 @@ def render_text(r: dict) -> str:
         + ", ".join(f"{k} {v}" for k, v in r["funnel_day"].items()),
         f"spend: LLM ${r['spend']['llm_usd_day']:.2f}/${r['spend']['llm_budget_day']:.2f} today, "
         f"X ${r['spend']['x_usd_month']:.2f}/${r['spend']['x_budget_month']:.2f} this month",
+        *_execution_lines(r),
         "",
         "== Per-agent accuracy (BUY vote -> winner; real outcome if traded, else shadow) ==",
     ]
@@ -572,7 +637,9 @@ def render_text(r: dict) -> str:
                      + "  (lift > 1 = agent's BUYs beat the base rate; Brier 0.25 = coin flip, lower is better)")
     small = "  (small sample: n < 30, treat as noise)" if r["scored_candidates"] < 30 else ""
     gate_open = r.get("gate_sweep_open") or 0
-    lines += ["", "== Gate what-if on recorded votes (shadow outcomes, $5 each) ==" + small,
+    stake = r.get("shadow_stake_usd")
+    lines += ["", "== Gate what-if on recorded votes (shadow outcomes"
+              + (f"; a shadow stakes POSITION_MIN_USD, now ${stake:g}" if stake else "") + ") ==" + small,
               "(analyst BUY alone = what the neutral gate selects before Scout or Hunter remove anything)"]
     if gate_open:
         lines.append(f"(includes {gate_open} open runner{'s' if gate_open != 1 else ''} at today's price, counted in "
@@ -613,8 +680,8 @@ def render_text(r: dict) -> str:
                          f"ret {_f(a['avg_return'], '{:+.1%}'):>7s}  |  clear: n {b['n']:>3d} win "
                          f"{_f(b['win_rate'], '{:.0%}'):>4s} ret {_f(b['avg_return'], '{:+.1%}'):>7s}")
     sh = r["shadow"]
-    lines += ["", f"shadow book (every evaluated candidate): {sh['closed_trades']} closed, "
-              f"win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]
+    lines += ["", "== Shadow book: every evaluated candidate under the bot's exits ==",
+              f"{sh['closed_trades']} closed, win rate {_f(sh['win_rate'], '{:.1%}')}, PnL ${sh['pnl_usd']:+.2f}"]
     run, both = r.get("shadow_runners") or {}, r.get("shadow_with_runners") or {}
     if run.get("n"):
         lines += [f"+ {run['n']} open runner{'s' if run['n'] != 1 else ''} at today's price: {run['wins']} up, "
@@ -673,6 +740,49 @@ def render_text(r: dict) -> str:
             lines.append(f"cand {d['id']:<4} {(d['symbol'] or '')[:10]:<10} {d['decision']:<4} "
                          f"mean conf {_f(d['mean_confidence'], '{:.2f}')}  {d['gate_reason']}")
     return "\n".join(lines)
+
+
+def _execution_lines(r: dict) -> list[str]:
+    """The real trades against their own shadows: what execution cost, selection held equal."""
+    x = r.get("execution")
+    if not x:
+        return []
+    word = "live" if r.get("mode") == "live" else "paper"
+    usd = f" / ${x['gap_usd']:+.2f}" if x.get("gap_usd") is not None else ""
+    entry = (f"; it bought a median {x['median_entry_gap']:+.1%} from the shadow's entry price"
+             if x.get("median_entry_gap") is not None else "")
+    unpaired = f" ({x['unpaired']} without a shadow to compare)" if x.get("unpaired") else ""
+    opened = (f"; {x['open_shadows']} shadow{'s' if x['open_shadows'] != 1 else ''} still open as a runner, "
+              "at today's price" if x.get("open_shadows") else "")
+    return ["", "== Real trades against their own shadows (same coin, same decision; the shadow ran the paper rules) ==",
+            f"{x['n']} pairs{unpaired}: the {word} trade returned a median {x['median_gap'] * 100:+.1f} points against "
+            f"its shadow (mean {x['mean_gap'] * 100:+.1f}){entry}; at the {word} stake that is "
+            f"{x['gap_sol']:+.4f} SOL{usd}",
+            f"same exit on both {x['same_exit']} of {x['n']}; the shadow won where the {word} trade lost "
+            f"{x['shadow_won_real_lost']}; the {word} trade won where the shadow lost {x['real_won_shadow_lost']}{opened}"]
+
+
+SECTIONS = (("summary", "== Closed trades (all time) =="), ("day", "== Day "), ("execution", "== Real trades against"),
+            ("agents", "== Per-agent accuracy"), ("gate", "== Gate what-if"), ("signals", "== Signal check"),
+            ("flags", "== Triage's bundling flags"), ("shadows", "== Shadow book"), ("moonshots", "== Moonshot tracker"),
+            ("dips", "== Dips before the run"), ("insiders", "== Insider sells"), ("wallets", "== Wallet memory"),
+            ("open", "== Open =="), ("trades", "== Closed trades =="), ("decisions", "== Recent gate decisions =="))
+
+
+def report_section(text: str, name: str) -> str:
+    """One section of the rendered report, by name (/report insiders on the phone: the whole report is several
+    Telegram messages). An unknown name lists the names; a section the report lacks right now says so."""
+    key = name.strip().lower()
+    prefix = dict(SECTIONS).get(key)
+    if not prefix:
+        return "/report takes one of: " + ", ".join(k for k, _ in SECTIONS)
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("== ")]
+    for n, i in enumerate(starts):
+        if lines[i].startswith(prefix):
+            end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+            return "\n".join(lines[i:end]).strip()
+    return f"the report has no {key} section right now"
 
 
 def render_markdown(r: dict) -> str:

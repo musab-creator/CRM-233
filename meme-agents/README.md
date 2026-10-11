@@ -57,7 +57,7 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
 | `python -m bot acceptance [--minutes 60] [--sim]` | The brief's "Done when" test: runs paper mode for N minutes, then checks crash-free, at least one full decision cycle (three error-free votes inside the run), and that the report runs. Only a real-data run of 60 minutes or more can PASS; `--sim` and shorter runs come back INCOMPLETE. Writes `reports/acceptance-*.md` with the pipeline funnel. |
 | `python -m bot live-check` | Run the live-mode startup checks and exit |
 | `touch STOP` | Kill switch: stops new entries and closes every open position. Remove the file to resume entries. |
-| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON, moonshots and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report`, `/moonshots` (every evaluated coin's confirmed peak over the 14 days after the bot saw it: how many went 10x/100x/500x, and whether the bot bought, passed, vetoed or skipped them at triage), `/trades`, `/why [id or address]` (every vote on the latest decision, on decision #id, or on the coin whose address starts with the given 6+ letters, with its reasons, what its positions did and when an insider warning fired; trade and insider lines number positions, so look those coins up by address), `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
+| Telegram `/panel` | The control panel: buttons for status, digest, report, trades, log, settings, pause, resume, stop, update, restart, dry run ON, moonshots and ops (the destructive ones ask to confirm). The same as commands: `/status`, `/digest`, `/report [section]` (the whole report, or one of its sections: `insiders`, `dips`, `moonshots`, `gate`, `signals`, `shadows`, `execution`, `agents`, `wallets`, `open`, `trades`), `/moonshots` (every evaluated coin's confirmed peak over the 14 days after the bot saw it: how many went 10x/100x/500x, and whether the bot bought, passed, vetoed or skipped them at triage), `/trades`, `/why [id or address]` (every vote on the latest decision, on decision #id, or on the coin whose address starts with the given 6+ letters, with its reasons, what its positions did and when an insider warning fired; trade and insider lines number positions, so look those coins up by address), `/log [n]`, `/settings` (read-only), `/pause` (no new entries, positions keep running), `/resume`, `/stop` (kill switch), `/update` (deploy the latest tested code and restart), `/restart`, `/set KEY=VALUE` (bounded operational settings; `/set` alone lists them), `/dryrun on` (live mode stops sending, one way), `/ops` (queued and finished actions), `/help`. Only `TELEGRAM_CHAT_ID` is answered. The server actions need the ops service (`deploy/install.sh --ops`, see [deploy/VPS.md](deploy/VPS.md)); keys, `MODE`, `LIVE_CONFIRM`, the wallet cap and `LIVE_DRY_RUN=false` change only in `.env` on the server. `TELEGRAM_COMMANDS=false` turns this off. |
 
 ## How a token moves through the pipeline
 
@@ -216,8 +216,9 @@ including SSH, a user for the bot, the firewall and a private-repo clone. In sho
      kind of refusal (its numbers aside) per 15 minutes, with a count of the ones refused in
      between; every refusal is logged
 
-Every evaluated candidate also gets a **shadow position**: a $5 paper position with no bankroll
-that runs through the same exit rules. This gives every vote an outcome, even when the token
+Every evaluated candidate also gets a **shadow position**: a paper position of `POSITION_MIN_USD`
+($5 by default) with no bankroll that runs through the same exit rules, except that a shadow is
+never sold on insider sells (it is the report's measure of what holding through them does). This gives every vote an outcome, even when the token
 was never traded, so the report can score each agent's BUY votes separately.
 
 ## Is the LLM worth it? Reading the report
@@ -239,6 +240,16 @@ model. Every evaluated candidate has a shadow outcome, so it can show:
 - **Signal check.** For each flow feature, it compares the outcomes of candidates above and
   below the median, which shows which signals actually separate winners from losers in your
   data.
+- **Real trades against their own shadows.** Each closed real trade is paired with the shadow of
+  the same coin and decision, which filled and sold at the paper rules' prices. The selection is
+  identical, so the gap (median and mean, in points, and in SOL at the real stake) is what live
+  execution cost: later fills, real slippage, the priority fees. The line also says how often both
+  ended for the same reason and how often one won where the other lost.
+- **Insider sells and the coins that ran.** Under the insider section's what-if rows, for the coins
+  the watch covered that reached 2x and 10x: how many the insider exit would have sold at each
+  threshold, because the insiders' net sales crossed it while the position was open and not yet a
+  runner, with the median price of those sales. Snipers taking profit on the way up look like a
+  dump to the rule; this is the cost of a low threshold on the coins the bot is hunting.
 - **Open runners at today's price.** A runner keeps its last tokens for up to
   `RUNNER_MAX_HOLD_HOURS` (a week), so its result stays out of every closed-trade figure for
   days. The report values each open runner at its last mark: its sales so far plus what the
@@ -274,7 +285,8 @@ Any sample under 30 is flagged as noise. Don't tune on it.
   - DEGRADED: the last 6 agent votes all failed, for example because the Anthropic key expired.
 - **Telegram control panel.** With Telegram set up, the bot long-polls its own messages (no open
   port). `/panel` shows buttons; the commands behind them are `/status` (in live mode with the
-  wallet's balance), `/digest` (this hour so far), `/report`, `/moonshots` (which evaluated coins went 10x/100x/500x), `/trades`,
+  wallet's balance), `/digest` (this hour so far), `/report [section]` (one section at a time on the
+  phone: `/report insiders`), `/moonshots` (which evaluated coins went 10x/100x/500x), `/trades`,
   `/why [id or address]`, `/log [n]`, `/settings` (read-only), `/pause` (no new entries; open
   positions keep their exits), `/resume` (clears a Telegram pause and the STOP file, never the
   bot's own loss-cap pause), `/stop` (writes the STOP file) and `/help`, only from

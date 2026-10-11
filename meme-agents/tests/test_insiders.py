@@ -232,7 +232,7 @@ def test_a_failed_write_never_keeps_the_insider_sale_from_happening(s):
                     raise RuntimeError("database is locked")             # the first attempt fails outright
                 return await orig_exit(pid, note)
             pm.insider_exit = flaky
-            await w.on_transaction(_tx("SNIPER", -1.2, -25e6, sig="DUMP1"))   # 2.5%: real fails, shadow sells
+            await w.on_transaction(_tx("SNIPER", -1.2, -25e6, sig="DUMP1"))   # 2.5%: the real sale fails
             first = real.pending_exit
             await w.on_transaction(_tx("SNIPER", -0.2, -2e6, sig="DUMP2"))    # the next insider sale tries again
             return real, shadow, first, calls
@@ -240,7 +240,7 @@ def test_a_failed_write_never_keeps_the_insider_sale_from_happening(s):
             await db.close()
     real, shadow, first, calls = asyncio.run(go())
     assert first is None and real.pending_exit == "emergency_insider_sell"
-    assert shadow.pending_exit == "emergency_insider_sell" and calls == [real.id, shadow.id, real.id]
+    assert shadow.pending_exit is None and calls == [real.id, real.id]       # a shadow is never sold on them
 
 
 def test_insider_exit_leaves_a_queued_full_sale_alone_and_waits_for_an_unsettled_buy(s):
@@ -303,7 +303,33 @@ def test_switching_insider_exit_on_sells_positions_that_crossed_before_the_resta
             await db.close()
     real, shadow, quiet, second = asyncio.run(go())
     assert quiet.stats["warnings"] == 0 and quiet.stats["exits"] == 0
-    assert real.pending_exit == shadow.pending_exit == "emergency_insider_sell" and second.stats["exits"] == 2
+    assert real.pending_exit == "emergency_insider_sell" and second.stats["exits"] == 1
+    assert shadow.status == "open" and shadow.pending_exit is None          # the shadow keeps measuring holding
+
+
+def test_a_shadow_holds_through_insider_sells_so_the_report_keeps_its_comparison(s, caplog):
+    """11 Oct: with INSIDER_EXIT on, shadows were sold at the line too, so the report's rows at and above it
+    compared the exit with itself. A shadow is only ever warned; the real position sells."""
+    s.INSIDER_EXIT = True
+
+    async def go():
+        db = await Database(s.DB_PATH).open()
+        try:
+            pm, real, shadow = await _book(s, db)
+            w = InsiderWatch(s, db, pm, lambda m: CURVE)
+            w._watch = await w.targets()
+            with caplog.at_level("INFO", logger="bot.insiders"):
+                await w.on_transaction(_tx("SNIPER", -1.2, -25e6, sig="DUMP"))
+            await w.on_transaction(_tx("SNIPER", -0.2, -2e6, sig="DUMP2"))   # handled: not warned again
+            return real, shadow, w, await _rows(db, shadow.id)
+        finally:
+            await db.close()
+    real, shadow, w, rows = asyncio.run(go())
+    assert real.pending_exit == "emergency_insider_sell"
+    assert shadow.status == "open" and shadow.pending_exit is None
+    assert w.stats["warnings"] == 2 and w.stats["exits"] == 1
+    assert len([r for r in rows if r["side"] == "sell"]) == 2                 # its insider sales are still recorded
+    assert sum("a shadow holds, for the report" in m for m in caplog.messages) == 1
 
 
 class FakeWS:
@@ -581,14 +607,31 @@ def test_the_report_shows_what_selling_at_the_warning_would_have_done(s):
             await fill(d, t0 + 20, "core_trailing_stop", 1.5e-7, 200_000, 0.028)
             await fill(d, t0 + 900, "runner_target", 1e-6, 50_000, 0.024)
             e = await position("shadow", 0.05, 500_000, 0.04, t0 + 100)   # an insider only bought
-            for pid in (a, b, c, d, e):
-                await db.insert("insider_watch", {"position_id": pid, "mint": "x", "kind": "shadow",
+            # two more coins that ran: Y's shadow is an open runner whose insiders sold only once it was a
+            # runner (the exit would have left it), Z reached 2x after its insiders sold 0.7%
+            y = await db.insert("positions", {"kind": "shadow", "mint": "y", "status": "open", "cost_sol": 0.05,
+                                              "tokens_initial": 500_000, "tokens_remaining": 50_000,
+                                              "proceeds_sol": 0.066, "entry_price": 1e-7, "last_price": 1.5e-6,
+                                              "runner_active": 1, "sol_usd_entry": 200.0, "opened_at": t0})
+            await fill(y, t0 + 10, "take_profit", 1.6e-7, 250_000, 0.038)
+            await fill(y, t0 + 20, "core_trailing_stop", 1.5e-7, 200_000, 0.028)
+            z = await db.insert("positions", {"kind": "shadow", "mint": "z", "status": "closed", "cost_sol": 0.05,
+                                              "tokens_initial": 500_000, "proceeds_sol": 0.07, "pnl_sol": 0.02,
+                                              "entry_price": 1e-7, "opened_at": t0, "closed_at": t0 + 400})
+            await fill(z, t0 + 400, "trailing_stop", 1.5e-7, 500_000, 0.07)
+            for mint, peak in (("x", 1.2e-6), ("y", 1.5e-6), ("z", 3e-7)):
+                await db.insert("moonshots", {"mint": mint, "ref_price": 1e-7, "ref_at": t0, "peak_price": peak,
+                                              "peak_at": t0 + 3600, "readings": 3, "first_at": t0 + 900})
+            for pid, mint in ((a, "x"), (b, "x"), (c, "x"), (d, "x"), (e, "x"), (y, "y"), (z, "z")):
+                await db.insert("insider_watch", {"position_id": pid, "mint": mint, "kind": "shadow",
                                                   "started_at": t0 - 5})
-            for pid, ts, side, price, cum in ((a, t0 + 60, "sell", 9e-8, 0.6), (a, t0 + 90, "buy", 9.5e-8, 0.0),
-                                              (a, t0 + 120, "sell", 8e-8, 2.4), (b, t0 + 30, "sell", 1.2e-7, 2.5),
-                                              (d, t0 + 30, "sell", 1e-7, 3.0), (e, t0 + 50, "buy", 1e-7, 0.0),
-                                              (a, t0 + 900, "sell", 1e-9, 9.0)):   # after A closed: never counts
-                await db.insert("insider_trades", {"position_id": pid, "mint": "x", "ts": ts, "side": side,
+            for pid, mint, ts, side, price, cum in (
+                    (a, "x", t0 + 60, "sell", 9e-8, 0.6), (a, "x", t0 + 90, "buy", 9.5e-8, 0.0),
+                    (a, "x", t0 + 120, "sell", 8e-8, 2.4), (b, "x", t0 + 30, "sell", 1.2e-7, 2.5),
+                    (d, "x", t0 + 30, "sell", 1e-7, 3.0), (e, "x", t0 + 50, "buy", 1e-7, 0.0),
+                    (a, "x", t0 + 900, "sell", 1e-9, 9.0),              # after A closed: never counts
+                    (y, "y", t0 + 30, "sell", 1.4e-7, 1.5), (z, "z", t0 + 40, "sell", 1.1e-7, 0.7)):
+                await db.insert("insider_trades", {"position_id": pid, "mint": mint, "ts": ts, "side": side,
                                                    "wallet": "W", "roles": "sniper", "tokens": 1, "sol": 0.1,
                                                    "price": price, "cum_supply_pct": cum})
             await db.kv_set("insider_watch_error", json.dumps({"at": t0, "error": "Helius refused the trade "
@@ -597,7 +640,7 @@ def test_the_report_shows_what_selling_at_the_warning_would_have_done(s):
         finally:
             await db.close()
     m = asyncio.run(go())
-    assert m["closed"] == 5 and m["with_sells"] == 3 and m["acting"] is False
+    assert m["closed"] == 6 and m["with_sells"] == 4 and m["acting"] is False
     rows = {r["threshold"]: r for r in m["rows"]}
     a_2 = exit_fill(500_000, 8e-8, s, urgent=True).sol            # A sells everything at its 2.4% sale
     b_2 = 0.038 + exit_fill(250_000, 1.2e-7, s, urgent=True).sol  # B keeps its take-profit, sells the rest
@@ -606,10 +649,26 @@ def test_the_report_shows_what_selling_at_the_warning_would_have_done(s):
     assert r2["actual"] == pytest.approx((-0.031 / 0.05 + 0.02 / 0.05) / 2)
     assert r2["if_sold"] == pytest.approx((a_2 / 0.05 - 1 + b_2 / 0.05 - 1) / 2)
     assert r2["delta_sol"] == pytest.approx(a_2 - 0.019 + b_2 - 0.07)
-    assert rows[0.5]["n"] == 2 and rows[3.0]["n"] == 0
+    assert rows[0.5]["n"] == 3 and rows[3.0]["n"] == 0                # Z counts at 0.5%, not at 2%
+    # the coins that ran: X and Y reached 10x, Z 3x; the exit would have sold X at up to 2% (A and B crossed
+    # before any runner), Z at 0.5% only, Y never (its insiders sold once it was a runner)
+    runs = {r["multiple"]: r for r in m["runs"]}
+    assert runs[2]["coins"] == 3 and runs[10]["coins"] == 2
+    sold = {(x, c["threshold"]): c for x, r in runs.items() for c in r["sold"]}
+    assert [sold[(10, t)]["n"] for t in (0.5, 1.0, 2.0, 3.0, 5.0)] == [1, 1, 1, 0, 0]
+    assert [sold[(2, t)]["n"] for t in (0.5, 1.0, 2.0, 3.0, 5.0)] == [2, 1, 1, 0, 0]
+    a_half = exit_fill(500_000, 9e-8, s, urgent=True).sol / 0.05 - 1  # X's worst sale at 0.5%: A at its 0.6% sale
+    z_half = exit_fill(500_000, 1.1e-7, s, urgent=True).sol / 0.05 - 1
+    assert sold[(10, 0.5)]["median_ret"] == pytest.approx(a_half)
+    assert sold[(2, 0.5)]["median_ret"] == pytest.approx((a_half + z_half) / 2)
+    assert sold[(10, 3.0)]["median_ret"] is None
     text = "\n".join(insider_lines(m))
     assert "== Insider sells after the buy (exits on them: off, watching only) ==" in text
-    assert "5 watched positions closed, 3 saw an insider sell after the buy" in text
+    assert "6 watched positions closed, 4 saw an insider sell after the buy" in text
+    assert ("would the exit have sold the coins that ran? (of the coins the watch covered: 3 reached 2x, "
+            "2 reached 10x; sold = the insiders crossed the line while the position was open and not yet a runner)") in text
+    assert f"  at 0.5%: 2x: 2 of 3 (median sale {(a_half + z_half) / 2:+.0%}) | 10x: 1 of 2 (median sale {a_half:+.0%})" in text
+    assert "  at 3%: 2x: 0 of 3 | 10x: 0 of 2" in text
     assert "stream: Helius refused the trade subscription: Method not found (since 11-14 22:13 UTC)" in text
     assert ">= 2   % of supply" in text and ">= 3" not in text
     assert insider_lines({"enabled": False}) == []
@@ -693,7 +752,7 @@ def test_an_insider_sale_that_could_not_be_queued_is_retried_at_the_next_refresh
             await db.close()
     real, waiting, w = asyncio.run(go())
     assert waiting is None and real.pending_exit == "emergency_insider_sell"
-    assert w.stats["warnings"] == 2 and w.stats["exits"] == 2          # each position counted once
+    assert w.stats["warnings"] == 2 and w.stats["exits"] == 1          # each counted once; the shadow is only warned
 
 
 def test_why_finds_a_coin_by_its_address_and_shows_when_the_insider_warning_fired(tmp_path):

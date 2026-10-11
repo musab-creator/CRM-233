@@ -43,7 +43,7 @@ from .ops import (
     validate_set,
     watcher_alive,
 )
-from .report import _open_row, build_report, render_text
+from .report import _open_row, build_report, render_text, report_section
 from .risk import kill_switch_active
 from .status import build_status, health
 from .telegram import Telegram, TelegramConflict
@@ -55,7 +55,8 @@ COMMANDS: list[tuple[str, str]] = [
     ("panel", "buttons for everything below"),
     ("status", "what the bot is doing right now"),
     ("digest", "this hour so far: trades, open positions, spend"),
-    ("report", "the full report, all time and today"),
+    ("report", "/report [section]: the full report, or one section: insiders, dips, moonshots, gate, signals, "
+               "shadows, execution, agents, wallets, open, trades"),
     ("moonshots", "every evaluated coin's peak over 14 days: which went 10x/100x/500x and what the bot did"),
     ("trades", "the last closed trades"),
     ("why", "/why [id or address]: every vote on the latest decision, on decision #id, or on the coin whose "
@@ -152,7 +153,8 @@ class TelegramCommands:
             text, _ = await hourly_digest(self.db, self.s, hour_start(now), now)
             return text, None
         if name == "report":
-            return render_text(await build_report(self.db, self.s)), None
+            text = render_text(await build_report(self.db, self.s))
+            return (report_section(text, arg) if arg.strip() else text), None
         if name == "moonshots":
             if self.s.MOONSHOT_TRACK_DAYS <= 0:
                 return "the moonshot tracker is off (MOONSHOT_TRACK_DAYS=0 in .env)", None

@@ -23,9 +23,12 @@ restart) the curves of real positions are read back, and a previous run's rows a
 
 INSIDER_EXIT=false (the default) only records, and /report shows what selling at the warning would
 have returned against what each position did. With INSIDER_EXIT=true, once the insiders' net sales
-since entry reach INSIDER_EXIT_SUPPLY_PCT of the supply the position is sold as an emergency
+since entry reach INSIDER_EXIT_SUPPLY_PCT of the supply a real position is sold as an emergency
 (emergency_insider_sell), also when that happened before a restart. A runner, whose cost is already
-covered, ignores insider sales as it ignores the stop loss.
+covered, ignores insider sales as it ignores the stop loss. A shadow is never sold on them: it holds
+through the insiders' selling under the ordinary exits, so the report keeps comparing a sale at the
+warning with what holding did on every coin (11 Oct: with shadows sold at the line too, the rows at
+and above it compared the exit with itself).
 """
 from __future__ import annotations
 
@@ -334,15 +337,17 @@ class InsiderWatch:
 
     async def _crossed(self, w: Watched, note: str, quiet: bool = False) -> None:
         """The insiders' net sales since entry reached INSIDER_EXIT_SUPPLY_PCT. INSIDER_EXIT=false logs it;
-        true sells the position. It counts as handled only once that happened, so a failed write or a sale
-        that cannot be queued yet is tried again at the next insider trade or refresh."""
+        true sells a real position (a shadow only records it: it is the report's measure of holding). It
+        counts as handled only once that happened, so a failed write or a sale that cannot be queued yet is
+        tried again at the next insider trade or refresh."""
         if not quiet and w.position_id not in self._counted:
             self._counted.add(w.position_id)
             self.stats["warnings"] += 1
-        if not self.s.INSIDER_EXIT:
+        if not self.s.INSIDER_EXIT or w.kind != "real":
             self._handled.add(w.position_id)
             if not quiet:
-                log.info("INSIDER WARNING #%d %s (%s, not acted on: INSIDER_EXIT=false)", w.position_id, w.mint, note)
+                log.info("INSIDER WARNING #%d %s (%s, not acted on: %s)", w.position_id, w.mint, note,
+                         "INSIDER_EXIT=false" if not self.s.INSIDER_EXIT else "a shadow holds, for the report")
             return
         try:
             done = await self.positions.insider_exit(w.position_id, note)
@@ -568,20 +573,27 @@ def _warning_outcome(s: Settings, pos: dict, fills: list[dict], trades: list[dic
             "delta_sol": proceeds - (pos["proceeds_sol"] or 0)}
 
 
+RUN_MULTIPLES = (2, 10)      # report: the coins that ran this far, and whether the exit would have sold them first
+
+
 async def insider_summary(db: Database, s: Settings) -> dict:
-    """Closed watched positions and, per threshold, what selling at the warning would have done."""
-    rows = await db.fetchall(
-        "SELECT p.id, p.kind, p.cost_sol, p.tokens_initial, p.proceeds_sol, p.pnl_sol, p.closed_at, w.started_at "
-        "FROM insider_watch w JOIN positions p ON p.id=w.position_id "
-        "WHERE p.status='closed' AND p.cost_sol > 0 AND p.pnl_sol IS NOT NULL")
+    """Closed watched positions and, per threshold, what selling at the warning would have done; and, for the
+    coins that went on to run 2x and 10x (moonshots.items), how many of those the exit would have sold at
+    each threshold: the insiders' net sales crossed it while the bot's position was open and before it was a
+    runner, so the whole position would have gone, at the what-if's price (11 Oct: "I'm looking for the 500x",
+    and snipers taking profit on the way up would look the same as a dump)."""
+    watched = await db.fetchall(
+        "SELECT p.id, p.mint, p.kind, p.status, p.cost_sol, p.tokens_initial, p.proceeds_sol, p.pnl_sol, p.closed_at, "
+        "w.started_at FROM insider_watch w JOIN positions p ON p.id=w.position_id WHERE p.cost_sol > 0")
+    rows = [p for p in watched if p["status"] == "closed" and p["pnl_sol"] is not None]
     since = await db.fetchone("SELECT MIN(started_at) t FROM insider_watch")
     err = await db.kv_get("insider_watch_error")
     out = {"enabled": s.INSIDER_WATCH, "acting": s.INSIDER_EXIT, "threshold": s.INSIDER_EXIT_SUPPLY_PCT,
            "since": since["t"] if since else None, "closed": len(rows), "with_sells": 0, "rows": [],
-           "error": json.loads(err) if err else None}
+           "error": json.loads(err) if err else None, "runs": []}
     fills: dict[int, list[dict]] = defaultdict(list)
     trades: dict[int, list[dict]] = defaultdict(list)
-    if rows:
+    if watched:
         for f in await db.fetchall("SELECT f.position_id, f.ts, f.tokens, f.sol, f.reason FROM fills f "
                                    "JOIN insider_watch w ON w.position_id=f.position_id WHERE f.side='sell' "
                                    "ORDER BY f.ts, f.id"):
@@ -590,11 +602,11 @@ async def insider_summary(db: Database, s: Settings) -> dict:
                                    "JOIN insider_watch w ON w.position_id=t.position_id ORDER BY t.ts, t.id"):
             trades[t["position_id"]].append(t)
     by_pos: dict[int, list[dict]] = {}
-    for p in rows:
+    for p in watched:
         mine = [t for t in trades.get(p["id"], []) if p["closed_at"] is None or (t["ts"] or 0) <= p["closed_at"]]
         if any(t["side"] == "sell" for t in mine):
             by_pos[p["id"]] = mine
-    out["with_sells"] = len(by_pos)
+    out["with_sells"] = sum(1 for p in rows if p["id"] in by_pos)
     for t in THRESHOLDS:
         res = [r for p in rows if p["id"] in by_pos
                and (r := _warning_outcome(s, p, fills.get(p["id"], []), by_pos[p["id"]], t)) is not None]
@@ -604,6 +616,36 @@ async def insider_summary(db: Database, s: Settings) -> dict:
                             "if_sold": sum(r["ret"] for r in res) / n if n else None,
                             "won_anyway": sum(1 for r in res if r["actual"] > 0),
                             "delta_sol": sum(r["delta_sol"] for r in res)})
+    out["runs"] = await _runs_sold(db, s, watched, fills, by_pos) if watched else []
+    return out
+
+
+async def _runs_sold(db: Database, s: Settings, watched: list[dict], fills: dict, by_pos: dict) -> list[dict]:
+    """Per run multiple: the coins the watch covered that reached it, and per threshold how many of them the
+    exit would have sold (any watched position on the coin crossing before it was a runner), with the median
+    what-if return of those sales. Open positions count: the runners holding today's moonshots are open."""
+    from .moonshots import items as moonshot_items          # moonshots imports nothing from here
+    peaks = {it["mint"]: it["multiple"] for it in await moonshot_items(db, s)}
+    by_mint: dict[str, list[dict]] = defaultdict(list)
+    for p in watched:
+        if p["mint"] in peaks:
+            by_mint[p["mint"]].append(p)
+    out = []
+    for x in RUN_MULTIPLES:
+        coins = [m for m in by_mint if peaks[m] >= x]
+        sold = []
+        for t in THRESHOLDS:
+            rets = []
+            for m in coins:
+                hits = [r for p in by_mint[m] if p["id"] in by_pos
+                        and (r := _warning_outcome(s, p, fills.get(p["id"], []), by_pos[p["id"]], t)) is not None]
+                if hits:
+                    rets.append(min(h["ret"] for h in hits))
+            rets.sort()
+            n = len(rets)
+            sold.append({"threshold": t, "n": n,
+                         "median_ret": None if not n else rets[n // 2] if n % 2 else (rets[n // 2 - 1] + rets[n // 2]) / 2})
+        out.append({"multiple": x, "coins": len(coins), "sold": sold})
     return out
 
 
@@ -616,7 +658,7 @@ def insider_lines(m: dict | None) -> list[str]:
         return datetime.fromtimestamp(ts, timezone.utc).strftime("%m-%d %H:%M UTC")
     since = at(m["since"]) if m.get("since") else "not yet"
     lines = ["", f"== Insider sells after the buy (exits on them: "
-                 f"{'ON at ' + format(m['threshold'], 'g') + '% of supply' if m.get('acting') else 'off, watching only'}) ==",
+                 f"{'ON at ' + format(m['threshold'], 'g') + '% of supply, real positions; shadows hold' if m.get('acting') else 'off, watching only'}) ==",
              f"watching since {since}: {m['closed']} watched positions closed, {m['with_sells']} saw an insider "
              f"sell after the buy"]
     err = m.get("error")
@@ -633,4 +675,16 @@ def insider_lines(m: dict | None) -> list[str]:
     lines.append("(net: each insider's sales minus its buys since the buy. If sold then: an urgent sale at the curve's "
                  "price right after the warning sale, after fees, before any later selling, so optimistic in a fast "
                  "dump; runners by then excluded. SOL vs actual > 0: selling at the warning would have kept more)")
+    runs = [r for r in m.get("runs") or [] if r["coins"]]
+    if runs:
+        lines.append("would the exit have sold the coins that ran? (of the coins the watch covered: "
+                     + ", ".join(f"{r['coins']} reached {r['multiple']}x" for r in runs)
+                     + "; sold = the insiders crossed the line while the position was open and not yet a runner)")
+        for t in THRESHOLDS:
+            cells = []
+            for r in runs:
+                c = next(c for c in r["sold"] if c["threshold"] == t)
+                med = f" (median sale {c['median_ret']:+.0%})" if c["median_ret"] is not None else ""
+                cells.append(f"{r['multiple']}x: {c['n']} of {r['coins']}{med}")
+            lines.append(f"  at {t:g}%: " + " | ".join(cells))
     return lines
